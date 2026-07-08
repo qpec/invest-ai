@@ -90,4 +90,4 @@ Deleted: 2 trigger types (euphoria, milestone) · 1 trigger cadence value (`date
 Clarified/pinned: owner-FCF definition · anchor restricted to P_FCF · fcf_ttm and net-debt/EBITDA row pinning · fair_band_mid · BOOTSTRAPPING state · available-period honesty · denominator suspension rules · non-mappable-instrument contract · filings/calendar honesty · officer-diff verification precondition · NFR2 rule · pause-mode scope · daily-letter mode.
 Added (the only additions, all Constitution-mandated): moat_link rule (one field + one activation rule) · conviction-sizing table (one config row) · weekly dividends line (one report line).
 
-**Still open for the owner:** NAV-2 (question budget), NAV-3 (Playbook), NAV-4 (unified circle config), FS-F1 (single config page), and NAV-1's recommendation that ingestion automation be the first technology milestone.
+**Owner decision 2026-07-08:** the proposals that failed the adversarial test — NAV-1 (as doc change), NAV-2 (question budget), NAV-3 (Playbook), NAV-4 (unified circle config), FS-F1 (single config page) — are **not adopted**. The docket is closed; the design stands as amended.
