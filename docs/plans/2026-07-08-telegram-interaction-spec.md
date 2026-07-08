@@ -1,6 +1,6 @@
 # stock-agentcy — Telegram Interaction Specification
 
-**Status:** Spec (not code). Drafted 2026-07-08; **amended the same day by the technology-architecture judge panel** (three convictions applied: the first-come-first-served `/start` bind was replaced by a pre-provisioned owner chat-id — §1.1/§5.1; weekly delivery is headline-first — §2.2; the formatting mode is locked to HTML — §2/§8). Companion to `docs/plans/2026-07-08-technology-architecture.md`. Binding functional sources: `docs/plans/2026-07-08-architecture-elaboration.md` (components A–H, 8 invariants, loop spine, trigger taxonomy, outputs G.1–G.4, anti-complexity ledger) and `docs/plans/2026-07-08-functional-design-baseline.md` (FR1–FR14, NFR1–NFR7). Constitution: `CLAUDE.md`.
+**Status:** Spec (not code). Drafted 2026-07-08; **amended the same day by the technology-architecture judge panel** (three convictions applied: the first-come-first-served `/start` bind was replaced by a pre-provisioned owner chat-id — §1.1/§5.1/§1.7; weekly delivery is headline-first — §2.2/§5.4; the formatting mode is locked to HTML — §2/§8) **and again by the round-2 adversarial review** (ask kinds extended to {A,Q,R,F,V,N} — §3.1; the C.6 verdict follow-up flow added — §3.10a; delivery restated as FIFO-with-alerts-first, no priority classes — §5.3; the register lint scoped to template-authored spans with owner-quoted fields exempt and a decision-preserving fallback — §6.2/§8). Companion to `docs/plans/2026-07-08-technology-architecture.md`. Binding functional sources: `docs/plans/2026-07-08-architecture-elaboration.md` (components A–H, 8 invariants, loop spine, trigger taxonomy, outputs G.1–G.4, anti-complexity ledger) and `docs/plans/2026-07-08-functional-design-baseline.md` (FR1–FR14, NFR1–NFR7). Constitution: `CLAUDE.md`.
 
 **What this document decides:** the exact shape of every Telegram message the bot sends, every button the owner can tap, the callback-data grammar that carries stable ask-IDs, how free-text evidence is captured and journaled, and the security/delivery/degradation behavior. It does NOT decide runtime code structure, DB schema, or the desk-side Claude Code authoring flows (out of scope — Gate prose, Scout screens, Study restudy all enter as owner-typed data, never via the bot).
 
@@ -167,7 +167,7 @@ Terse. Lists the six commands with one calm line each and restates the cadence. 
 
 | Command | Purpose | Justification (why it earns a slot) | Writes state? |
 |---|---|---|---|
-| `/start` | Pair + orient | Must bind the owner chat-id once; idempotent thereafter | Config (bind, once) |
+| `/start` | Orient (chat-id pre-provisioned at install) | Idempotent orientation card; re-binding is a desk-side EnvironmentFile edit (§1.1 amended) | No |
 | `/status` | Pull calm state now | Daily letter is point-in-time; owner may check between letters | No (reads RunLog) |
 | `/pause` / `/resume` | Absence mode (D.6) | Freezes counters so a vacation doesn't fake "ignored" decisions | Journal + config |
 | `/event <TICKER>` | Owner-injected event (FR6) | Owner is the filings/news sensor; only channel for it | Event report + journal if fired |
@@ -237,7 +237,7 @@ The weekly review has nine sections (G.2) including a full portfolio table and a
 1. **First the numbered message series** of the *glanceable* sections, each its own `sendMessage`, so the owner gets the verdict and the decisions on-screen without opening a file. The series is capped and ordered by decision-urgency:
 
    - **Msg 1/N — Headline verdict** (G.2 §1). Celebrated if "no action needed"; UNVERIFIABLE escalations surface here. Carries the "full detail in the document that follows" pointer.
-   - **Msg 2/N — Decisions waiting** (only if any): open reviews, prompted questions due, anniversary re-affirmations due, backfill next-in-queue, broken-but-held renags. **This is the only weekly message that carries inline keyboards** — one ask per block, each with its stable-ID keyboard (§3). If nothing is waiting, this message is replaced by a single celebrated line: *"No decisions waiting. The document has the full picture when you want it."*
+   - **Msg 2/N — Decisions waiting** (only if any): open reviews, prompted questions due, anniversary re-affirmations due, backfill next-in-queue, broken-but-held renags. **This is the only weekly message that carries decision keyboards** — one ask per block, each with its stable-ID keyboard (§3). (The Study message's single optional, zero-consequence `[ Add a circle note ]` button — §3.9 — is the one sanctioned exception.) If nothing is waiting, this message is replaced by a single celebrated line: *"No decisions waiting. The document has the full picture when you want it."*
    - **Msg 3/N — Balance & concentration snapshot** (G.2 §4 compressed): cash band, position-count band, N_eff vs 4.0 floor, any breached band as a one-liner, dividend-idle reminder if applicable. The full cluster table and correlation matrix stay in the document only (a matrix does not render on a phone).
    - **Msg 4/N — The Study** (G.2 §8 / F.3): capped at one screen by its own spec. The restudy note, the one mental-model prompt, the reading-queue line. The circle-note ForceReply (§3.9) rides here if the owner chooses to answer.
 
@@ -327,7 +327,7 @@ Telegram limits `callback_data` to 64 bytes. Grammar is colon-delimited, version
 
 - `domain` ∈ { `alert`, `trig`, `recon`, `reaff`, `pause`, `evt`, `snap`, `sys`, `page` } — 2–5 chars.
 - `action` — the verb (`confirm`, `refute`, `revise`, `yes`, `no`, `cant`, `open`, `set`, `pick`, `kind`, `bind`, `nav`).
-- `ask_id` — the **stable ask identifier**, the spine of D.5. Format `<K><seq>` where `K` is a one-char kind (`A`=alert, `Q`=prompted trigger question, `R`=reconciliation, `F`=re-affirmation) and `seq` is a monotonic integer, e.g. `A238`, `Q1041`, `R77`, `F19`. The ask_id is minted when the ask is created and stored in SQLite with its enumerated option set, its thesis/trigger reference, its deadline, and its state {open, answered, reprompted, unanswered, frozen}. **The button carries only the ask_id and the chosen option** — never the payload — so 64 bytes is never at risk regardless of ticker length or free-text.
+- `ask_id` — the **stable ask identifier**, the spine of D.5. Format `<K><seq>` where `K` is a one-char kind (`A`=alert, `Q`=prompted trigger question, `R`=reconciliation, `F`=re-affirmation, `V`=verdict follow-up (§3.11), `N`=committed note — the free-text captures that fit no other kind: the circle note §3.9, the `/event` "Other" note §1.4, the snapshot text paste §1.5) and `seq` is a monotonic integer, e.g. `A238`, `Q1041`, `R77`, `F19`, `V6`, `N112`. *(Amended: the original closed set {A,Q,R,F} could not mint IDs for three free-text flows this spec itself defines.)* The ask_id is minted when the ask is created and stored in SQLite with its enumerated option set, its thesis/trigger reference, its deadline, and its state {open, answered, reprompted, unanswered, frozen}. **The button carries only the ask_id and the chosen option** — never the payload — so 64 bytes is never at risk regardless of ticker length or free-text.
 - `v<n>` — an optional grammar/version guard so a stale button from an old message can be detected and refused (§3.10).
 
 Examples:
@@ -498,6 +498,15 @@ Used by `/event` and any place the owner must choose among holdings. Buttons lis
 
 The weekly Study digest's circle-note line ("did anything expand or shrink the circle this week?") is **optional** (owner writes or skips; skipping is fine — F.3). Presented as `[ Add a circle note ]` on the Study message → ForceReply. Never chased, never escalated. This is the one free-text ask with zero consequence for silence.
 
+### 3.10a Verdict follow-up (C.6 non-execution) — ask kind `V`
+
+Minted by the weekly run when a BUY_READY verdict is ≥30 days old with no matching position in any Snapshot (elaboration C.6: "Non-execution after 30 days → prompt: journal `advice_rejected` or move to WATCH"). One message quoting the verdict date and the standing framework line, two options:
+```
+[ Journal: advice rejected ]   vfu:reject:V6    → JournalEntry advice_rejected (reasoning via ForceReply)
+[ Move to WATCH ]              vfu:watch:V6     → thesis stays draft; fair-entry check arms (C.6)
+```
+Unanswered follows the standard §3.6 path. *(Added by review — the FR8 loop for approved-but-unexecuted candidates previously had no ask kind, no minting run, and no keyboard.)*
+
 ### 3.10 Stale-button and double-tap handling
 
 Every ask edits its own message on resolution (`editMessageText`) to strip the keyboard and show the recorded choice — so a resolved ask cannot be tapped again. If an *old* message's button is somehow tapped (owner scrolls up), the callback validation (§3.1) finds the ask already answered/expired and responds via `answerCallbackQuery`: *"Already recorded as {choice}"* or *"This ask is closed"* — no state change, no confusion. The `v<n>` grammar guard rejects buttons from an incompatible template version outright.
@@ -542,7 +551,7 @@ This design satisfies the reliability requirement: the ask_id is the join key en
 
 The scheduled runs (daily/weekly/quarterly/event) are decoupled from delivery. A run **always produces its output object and archives it (SQLite + git markdown) first**; delivery is a second step that can fail and retry without losing the artifact (NFR1, NFR4).
 
-- **Outbound delivery queue:** every message the bot wants to send is enqueued with its artifact reference and a priority (alerts > daily letter > weekly > quarterly > Study). If Telegram is unreachable or the owner has blocked the bot, items **stay queued and are retried with backoff** — never dropped. Alerts specifically are **never lost**: an alert artifact is durable in SQLite the instant it is generated, independent of whether it has been delivered.
+- **Outbound delivery queue:** every message the bot wants to send is enqueued with its artifact reference; delivery is **FIFO by creation, with alerts first on any post-outage flush** (matching the runtime outbox, tech-architecture §5.4 — there is no five-class priority scheme, and the Study is not a delivery class: it rides the weekly series, §2.2). If Telegram is unreachable or the owner has blocked the bot, items **stay queued and are retried with backoff** — never dropped. Alerts specifically are **never lost**: an alert artifact is durable in SQLite the instant it is generated, independent of whether it has been delivered.
 - **The daily letter is marked late, never skipped** (G.1, NFR1): if a daily run could not deliver on time, the letter is still generated and archived; when delivery resumes it is sent with a banner *"(delivered late — generated {t})"* and its staleness header already states the data age. The letter is never silently omitted (subject to `daily_letter_mode: quiet` during a declared pause, which is a deliberate owner choice, not a failure — D.6).
 - **On reconnect / unblock:** the queue flushes oldest-first, alerts first within a timestamp. Superseded items are collapsed where honest (e.g. three days of undelivered daily letters send only the most recent as current, with a one-line note that N earlier letters are in the archive — the owner does not want a backlog of stale "no action needed" letters, but the archive keeps them all for NFR4).
 - **Data-source failure** (yfinance/FX down) is orthogonal and already handled by the degraded-letter variants (§2.1) — the letter still sends and says "I just can't see."
@@ -550,7 +559,7 @@ The scheduled runs (daily/weekly/quarterly/event) are decoupled from delivery. A
 ### 5.4 Flood-limit awareness
 
 - Telegram enforces ~1 msg/sec to a chat and ~20/min bursts. The bot's normal volume is one message per scheduled run, so limits are almost never hit — except the **weekly numbered series** (§2.2, ~4 messages + 1 document) and the **storm-expansion** case where the owner rapidly taps several alert items.
-- The outbound queue (§5.3) is **rate-paced**: messages to the chat are spaced ≥1s; on a `429 Too Many Requests` the bot honors the `retry_after` value and re-enqueues — it never hammers. The weekly series sends sequentially with pacing, document first.
+- The outbound queue (§5.3) is **rate-paced**: messages to the chat are spaced ≥1s; on a `429 Too Many Requests` the bot honors the `retry_after` value and re-enqueues — it never hammers. The weekly series sends sequentially with pacing — messages first, document last, per amended §2.2.
 - Callback answers use `answerCallbackQuery` promptly (within Telegram's window) to clear the client's spinner even when the underlying action takes longer (the heavy work happens after the ack) — the owner never sees a hung button.
 - **No unsolicited bursts by design:** the anti-complexity ledger already forbids intraday anything, streak counters, and news pings, so there is no code path that could flood the chat. Rate-limit safety is mostly a property of the design, backed by the paced queue as insurance.
 
@@ -570,7 +579,7 @@ These are not style guidance — they are enforced by the template layer and a p
 
 ### 6.2 Structural prohibitions (lint-enforced, §8)
 
-- **No exclamation mark** may appear in any alert, prompted-question, reconciliation, or re-affirmation template. The lint rejects `!` in these output classes at send time.
+- **No exclamation mark** may appear in any alert, prompted-question, reconciliation, or re-affirmation template. The lint rejects `!` in these output classes at send time — **in template-authored spans only: owner-quoted fields (the committed trigger statement, the ten-year statement, refute evidence) are exempt**, since G.3/B.1 require them verbatim in the owner's own words (amended per review; the same scoping applies to the benchmark-token and €-token checks below).
 - **No red-alarm glyphs** (🔴 🚨 ⚠️ ❗ ❌ as emphasis on state) in any scheduled output. The only sanctioned status glyph is `✓` for the calm/pass state. (`×`/`✗` may mark a *failed data check* in the data-health appendix, never a price or a thesis alarm.)
 - **No euro cash amount, no portfolio value, no P/L, no cost basis** in the daily letter or `/status` — cash is band-% only (G global rules, FS-F8). The lint rejects a `€`-with-digits token in daily-letter output outside the (nonexistent) value field.
 - **No benchmark / relative-performance token** in any daily, weekly, event, or alert output — the quarantine is an absent input (invariant 7). The lint rejects benchmark identifiers (`S&P`, `^SP500TR`, "vs index", "outperform") outside the quarterly document class.
@@ -593,7 +602,7 @@ mint(ask)  →  open  ──(valid enumerated reply)──▶  answered  →  jo
    │            │                                                                        │
    │            └──(pause active)──▶ frozen (counters halted) ──(resume)──▶ open         ▼
    │                                                                        escalation per kind
-   └── every ask carries: kind{A,Q,R,F} · enumerated options · thesis/trigger ref ·
+   └── every ask carries: kind{A,Q,R,F,V,N} · enumerated options · thesis/trigger ref ·
        deadline · sent_message_id · state · (free-text asks also: pending_freetext record)
 ```
 - **answered** always writes a JournalEntry (invariant 2, FR8) with the ask_id and `inputs_ref` RunLog pin.
@@ -605,7 +614,7 @@ mint(ask)  →  open  ──(valid enumerated reply)──▶  answered  →  jo
 ## 8. Cross-cutting delivery rules (implementation-binding, not code)
 
 - **One escaping discipline:** the formatting mode is `parse_mode=HTML`, locked (§2, amended); every dynamic field (tickers, multiples, owner free-text, notes) passes through the one `& < >` escaper before send. Owner free-text is the highest-risk field and is always escaped — echoing a refute back to the owner must not break rendering or inject formatting.
-- **Pre-send lint:** every outgoing message passes a lint that enforces §6.2 (no `!` in the named classes, no red glyphs, no €-value in daily, no benchmark token outside quarterly, mandatory verbatim blocks present in alerts). A message failing lint is **not sent**; it raises an internal error and falls back to a safe minimal template, because shipping a register violation is worse than a terse message.
+- **Pre-send lint:** every outgoing message passes a lint that enforces §6.2 over **template-authored spans** (no `!` in the named classes, no red glyphs, no €-value in daily, no benchmark token outside quarterly, mandatory verbatim blocks present in alerts); owner-quoted dynamic fields are exempt (§6.2, amended). A message failing lint is **not sent as-is**; it raises an internal error and falls back to a safe minimal template **that preserves the ask_id, the inline keyboard, and the mandatory verbatim blocks**, because shipping a register violation is worse than a terse message — but a decision surface must never be stripped.
 - **Idempotent delivery:** each artifact has a stable id; the delivery queue records delivered-artifact-ids so a retry after a partial failure never double-sends the same letter/alert.
 - **`sendChatAction: typing`** precedes any action that takes more than ~1s (an `/event` check, a `/snapshot` parse) so the owner sees the bot is working; every owner action is acknowledged immediately (callback ack or a one-line "on it") even when the result follows.
 - **Gentle-redirect fallback:** any inbound text that is not a command and resolves to no open ask (§4) gets one calm reply: *"I only act on the commands and on questions I've asked you. Nothing is waiting right now. /status shows the current picture."* — never parsed, never stored.
