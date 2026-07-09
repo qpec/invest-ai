@@ -301,3 +301,43 @@ def step_drafting(state: dict, ask: AskOwner) -> str:
             state["triggers"] = triggers
             return "verdict"
         # BUF-4: at least one committed trigger must carry a moat_link -> re-draft
+
+
+def _sizing_pct(conviction: str, config_map: dict) -> float:
+    key = {"high": "initial_weight_high_pct", "medium": "initial_weight_medium_pct",
+           "low": "initial_weight_low_pct"}[conviction]
+    return float(config_map[key])
+
+
+def classify_verdict(*, tmp_db_unused, state: dict, dossier: dict | None,
+                     config_map: dict) -> dict:
+    """C.6 verdict — PASS if a pending_pass was set upstream; else BUY_READY when
+    the current multiple is inside/below the fair band, WATCH when above it (or
+    when no price exists but the business passed — backfill has no price verdict,
+    handled by the caller). Sizing from the E.3 conviction table."""
+    if "pending_pass" in state:
+        return {"verdict": "PASS", "reason_class": state["pending_pass"]["reason_class"],
+                "note": state["pending_pass"]["note"], "standing_questions": (),
+                "suggested_max_weight_pct": None, "requires_status_rebuttal": False}
+
+    multiple = (dossier or {}).get("current_multiple")
+    band_high = state["fair_band_high"]
+    # price inside or below band => BUY_READY; above => WATCH (E.4 fair-price line)
+    is_buy_ready = multiple is not None and multiple <= band_high
+    verdict = "BUY_READY" if is_buy_ready else "WATCH"
+
+    standing = []
+    if state["conviction"] == "low" or state["circle_fit"] == "edge":
+        standing.append(
+            "the mandate is 10-15 high-conviction positions - why does this belong "
+            "in a concentrated book?")
+
+    return {
+        "verdict": verdict,
+        "reason_class": None,
+        "note": None,
+        "standing_questions": tuple(standing),
+        "suggested_max_weight_pct": (_sizing_pct(state["conviction"], config_map)
+                                     if verdict == "BUY_READY" else None),
+        "requires_status_rebuttal": verdict == "BUY_READY" and state["status_buy_flag"],
+    }
