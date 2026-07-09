@@ -113,3 +113,72 @@ def _lock_held(state_dir: Path, run_type: str) -> bool:
         return False
     finally:
         os.close(fd)
+
+
+# --- due keys & sweep predicates (§1.3: each job sweeps only its OWN run_type) ---
+
+_FIRE = {"daily": time(7, 0), "weekly": time(8, 0),
+         "quarterly": time(8, 30), "backup": time(3, 30)}   # §1.1 timer table, Europe/Amsterdam
+_LOOKBACK = {"daily": 14, "backup": 14, "weekly": 6, "quarterly": 2}
+
+
+def due_keys(run_type: str, *, as_of: datetime) -> list[str]:
+    """Logical keys due by as_of (daily: every calendar day incl. weekend pulse;
+    weekly: Saturdays; quarterly: 1 Jan/Apr/Jul/Oct). Keys are Amsterdam dates."""
+    if run_type not in _FIRE:
+        return []          # event/gate/scout/snapshot/desk keys are object identities
+    fire, lookback = _FIRE[run_type], _LOOKBACK[run_type]
+    local_today = as_of.astimezone(AMS).date()
+    keys: list[str] = []
+    if run_type in ("daily", "backup"):
+        day = local_today
+        while len(keys) < lookback:
+            if datetime.combine(day, fire, tzinfo=AMS) <= as_of:
+                keys.append(day.isoformat())
+            day -= timedelta(days=1)
+    elif run_type == "weekly":
+        day = local_today
+        while len(keys) < lookback:
+            if day.weekday() == 5 and datetime.combine(day, fire, tzinfo=AMS) <= as_of:
+                keys.append(day.isoformat())
+            day -= timedelta(days=1)
+    else:  # quarterly: 1 Jan/Apr/Jul/Oct
+        y, m = local_today.year, ((local_today.month - 1) // 3) * 3 + 1
+        while len(keys) < lookback:
+            day = date(y, m, 1)
+            if datetime.combine(day, fire, tzinfo=AMS) <= as_of:
+                keys.append(day.isoformat())
+            m -= 3
+            if m < 1:
+                m, y = m + 12, y - 1
+    return sorted(keys)
+
+
+def sweepable(conn, run_type: str, *, as_of: datetime, timeout: timedelta,
+              state_dir: Path) -> list[str]:
+    """Own-run_type due keys absent OR started-but-unfinished AND unlocked AND
+    started_at older than timeout (§1.3)."""
+    out: list[str] = []
+    for key in due_keys(run_type, as_of=as_of):
+        row = db.fetch_run(conn, run_type, key)
+        if row is None:
+            out.append(key)
+            continue
+        if row["finished_at"] is not None:
+            continue
+        if as_of - db.from_iso(row["started_at"]) <= timeout:
+            continue                                  # possibly still running
+        if _lock_held(state_dir, run_type):
+            continue                                  # mechanically running right now
+        out.append(key)
+    return out
+
+
+def report_missing(conn, *, as_of: datetime) -> list[str]:
+    """Daemon startup sweep: DETECT AND REPORT only — never executes jobs (§1.3)."""
+    missing: list[str] = []
+    for run_type in ("daily", "weekly", "quarterly", "backup"):
+        for key in due_keys(run_type, as_of=as_of):
+            if not is_finished(conn, run_type, key):
+                missing.append(f"{run_type}:{key}")
+    return missing
