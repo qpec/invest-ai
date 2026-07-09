@@ -704,3 +704,63 @@ def test_watchlist_add_cap_counts_only_raw(tmp_db, fixed_clock):
     # now only 9 raw -> a 10th raw add succeeds
     gate.watchlist_add(tmp_db, ticker="TENTH", idea_source="reading",
                        one_line_why="why", clock=fixed_clock)
+
+
+# --- P4.14 stage transitions --------------------------------------------------
+
+def _seed_thesis(conn, thesis_id="TH-VEEV-001", ticker="VEEV"):
+    # watchlist_item.thesis_ref has a real FK to thesis(thesis_id); in production the
+    # Gate mints the thesis in the same transaction before linking it, so the ref
+    # always resolves. Seed the identity row so these unit tests honor that FK.
+    db.append_thesis(conn, thesis_id=thesis_id, ticker=ticker, origin="gate",
+                     created_at="2026-07-08T05:00:00Z")
+
+
+def test_advance_watchlist_for_verdict_buy_ready(tmp_db, fixed_clock):
+    from agentcy import gate
+    _seed_thesis(tmp_db)
+    item_id = gate.watchlist_add(tmp_db, ticker="VEEV", idea_source="scout_screen",
+                                 one_line_why="cheap QV", clock=fixed_clock)
+    gate.advance_watchlist_for_verdict(tmp_db, ticker="VEEV", verdict="BUY_READY",
+                                       thesis_id="TH-VEEV-001", clock=fixed_clock)
+    row = db.fetch_watchlist(tmp_db)[0]
+    assert row["stage"] == "buy_ready_waiting"
+    assert row["thesis_ref"] == "TH-VEEV-001"
+
+
+def test_advance_watchlist_for_verdict_watch(tmp_db, fixed_clock):
+    from agentcy import gate
+    _seed_thesis(tmp_db)
+    gate.watchlist_add(tmp_db, ticker="VEEV", idea_source="scout_screen",
+                       one_line_why="cheap QV", clock=fixed_clock)
+    gate.advance_watchlist_for_verdict(tmp_db, ticker="VEEV", verdict="WATCH",
+                                       thesis_id="TH-VEEV-001", clock=fixed_clock)
+    assert db.fetch_watchlist(tmp_db)[0]["stage"] == "gate_approved_waiting"
+
+
+def test_advance_watchlist_for_verdict_pass_rejects(tmp_db, fixed_clock):
+    from agentcy import gate
+    gate.watchlist_add(tmp_db, ticker="VEEV", idea_source="scout_screen",
+                       one_line_why="cheap QV", clock=fixed_clock)
+    gate.advance_watchlist_for_verdict(tmp_db, ticker="VEEV", verdict="PASS",
+                                       thesis_id=None, clock=fixed_clock)
+    assert db.fetch_watchlist(tmp_db)[0]["stage"] == "rejected"
+
+
+def test_advance_watchlist_noop_when_not_on_list(tmp_db, fixed_clock):
+    from agentcy import gate
+    # a Gate run on a ticker never added to the watchlist -> no error, no row
+    gate.advance_watchlist_for_verdict(tmp_db, ticker="MSFT", verdict="BUY_READY",
+                                       thesis_id="TH-MSFT-001", clock=fixed_clock)
+    assert db.fetch_watchlist(tmp_db) == []
+
+
+def test_mark_activated_moves_waiting_to_activated(tmp_db, fixed_clock):
+    from agentcy import gate
+    _seed_thesis(tmp_db)
+    item = gate.watchlist_add(tmp_db, ticker="VEEV", idea_source="scout_screen",
+                              one_line_why="cheap QV", clock=fixed_clock)
+    gate.advance_watchlist_for_verdict(tmp_db, ticker="VEEV", verdict="BUY_READY",
+                                       thesis_id="TH-VEEV-001", clock=fixed_clock)
+    gate.mark_activated(tmp_db, "VEEV", clock=fixed_clock)
+    assert db.fetch_watchlist(tmp_db)[0]["stage"] == "activated"

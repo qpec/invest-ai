@@ -622,3 +622,45 @@ def watchlist_add(conn, *, ticker: str, idea_source: str, one_line_why: str,
     return db.append_watchlist_item(conn, ticker=ticker,
                                     added_at=db.to_iso(clock.now()),
                                     idea_source=idea_source, one_line_why=one_line_why)
+
+
+_VERDICT_STAGE = {
+    "BUY_READY": "buy_ready_waiting",
+    "WATCH": "gate_approved_waiting",
+    "PASS": "rejected",
+    "no_thesis_exists": "rejected",
+    # activate_backfill acts on an existing holding, not a watchlist item
+}
+
+
+def _latest_watchlist_item(conn, ticker: str):
+    """Most recent non-terminal watchlist item for a ticker, if any."""
+    rows = [r for r in db.fetch_watchlist(conn) if r["ticker"] == ticker
+            and r["stage"] in ("raw", "gate_approved_waiting", "buy_ready_waiting")]
+    return rows[-1] if rows else None
+
+
+def advance_watchlist_for_verdict(conn, *, ticker: str, verdict: str,
+                                  thesis_id: str | None, clock: Clock) -> None:
+    """Advance the ticker's watchlist item to match a Gate verdict (C.6). No-op if
+    the ticker was never on the watchlist (a direct Gate run)."""
+    stage = _VERDICT_STAGE.get(verdict)
+    if stage is None:
+        return
+    item = _latest_watchlist_item(conn, ticker)
+    if item is None:
+        return
+    db.update_watchlist_stage(conn, item["item_id"], stage=stage,
+                              stage_changed_at=db.to_iso(clock.now()),
+                              thesis_ref=thesis_id)
+
+
+def mark_activated(conn, ticker: str, *, clock: Clock) -> None:
+    """Move a waiting watchlist item to 'activated' when its position appears in a
+    Snapshot (C.1 stage). No-op if the ticker is not on the watchlist."""
+    rows = [r for r in db.fetch_watchlist(conn) if r["ticker"] == ticker
+            and r["stage"] in ("gate_approved_waiting", "buy_ready_waiting")]
+    for r in rows:
+        db.update_watchlist_stage(conn, r["item_id"], stage="activated",
+                                  stage_changed_at=db.to_iso(clock.now()),
+                                  thesis_ref=r["thesis_ref"])
