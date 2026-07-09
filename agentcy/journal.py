@@ -77,3 +77,66 @@ def append(conn, entry: EntryIn, *, clock: Clock) -> int:
 def bootstrap_entry_id() -> int:
     """The migration-000 bootstrap journal entry — journal-FK anchor for early config writes."""
     return 1
+
+
+def grade(conn, entry_id: int, *, outcome_grade: str, note: str | None, clock: Clock) -> None:
+    """Append a journal_grade row — judged against expectation/falsifier, never raw price (F.1)."""
+    if outcome_grade not in VALID_GRADES:
+        raise ValueError(f"outcome_grade must be one of {sorted(VALID_GRADES)}")
+    if db.fetch_journal_entry(conn, entry_id) is None:
+        raise KeyError(entry_id)
+    db.append_journal_grade(conn, entry_id=entry_id, graded_at=db.to_iso(clock.now()),
+                            outcome_grade=outcome_grade, note=note)
+
+
+def due_for_review(conn, *, as_of: datetime) -> list:
+    """Entries at/past review_horizon without a grade; 'too_early' re-queues one horizon (+1y)."""
+    out = []
+    for row in db.fetch_journal_entries(conn):
+        if not row["review_horizon"] or db.from_iso(row["review_horizon"]) > as_of:
+            continue
+        grades = db.fetch_grades_for(conn, row["entry_id"])
+        if not grades:
+            out.append(row)
+        else:
+            last = grades[-1]
+            # too_early re-queues one horizon from the review point (review_horizon), not the
+            # wall-clock grading time — so a grade recorded early still defers a full horizon.
+            if (last["outcome_grade"] == "too_early"
+                    and db.from_iso(row["review_horizon"]) + timedelta(days=365) <= as_of):
+                out.append(row)
+    return out
+
+
+def review_matrix(conn, period: tuple[str, str]) -> dict:
+    """F.2 quarterly batch: the 2x2, dangerous wins, followed/overridden %, override hit-rate,
+    alert_ignored count, no-action ratio. Entries counted by ts within [start, end]."""
+    start, end = period
+    entries = [r for r in db.fetch_journal_entries(conn) if start <= r["ts"] <= end]
+    matrix: dict[tuple[str, str], list[int]] = {}
+    dangerous, overridden, followed, over_good = [], 0, 0, 0
+    for r in entries:
+        grades = db.fetch_grades_for(conn, r["entry_id"])
+        if r["owner_action"] == "followed":
+            followed += 1
+        elif r["owner_action"] == "overridden":
+            overridden += 1
+        if not grades or r["process"] is None:
+            continue
+        g = grades[-1]["outcome_grade"]
+        matrix.setdefault((r["process"], g), []).append(r["entry_id"])
+        if r["process"] == "deviated" and g == "good":
+            dangerous.append(r["entry_id"])            # DANGEROUS WIN — flagged loudest (F.2)
+        if r["owner_action"] == "overridden" and g == "good":
+            over_good += 1
+    acted = followed + overridden
+    no_action = sum(1 for r in entries if r["owner_action"] == "no_action")
+    return {
+        "matrix": matrix,
+        "dangerous_wins": dangerous,
+        "followed_pct": 100.0 * followed / acted if acted else 0.0,
+        "overridden_pct": 100.0 * overridden / acted if acted else 0.0,
+        "override_hit_rate": 100.0 * over_good / overridden if overridden else 0.0,
+        "alert_ignored": sum(1 for r in entries if r["decision_type"] == "alert_ignored"),
+        "no_action_ratio": no_action / len(entries) if entries else 0.0,
+    }
