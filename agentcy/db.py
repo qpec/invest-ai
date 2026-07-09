@@ -300,6 +300,26 @@ def append_event(conn, row: Mapping) -> int:
     return _insert(conn, "event", _checked(row, _EVENT_COLS, "event"))
 
 
+def append_gate_session(conn, *, ticker: str, mode: str, started_at: str) -> int:
+    """Insert a gate_session row (step/state_json/status take DDL defaults); returns session_id."""
+    cur = conn.execute(
+        "INSERT INTO gate_session (ticker, mode, started_at, updated_at) VALUES (?, ?, ?, ?)",
+        (ticker, mode, started_at, started_at),
+    )
+    return cur.lastrowid
+
+
+def append_watchlist_item(conn, *, ticker: str, added_at: str, idea_source: str,
+                          one_line_why: str) -> int:
+    """Insert a C.1 watchlist_item row (stage defaults to 'raw'); returns item_id."""
+    cur = conn.execute(
+        "INSERT INTO watchlist_item (ticker, added_at, idea_source, one_line_why, stage_changed_at)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (ticker, added_at, idea_source, one_line_why, added_at),
+    )
+    return cur.lastrowid
+
+
 # --- fetch helpers (named reads only) ---
 
 def _now_iso() -> str:
@@ -557,6 +577,11 @@ def fetch_active_gate_session(conn, ticker: str | None = None) -> Row | None:
         params.append(ticker)
     return conn.execute(
         sql + " ORDER BY started_at DESC, session_id DESC LIMIT 1", params).fetchone()
+
+
+def fetch_gate_session(conn, session_id: int) -> Row | None:
+    return conn.execute(
+        "SELECT * FROM gate_session WHERE session_id=?", (session_id,)).fetchone()
 
 
 def fetch_study_state(conn) -> Row:
