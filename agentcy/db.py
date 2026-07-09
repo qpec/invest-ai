@@ -579,6 +579,11 @@ def fetch_active_gate_session(conn, ticker: str | None = None) -> Row | None:
         sql + " ORDER BY started_at DESC, session_id DESC LIMIT 1", params).fetchone()
 
 
+def fetch_gate_session(conn, session_id: int) -> Row | None:
+    return conn.execute(
+        "SELECT * FROM gate_session WHERE session_id=?", (session_id,)).fetchone()
+
+
 def fetch_study_state(conn) -> Row:
     return conn.execute("SELECT * FROM study_state WHERE id=1").fetchone()
 

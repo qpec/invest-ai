@@ -506,7 +506,7 @@ def start(conn, *, ticker: str, mode: str, ask_owner: AskOwner, clock: Clock,
 def resume(conn, *, session_id: int, ask_owner: AskOwner, clock: Clock,
            store=_store_default) -> GateOutcome:
     """Continue an active session from its persisted step (resumability)."""
-    row = _fetch_session(conn, session_id)
+    row = db.fetch_gate_session(conn, session_id)
     if row is None or row["status"] != "active":
         raise ValueError(f"gate_session {session_id} is not active")
     state = json.loads(row["state_json"])
@@ -516,7 +516,7 @@ def resume(conn, *, session_id: int, ask_owner: AskOwner, clock: Clock,
 
 
 def abandon(conn, session_id: int, *, clock: Clock) -> None:
-    row = _fetch_session(conn, session_id)
+    row = db.fetch_gate_session(conn, session_id)
     if row is None:
         return
     db.update_gate_session(conn, session_id, step=row["step"],
@@ -587,11 +587,6 @@ def _run_verdict(conn, *, mode, state, dossier, ask_owner, clock) -> dict:
 def _persist(conn, session_id, *, step, state, clock, status) -> None:
     db.update_gate_session(conn, session_id, step=step, state_json=json.dumps(state),
                            status=status, updated_at=_iso(clock.now()))
-
-
-def _fetch_session(conn, session_id: int):
-    return conn.execute("SELECT * FROM gate_session WHERE session_id = ?",
-                        (session_id,)).fetchone()
 
 
 def _iso(dt) -> str:
