@@ -217,3 +217,87 @@ def step_judgment(state: dict, ask: AskOwner) -> str:
             "You hesitated on the status question. One line on why "
             "(this becomes the status-buy note):", None).strip() or None
     return "drafting"
+
+
+_TRIGGER_TYPES = ("growth_floor", "margin_erosion", "balance_sheet_safety",
+                  "dilution", "owner_attested_event")
+_MOAT_TYPES = ("network_effects", "switching_costs", "cost_advantage",
+               "brand_trust", "regulatory_barrier")
+_PERSISTENCE = ("single_observation", "2_consecutive_quarters", "ttm")
+# B.2: check_method + data_source are COMPUTED from type (testable != automatable)
+_TYPE_META = {
+    "growth_floor":         ("automated", "yf_quarterly_statements", "weekly"),
+    "margin_erosion":       ("automated", "yf_quarterly_statements", "weekly"),
+    "balance_sheet_safety": ("automated", "yf_quarterly_statements", "weekly"),
+    "dilution":             ("automated", "yf_shares_full",          "weekly"),
+    "owner_attested_event": ("prompted",  "owner_attestation",       "event"),
+}
+
+
+def _ask_moat_link(ask: AskOwner) -> str | None:
+    raw = ask("moat_link - a moat type this trigger falsifies, or blank for none. "
+              f"One of {_MOAT_TYPES} or blank:", ("",) + _MOAT_TYPES).strip().lower()
+    return raw or None
+
+
+def _ask_trigger(ask: AskOwner) -> dict:
+    ttype = _ask_enum(ask, f"trigger type - one of {_TRIGGER_TYPES}:", _TRIGGER_TYPES)
+    statement = _ask_nonempty(
+        ask, "statement - one falsifiable sentence in your words "
+             "(\"If X, the reason I own this is gone\"):")
+    metric = ask("metric (blank for type-5 / owner-attested):", None).strip() or None
+    comparator = ask("comparator (e.g. <, >; blank for type-5):", None).strip() or None
+    thr_raw = ask("threshold (number; blank for type-5):", None).strip()
+    threshold = float(thr_raw) if thr_raw else None
+    moat_link = _ask_moat_link(ask)
+    check_method, data_source, cadence = _TYPE_META[ttype]
+    persistence = _ask_enum(
+        ask, f"persistence - {_PERSISTENCE} (blank = type default):",
+        _PERSISTENCE, default=_default_persistence(ttype))
+    yes_means = None
+    if ttype == "owner_attested_event":
+        yes_means = _ask_enum(
+            ask, "yes_means - does a YES answer FIRE the trigger or PASS it?",
+            ("fire", "pass"))
+    return {
+        "type": ttype, "statement": statement, "metric": metric,
+        "comparator": comparator, "threshold": threshold, "moat_link": moat_link,
+        "persistence": persistence, "check_method": check_method,
+        "data_source": data_source, "cadence": cadence, "yes_means": yes_means,
+    }
+
+
+def _default_persistence(ttype: str) -> str:
+    return {"dilution": "ttm"}.get(ttype, "2_consecutive_quarters")
+
+
+def step_drafting(state: dict, ask: AskOwner) -> str:
+    """C.6 drafting - owner writes moat fields, the fair band, and commits 2-5
+    triggers with >=1 moat-linked (BUF-4). Thresholds owner-set; templates only
+    proposed. Re-drafts the whole trigger set if the moat-link rule is unmet."""
+    moat_types = []
+    while not moat_types:
+        raw = ask(f"moat_types - one or more of {_MOAT_TYPES}, comma-separated "
+                  "(min 1):", None)
+        moat_types = [m.strip().lower() for m in raw.split(",")
+                      if m.strip().lower() in _MOAT_TYPES]
+    state["moat_types"] = moat_types
+    state["moat_evidence"] = _ask_nonempty(
+        ask, "moat_evidence - >=1 observable fact per selected moat type:")
+    state["fair_band_low"] = _ask_float(ask, "fair_band_low (multiple):")
+    state["fair_band_high"] = _ask_float(ask, "fair_band_high (multiple):")
+    state["denominator_note"] = ask("denominator_note (e.g. 'P/owner-FCF'):",
+                                    None).strip() or None
+    while True:
+        n = 0
+        while not (2 <= n <= 5):
+            try:
+                n = int(ask("How many triggers? (2-5; fewer is unfalsifiable, "
+                            "more is noise)", None).strip())
+            except ValueError:
+                n = 0
+        triggers = [_ask_trigger(ask) for _ in range(n)]
+        if any(t["moat_link"] for t in triggers):
+            state["triggers"] = triggers
+            return "verdict"
+        # BUF-4: at least one committed trigger must carry a moat_link -> re-draft
