@@ -668,3 +668,39 @@ def test_read_prior_verdict_returns_prior_pass(tmp_db, fixed_clock, monkeypatch)
 def test_read_prior_verdict_none_when_fresh(tmp_db):
     from agentcy import gate
     assert gate.read_prior_verdict(tmp_db, "NEWCO") is None
+
+
+# --- P4.13 watchlist add ------------------------------------------------------
+
+def test_watchlist_add_creates_raw_item(tmp_db, fixed_clock):
+    from agentcy import gate
+    item_id = gate.watchlist_add(tmp_db, ticker="VEEV", idea_source="own_research",
+                                 one_line_why="validated GxP record layer",
+                                 clock=fixed_clock)
+    rows = db.fetch_watchlist(tmp_db, stage="raw")
+    assert [r["item_id"] for r in rows] == [item_id]
+
+
+def test_watchlist_add_rejects_over_cap_10(tmp_db, fixed_clock):
+    from agentcy import gate
+    for i in range(10):
+        gate.watchlist_add(tmp_db, ticker=f"T{i}", idea_source="reading",
+                           one_line_why="why", clock=fixed_clock)
+    with pytest.raises(gate.WatchlistFull):
+        gate.watchlist_add(tmp_db, ticker="T10", idea_source="reading",
+                           one_line_why="why", clock=fixed_clock)
+
+
+def test_watchlist_add_cap_counts_only_raw(tmp_db, fixed_clock):
+    from agentcy import gate
+    # 9 raw + 1 advanced-past-raw should still allow a 10th raw add
+    for i in range(9):
+        gate.watchlist_add(tmp_db, ticker=f"T{i}", idea_source="reading",
+                           one_line_why="why", clock=fixed_clock)
+    adv = gate.watchlist_add(tmp_db, ticker="ADV", idea_source="reading",
+                             one_line_why="why", clock=fixed_clock)
+    db.update_watchlist_stage(tmp_db, adv, stage="rejected",
+                              stage_changed_at="2026-07-08T05:00:00Z")
+    # now only 9 raw -> a 10th raw add succeeds
+    gate.watchlist_add(tmp_db, ticker="TENTH", idea_source="reading",
+                       one_line_why="why", clock=fixed_clock)
