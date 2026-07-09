@@ -1,0 +1,31 @@
+[project]
+name = "stock-agentcy"
+version = "0.1.0"
+description = "Thesis-driven portfolio oversight: advises and monitors, never executes trades."
+requires-python = "==3.13.*"
+dependencies = [
+    "yfinance==1.5.1",
+    "pandas",
+    "scipy",
+    "quantstats==0.0.81",
+]
+
+[project.optional-dependencies]
+scout = ["tradingview-screener"]
+
+[project.scripts]
+agentcy = "agentcy.cli:main"
+
+[dependency-groups]
+dev = ["pytest"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agentcy"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
