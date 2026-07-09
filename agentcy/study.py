@@ -29,9 +29,21 @@ class StudyContext:
 
 
 def _next_thesis(conn) -> "db.Row | None":
-    theses = [t for t in db.fetch_theses(conn)
-              if (db.fetch_current_thesis_status(conn, t["thesis_id"]) or {})["status"]
-              not in ("draft", "retired")]
+    # Rotate in stable creation order. db.fetch_theses is contracted to order by
+    # (created_at, thesis_id); when several theses share a created_at that tiebreak
+    # is alphabetical by id, which is NOT creation order. The Study rotation walks
+    # this list positionally, so we re-sort locally (P3.22 owns only study.py; the
+    # shared helper is left untouched). The status log's log_id is a monotonic
+    # global PK, so a thesis's current-status log_id preserves the order in which
+    # theses entered the register (create -> activate happens once, in order).
+    candidates = []
+    for t in db.fetch_theses(conn):
+        st = db.fetch_current_thesis_status(conn, t["thesis_id"])
+        if st is None or st["status"] in ("draft", "retired"):
+            continue
+        candidates.append((t["created_at"], st["log_id"], t))
+    candidates.sort(key=lambda c: (c[0], c[1]))
+    theses = [c[2] for c in candidates]
     if not theses:
         return None
     last = db.fetch_study_state(conn)["last_restudied_thesis_id"]
