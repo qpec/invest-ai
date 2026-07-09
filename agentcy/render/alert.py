@@ -69,13 +69,19 @@ def _render_storm(ctx: AlertContext) -> RenderedOutput:
     trigger label + the template-authored `what_happened` fact; the owner's verbatim
     committed statement and 10-year words surface only when an item is expanded into its
     own single card (the daemon re-renders via render_alert with a one-item context), so
-    owner_spans=() here. The calm alert register still holds — 'not a price alarm' and a
-    'decision by' framing are carried template-side so the fail-closed lint passes."""
+    owner_spans=() here.
+
+    Subject and intro are byte-exact from the elaboration storm variant
+    (tg-spec §B.3.5, lines 302-305) — no invented copy. The alert-class lint recognizes
+    this variant's own verbatim price-disownership ('A market-wide move can fire several
+    theses at once', the storm's structural stand-in for the single card's WHAT-THIS-IS-NOT
+    block) and its deadline framing ('one decision window, by …'), so the sacred copy ships
+    unaltered and the fail-closed lint still passes (see lint._ALERT_PRICE_DISOWNED /
+    _ALERT_DEADLINE_FRAMED)."""
     n = len(ctx.items)
     subject = f"Triggers fired — {n} theses — one decision window, by {ctx.deadline_label}"
-    intro = ("A market-wide move can fire several theses at once; this is not a price alarm.\n"
-             "Take them in order of weight — there is no rush beyond the shared deadline, and\n"
-             "each is a separate decision by you alone.")
+    intro = ("A market-wide move can fire several theses at once. Take them in order of weight;\n"
+             "there is no rush beyond the shared deadline. Each is a separate decision.")
     ranked = sorted(ctx.items, key=lambda i: i.weight_pct, reverse=True)
     body_lines = []
     for idx, it in enumerate(ranked, 1):
