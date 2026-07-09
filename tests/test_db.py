@@ -33,3 +33,54 @@ def test_from_iso_round_trip():
     dt = db.from_iso("2026-07-08T05:00:00Z")
     assert dt == datetime(2026, 7, 8, 5, 0, tzinfo=timezone.utc)
     assert db.to_iso(dt) == "2026-07-08T05:00:00Z"
+
+
+import hashlib
+import sqlite3
+
+SCHEMA_DIR = Path(__file__).resolve().parents[1] / "agentcy" / "schema"
+
+
+def test_open_db_pragmas_and_row_factory(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENTCY_STATE_DIR", str(tmp_path))
+    conn = db.open_db(tmp_path)
+    assert conn.row_factory is sqlite3.Row
+    assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
+    assert (tmp_path / "agentcy.db").exists()
+    assert not (tmp_path / "benchmark.db").exists()   # invariant 7: never opened here
+    conn.close()
+
+
+def test_migrate_applies_000_once_and_records(tmp_path):
+    conn = db.open_db(tmp_path)
+    assert db.migrate(conn) == [0]
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+    row = conn.execute("SELECT * FROM schema_migration WHERE version=0").fetchone()
+    sql = (SCHEMA_DIR / "000_init.sql").read_text(encoding="utf-8")
+    assert row["sha256"] == hashlib.sha256(sql.encode("utf-8")).hexdigest()
+    db.from_iso(row["applied_at"])                     # parses as contract ISO format
+    assert db.migrate(conn) == []                      # idempotent re-run
+    conn.close()
+
+
+def test_migrate_never_picks_up_benchmark_file(tmp_path):
+    conn = db.open_db(tmp_path)
+    db.migrate(conn)
+    names = {r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE name LIKE '%benchmark%'")}
+    assert names == set()
+    conn.close()
+
+
+def test_migrate_raises_on_gap(tmp_path):
+    import shutil
+    sd = tmp_path / "schema"
+    sd.mkdir()
+    shutil.copy(SCHEMA_DIR / "000_init.sql", sd / "000_init.sql")
+    (sd / "002_orphan.sql").write_text("CREATE TABLE oops (x);", encoding="utf-8")
+    conn = db.open_db(tmp_path)
+    with pytest.raises(RuntimeError, match="gap"):
+        db.migrate(conn, schema_dir=sd)
+    conn.close()
