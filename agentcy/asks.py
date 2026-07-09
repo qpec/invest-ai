@@ -131,3 +131,28 @@ def reprompt(conn, ask_id: str, *, clock: Clock) -> Ask:
         raise ValueError(f"cannot reprompt {ask_id}: status is {row['status']!r}, not 'open'")
     db.update_ask_state(conn, ask_id, status="reprompted")
     return _row_to_ask(db.fetch_ask(conn, ask_id))
+
+
+_UNANSWERED_CONSEQUENCE = {
+    "A": "alert.ignored", "Q": "trigger.unverifiable", "F": "reaff.skip", "V": "vfu.unanswered",
+}
+
+
+def sweep_deadlines(conn, *, as_of: datetime) -> list[AnswerOutcome]:
+    """Mark counted-unanswered past effective_deadline (pause-aware; frozen never fires).
+    Returns one AnswerOutcome per newly-unanswered ask; the caller applies the per-kind side effect."""
+    out: list[AnswerOutcome] = []
+    for row in db.fetch_open_asks(conn):
+        if row["status"] not in ("open", "reprompted") or not row["deadline"]:
+            continue
+        base = db.from_iso(row["deadline"])
+        start = db.from_iso(row["created_at"])
+        eff = effective_deadline(conn, base, start=start, as_of=as_of)
+        if eff > as_of:
+            continue                                          # not due (or frozen by a pause window)
+        db.update_ask_state(conn, row["ask_id"], status="unanswered")
+        ask = _row_to_ask(db.fetch_ask(conn, row["ask_id"]))
+        cons = _UNANSWERED_CONSEQUENCE.get(
+            ask.kind, f"{ {'R':'recon','N':'note'}.get(ask.kind, ask.kind.lower()) }.unanswered")
+        out.append(AnswerOutcome(ask=ask, accepted=False, already_recorded=False, consequence=cons))
+    return out

@@ -94,3 +94,44 @@ def test_reprompt_rejects_answered(tmp_db, fixed_clock):
     asks.answer(tmp_db, a.ask_id, choice="yes", clock=fixed_clock)
     with pytest.raises(ValueError):
         asks.reprompt(tmp_db, a.ask_id, clock=fixed_clock)
+
+
+def test_sweep_marks_unanswered_after_effective_deadline(tmp_db, fixed_clock):
+    from agentcy import asks
+    a = asks.mint(tmp_db, kind="A", prompt="p", options=["confirm", "refute"],
+                  deadline="2026-07-15T05:00:00Z", clock=fixed_clock)
+    before = datetime(2026, 7, 14, tzinfo=timezone.utc)
+    assert asks.sweep_deadlines(tmp_db, as_of=before) == []          # not yet due
+    after = datetime(2026, 7, 16, tzinfo=timezone.utc)
+    outcomes = asks.sweep_deadlines(tmp_db, as_of=after)
+    assert [(o.ask.ask_id, o.consequence) for o in outcomes] == [("A1", "alert.ignored")]
+    assert asks.get(tmp_db, "A1").status == "unanswered"
+
+
+def test_sweep_is_pause_aware(tmp_db, fixed_clock):
+    from agentcy import asks
+    # a pause covering the deadline window freezes the counter
+    db.append_absence_event(tmp_db, kind="on", at="2026-07-10T00:00:00Z", journal_ref=1)
+    a = asks.mint(tmp_db, kind="Q", prompt="p", options=["yes", "no", "cant"],
+                  expects_freetext=True, deadline="2026-07-15T05:00:00Z", clock=fixed_clock)
+    after = datetime(2026, 7, 16, tzinfo=timezone.utc)
+    assert asks.sweep_deadlines(tmp_db, as_of=after) == []            # frozen: open-ended pause
+    assert asks.get(tmp_db, "Q1").status == "open"
+
+
+def test_sweep_skips_asks_without_deadline(tmp_db, fixed_clock):
+    from agentcy import asks
+    asks.mint(tmp_db, kind="N", prompt="circle note?", options=[], expects_freetext=True,
+              clock=fixed_clock)
+    far = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    assert asks.sweep_deadlines(tmp_db, as_of=far) == []
+    assert asks.get(tmp_db, "N1").status == "open"
+
+
+def test_sweep_consequence_per_kind(tmp_db, fixed_clock):
+    from agentcy import asks
+    for k, cons in [("F", "reaff.skip"), ("V", "vfu.unanswered")]:
+        a = asks.mint(tmp_db, kind=k, prompt="p", options=["a", "b"],
+                      deadline="2026-07-15T05:00:00Z", clock=fixed_clock)
+        out = asks.sweep_deadlines(tmp_db, as_of=datetime(2026, 7, 16, tzinfo=timezone.utc))
+        assert any(o.ask.ask_id == a.ask_id and o.consequence == cons for o in out)
