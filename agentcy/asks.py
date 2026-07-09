@@ -79,3 +79,44 @@ def open_asks(conn, *, kind: str | None = None) -> list[Ask]:
     """Open + reprompted asks (the /status open-loops list)."""
     return [_row_to_ask(r) for r in db.fetch_open_asks(conn, kind=kind)
             if r["status"] in ("open", "reprompted")]
+
+
+_CONSEQUENCE = {
+    ("A", "confirm"): "alert.confirm2", ("A", "confirm2"): "alert.confirm2",
+    ("A", "refute"): "alert.refute", ("A", "revise"): "alert.revise",
+    ("Q", "yes"): "trigger.answer", ("Q", "no"): "trigger.answer",
+    ("Q", "cant"): "trigger.unverifiable",
+}
+
+
+def _consequence(kind: str, choice: str | None) -> str:
+    if (kind, choice) in _CONSEQUENCE:
+        return _CONSEQUENCE[(kind, choice)]
+    prefix = {"R": "recon", "F": "reaff", "V": "vfu", "N": "note"}.get(kind, kind.lower())
+    return f"{prefix}.{choice}" if choice else f"{prefix}.recorded"
+
+
+def answer(conn, ask_id: str, *, choice: str | None = None, text: str | None = None,
+           clock: Clock, tg_message_id: int | None = None) -> AnswerOutcome:
+    """Server-side validation (exists, open, option in set); already answered -> already_recorded."""
+    row = db.fetch_ask(conn, ask_id)
+    if row is None:
+        raise KeyError(ask_id)
+    ask = _row_to_ask(row)
+    if ask.status in ("answered", "unanswered"):
+        return AnswerOutcome(ask=ask, accepted=True, already_recorded=True,
+                             consequence=_consequence(ask.kind, (ask.answer or {}).get("choice")))
+    options = set(ask.options)
+    if choice is not None and options and choice not in options:
+        return AnswerOutcome(ask=ask, accepted=False, already_recorded=False, consequence="rejected")
+    if choice is None and not (ask.expects_freetext and (text or "").strip()):
+        return AnswerOutcome(ask=ask, accepted=False, already_recorded=False, consequence="rejected")
+    payload: dict = {}
+    if choice is not None:
+        payload["choice"] = choice
+    if text is not None and text.strip():
+        payload["text"] = text
+    db.update_ask_state(conn, ask_id, status="answered", answer_json=json.dumps(payload),
+                        answered_at=db.to_iso(clock.now()), tg_message_id=tg_message_id)
+    return AnswerOutcome(ask=_row_to_ask(db.fetch_ask(conn, ask_id)), accepted=True,
+                         already_recorded=False, consequence=_consequence(ask.kind, choice))
