@@ -49,3 +49,55 @@ def archive_and_store(conn, r: RenderedOutput, *, run_id: int, report_type: str,
         "archive_path": str(path).replace("\\", "/"),
         "git_sha": sha,
     })
+
+
+def write_thesis_view(conn, thesis_id: str, *, archive_dir: Path | None = None) -> Path:
+    """Regenerate theses/TH-XXXX-NNN.md: current fields + full version log (R10). No
+    cost basis (value_at_purchase) in a thesis view — quarantine by absence."""
+    arch = _archive_dir(archive_dir)
+    th = db.fetch_thesis(conn, thesis_id)
+    cur = db.fetch_current_thesis_version(conn, thesis_id)
+    st = db.fetch_current_thesis_status(conn, thesis_id)
+    lines = [f"# {thesis_id} — {th['ticker']}", "",
+             f"Status: {st['status'] if st else 'draft'} · conviction: {cur['conviction']} · "
+             f"circle: {cur['circle_fit']}", "",
+             "## Business model", cur["business_model_2s"], "",
+             "## Moat", cur["moat_evidence"], "",
+             "## Ten-year statement", cur["ten_year_statement"], "",
+             f"## Fair band (v{cur['version']})", f"{cur['fair_band_low']:g}–{cur['fair_band_high']:g}×", "",
+             "## Version log"]
+    for v in db.fetch_thesis_versions(conn, thesis_id):
+        line = f"- v{v['version']} ({v['created_at']})"
+        if v["reason"]:
+            line += f" — {v['reason']}"
+        if v["diff_json"]:
+            line += f" · diff: {v['diff_json']}"
+        lines.append(line)
+    path = arch / "theses" / f"{thesis_id}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    return path
+
+
+def write_journal_entry(conn, entry_id: int, *, archive_dir: Path | None = None) -> Path:
+    """journal/YYYY/JE-NNNN.md — immutable entry; grades appended as dated sections."""
+    arch = _archive_dir(archive_dir)
+    e = db.fetch_journal_entry(conn, entry_id)
+    year = e["ts"][:4]
+    lines = [f"# JE-{entry_id:04d} — {e['decision_type']}"
+             + (f" / {e['decision_subtype']}" if e["decision_subtype"] else ""), "",
+             f"Timestamp: {e['ts']} · actor: {e['actor']}"]
+    if e["ticker"]:
+        lines.append(f"Ticker: {e['ticker']}")
+    if e["reasoning_at_the_moment"]:
+        lines += ["", "## Reasoning at the moment", e["reasoning_at_the_moment"]]
+    if e["system_recommendation"]:
+        lines += ["", "## System recommendation (verbatim)", e["system_recommendation"]]
+    for g in db.fetch_grades_for(conn, entry_id):
+        lines += ["", f"## Grade — {g['graded_at']}: {g['outcome_grade']}"]
+        if g["note"]:
+            lines.append(g["note"])
+    path = arch / "journal" / year / f"JE-{entry_id:04d}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    return path
