@@ -679,3 +679,57 @@ def update_study_state(conn, *, last_restudied_thesis_id: str,
 def retire_trigger(conn, trigger_id: int, *, retired_at: str) -> None:
     """The sole "trigger" UPDATE: set retired_at (write-once; DB trigger enforces)."""
     _update(conn, "trigger", "trigger_id", trigger_id, {"retired_at": retired_at})
+
+
+# --- P3 additions (CONTRACT ISSUE resolution): ask/alert inserts + domain reads ---
+
+def next_ask_seq(conn, kind: str) -> int:
+    """Next monotonic seq for a kind (asks.mint uses this to form '<K><seq>')."""
+    row = conn.execute("SELECT MAX(seq) AS m FROM ask WHERE kind = ?", (kind,)).fetchone()
+    return (row["m"] or 0) + 1
+
+
+def append_ask(conn, row: Mapping) -> None:
+    """Insert a D.5 ask identity+initial-state row (asks.mint validates before calling)."""
+    conn.execute(
+        "INSERT INTO ask (ask_id, kind, seq, created_at, prompt, options_json, "
+        "expects_freetext, thesis_ref, trigger_ref, alert_ref, deadline, run_id) "
+        "VALUES (:ask_id, :kind, :seq, :created_at, :prompt, :options_json, "
+        ":expects_freetext, :thesis_ref, :trigger_ref, :alert_ref, :deadline, :run_id)",
+        {"thesis_ref": None, "trigger_ref": None, "alert_ref": None, "deadline": None,
+         "run_id": None, **row})
+
+
+def append_alert(conn, row: Mapping) -> int:
+    """Insert one alert row (one per fired trigger); returns alert_id."""
+    cur = conn.execute(
+        "INSERT INTO alert (thesis_id, trigger_id, run_id, storm_key, created_at, deadline) "
+        "VALUES (:thesis_id, :trigger_id, :run_id, :storm_key, :created_at, :deadline)",
+        {"storm_key": None, **row})
+    return cur.lastrowid
+
+
+def fetch_theses(conn) -> list:
+    """All thesis identity rows."""
+    return conn.execute("SELECT * FROM thesis ORDER BY created_at, thesis_id").fetchall()
+
+
+def fetch_thesis_versions(conn, thesis_id: str) -> list:
+    """All versions for a thesis, ascending."""
+    return conn.execute(
+        "SELECT * FROM thesis_version WHERE thesis_id = ? ORDER BY version",
+        (thesis_id,)).fetchall()
+
+
+def fetch_asks_for(conn, *, kind=None, thesis_ref=None, trigger_ref=None) -> list:
+    """Asks filtered by any combination of kind / thesis_ref / trigger_ref."""
+    clauses, params = [], []
+    if kind is not None:
+        clauses.append("kind = ?"); params.append(kind)
+    if thesis_ref is not None:
+        clauses.append("thesis_ref = ?"); params.append(thesis_ref)
+    if trigger_ref is not None:
+        clauses.append("trigger_ref = ?"); params.append(trigger_ref)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    return conn.execute("SELECT * FROM ask" + where + " ORDER BY created_at, ask_id",
+                        params).fetchall()
