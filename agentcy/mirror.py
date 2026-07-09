@@ -145,3 +145,68 @@ def ingest_snapshot(conn, snap: SnapshotIn, *, clock: Clock) -> tuple[int, list[
         deltas.append(Delta("unexplained_cash", None, f"cash moved by {cash_delta:+.1f}",
                             prev["cash_balance_eur"], cash_delta))
     return snapshot_id, deltas
+
+
+@dataclass(frozen=True)
+class AdvicePosition:
+    snapshot_id: int
+    symbol: str
+    yf_ticker: str | None
+    instrument_type: str
+    quantity: float
+    native_currency: str
+    mv_native: float
+    mv_eur: float
+    weight: float
+    leverage: float
+
+
+def advice_positions(conn, snapshot_id: int | None = None) -> list[AdvicePosition]:
+    """The ONLY position read for balance/jobs/render — backed by positions_advice (invariant 4)."""
+    if snapshot_id is None:
+        latest = db.fetch_latest_snapshot(conn)
+        if latest is None:
+            return []
+        snapshot_id = latest["snapshot_id"]
+    return [AdvicePosition(
+        snapshot_id=r["snapshot_id"], symbol=r["symbol"], yf_ticker=r["yf_ticker"],
+        instrument_type=r["instrument_type"], quantity=r["quantity"],
+        native_currency=r["native_currency"], mv_native=r["mv_native"], mv_eur=r["mv_eur"],
+        weight=r["weight"], leverage=r["leverage"])
+        for r in db.fetch_positions_advice(conn, snapshot_id)]
+
+
+_OUTSIDE_TYPES = frozenset({"crypto", "copyportfolio", "etf"})
+
+
+def framework_status(conn, symbol: str, *, as_of: datetime) -> str:
+    """Derived from latest designation; equity default backfill_pending; etf/crypto -> outside (E.2)."""
+    designations = db.fetch_latest_designations(conn)
+    if symbol in designations:
+        return designations[symbol]["framework_status"]
+    positions = advice_positions(conn)
+    itype = next((p.instrument_type for p in positions if p.symbol == symbol), "stock")
+    return "outside_framework" if itype in _OUTSIDE_TYPES else "backfill_pending"
+
+
+def designate(conn, symbol: str, status: str, *, journal_ref: int, valid_from: str) -> None:
+    """Append a designation (latest wins)."""
+    db.append_designation(conn, symbol=symbol, framework_status=status, valid_from=valid_from,
+                          journal_ref=journal_ref)
+
+
+def backfill_queue(conn, *, as_of: datetime) -> list[str]:
+    """backfill_pending symbols by weight desc, largest first (C.6)."""
+    # weight is a fraction of invested MV (adapter-computed); mv_eur breaks ties
+    # deterministically for equal/absent weights (both are monotonic within a snapshot).
+    ranked = sorted(advice_positions(conn), key=lambda p: (p.weight, p.mv_eur), reverse=True)
+    return [p.symbol for p in ranked if framework_status(conn, p.symbol, as_of=as_of) == "backfill_pending"]
+
+
+def snapshot_age(conn, *, as_of: datetime) -> "timedelta | None":
+    """Age of the latest snapshot (E.1 staleness ladder)."""
+    latest = db.fetch_latest_snapshot(conn)
+    if latest is None or as_of is None:
+        return None
+    return as_of - db.from_iso(latest["as_of"]) if "T" in latest["as_of"] else \
+        as_of - datetime.fromisoformat(latest["as_of"]).replace(tzinfo=as_of.tzinfo)
