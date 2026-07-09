@@ -117,3 +117,67 @@ def step_hell_no(state: dict, ask: AskOwner) -> str:
         }
         return "verdict"
     return "dossier"
+
+
+from agentcy import db
+from agentcy.fetch import store as _store_default
+
+
+class DossierPaused(Exception):
+    """C.4 - the Gate cannot verdict on absent/stale owner-earnings data."""
+
+
+def _yf_ticker(conn, ticker: str) -> str:
+    """Map symbol->yfinance ticker; default to the symbol itself (Gate candidates
+    are entered as yfinance-compatible tickers, H.1)."""
+    return db.fetch_current_symbol_map(conn).get(ticker, ticker)
+
+
+def build_dossier(conn, ticker: str, *, as_of, store=_store_default) -> dict:
+    """C.4 Buffett dossier: owner-earnings picture + statement-period counts +
+    current anchor multiple, every number from the hardened data layer. Missing/
+    empty/stale fundamentals -> DossierPaused (no verdict on absent data)."""
+    yf = _yf_ticker(conn, ticker)
+    oe = store.owner_fcf_ttm(conn, yf, as_of=as_of)
+    if oe is None or not oe.usable():
+        raise DossierPaused(
+            f"{ticker}: owner-earnings unavailable/stale - the Gate pauses; "
+            "no verdict on absent owner-earnings data (C.4)."
+        )
+    income = store.statement_history(conn, yf, "income", as_of=as_of)
+    income_periods = [r["period_end"] for r in income.value]
+
+    # current anchor multiple = close / owner-FCF-per-share; None if price absent
+    current_multiple = None
+    close = store.latest_close(conn, yf, as_of=as_of)
+    denom = store.denominator_per_share(conn, yf, as_of=as_of)
+    if close is not None and denom is not None and denom.usable() and denom.value > 0:
+        current_multiple = close.value.close / denom.value
+
+    return {
+        "ticker": ticker,
+        "yf_ticker": yf,
+        "fcf_ttm": oe.value.fcf_ttm,
+        "sbc_ttm": oe.value.sbc_ttm,
+        "owner_fcf_ttm": oe.value.owner_fcf_ttm,
+        "owner_fcf_per_share_ttm": oe.value.owner_fcf_per_share_ttm,
+        "owner_fcf_margin_ttm": oe.value.owner_fcf_margin_ttm,
+        "owner_earnings_json": _oe_json(oe),
+        "owner_earnings_periods": list(oe.value.periods_used),
+        "income_period_count": len(income_periods),
+        "income_periods": income_periods,
+        "current_multiple": current_multiple,
+        "fetched_at": oe.fetched_at.isoformat().replace("+00:00", "Z"),
+    }
+
+
+def _oe_json(oe: "Stamped") -> str:
+    import json
+    v = oe.value
+    return json.dumps({
+        "fcf_ttm": v.fcf_ttm, "sbc_ttm": v.sbc_ttm, "owner_fcf_ttm": v.owner_fcf_ttm,
+        "owner_fcf_per_share_ttm": v.owner_fcf_per_share_ttm,
+        "owner_fcf_margin_ttm": v.owner_fcf_margin_ttm,
+        "periods_used": list(v.periods_used),
+        "fetched_at": oe.fetched_at.isoformat().replace("+00:00", "Z"),
+    })
