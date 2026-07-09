@@ -1,0 +1,50 @@
+{
+  "income": {
+    "columns": ["2026-03-31", "2025-12-31", "2025-09-30", "2025-06-30"],
+    "index": ["Total Revenue", "Cost Of Revenue", "Gross Profit", "Operating Income",
+              "EBITDA", "EBIT", "Net Income", "Basic EPS", "Tax Provision"],
+    "data": [
+      [6.6e10, 6.4e10, 6.2e10, 6.0e10],
+      [2.05e10, 2.0e10, 1.95e10, 1.9e10],
+      [4.55e10, 4.4e10, 4.25e10, 4.1e10],
+      [3.0e10, 2.9e10, 2.8e10, 2.7e10],
+      [3.7e10, 3.6e10, 3.5e10, 3.4e10],
+      [3.05e10, 2.95e10, 2.85e10, 2.75e10],
+      [2.5e10, 2.4e10, 2.3e10, 2.2e10],
+      [3.36, 3.23, 3.10, 2.96],
+      [4.7e9, 4.5e9, 4.3e9, 4.1e9]
+    ]
+  },
+  "balance": {
+    "columns": ["2026-03-31", "2025-12-31", "2025-09-30", "2025-06-30"],
+    "index": ["Total Debt", "Cash And Cash Equivalents", "Total Assets",
+              "Total Liabilities Net Minority Interest", "Stockholders Equity",
+              "Current Assets", "Current Liabilities", "Working Capital"],
+    "data": [
+      [5.9e10, 6.0e10, 6.1e10, 6.2e10],
+      [8.4e10, 8.2e10, 8.0e10, 7.8e10],
+      [5.5e11, 5.4e11, 5.3e11, 5.2e11],
+      [2.46e11, 2.44e11, 2.42e11, 2.4e11],
+      [3.04e11, 2.96e11, 2.88e11, 2.8e11],
+      [1.99e11, 1.96e11, 1.93e11, 1.9e11],
+      [1.23e11, 1.22e11, 1.21e11, 1.2e11],
+      [7.6e10, 7.4e10, 7.2e10, 7.0e10]
+    ]
+  },
+  "cashflow": {
+    "columns": ["2026-03-31", "2025-12-31", "2025-09-30", "2025-06-30"],
+    "index": ["Operating Cash Flow", "Capital Expenditure", "Free Cash Flow",
+              "Stock Based Compensation", "End Cash Position", "Changes In Cash",
+              "Repurchase Of Capital Stock", "Cash Dividends Paid"],
+    "data": [
+      [3.6e10, 3.4e10, 3.2e10, 3.0e10],
+      [-1.3e10, -1.2e10, -1.1e10, -1.0e10],
+      [2.3e10, 2.2e10, 2.1e10, 2.0e10],
+      [2.8e9, 2.7e9, 2.6e9, 2.5e9],
+      [8.4e10, 8.2e10, 8.0e10, 7.8e10],
+      [2.0e9, 2.0e9, 2.0e9, 1.0e9],
+      [-4.0e9, -4.0e9, -4.0e9, -4.0e9],
+      [-5.7e9, -5.7e9, -5.6e9, -5.6e9]
+    ]
+  }
+}

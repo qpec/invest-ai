@@ -81,3 +81,53 @@ def yf_fixture():
     return _load
 
 # --- phase-specific fixtures go below this line only ------------------------------
+
+# --- P2: yfinance fixture -> pandas converters + sleep recorder -------------------
+
+@pytest.fixture()
+def yf_frame(yf_fixture):
+    """Split-orient recorded frame -> (pd.DataFrame with DatetimeIndex, currency|None)."""
+    import pandas as pd
+
+    def _load(name: str):
+        raw = yf_fixture(name)
+        idx = pd.to_datetime(raw["index"]) if raw["index"] else []
+        return pd.DataFrame(raw["data"], index=idx, columns=raw["columns"]), raw.get("currency")
+
+    return _load
+
+
+@pytest.fixture()
+def yf_statements(yf_fixture):
+    """Recorded statements pack -> {'income'|'balance'|'cashflow': DataFrame} (rows=line items, cols=period Timestamps)."""
+    import pandas as pd
+
+    def _load(name: str = "msft_statements"):
+        raw = yf_fixture(name)
+        return {
+            stype: pd.DataFrame(part["data"], index=part["index"], columns=pd.to_datetime(part["columns"]))
+            for stype, part in raw.items()
+        }
+
+    return _load
+
+
+@pytest.fixture()
+def yf_series(yf_fixture):
+    """Recorded series (shares) -> pd.Series with DatetimeIndex, duplicates preserved."""
+    import pandas as pd
+
+    def _load(name: str = "msft_shares_full"):
+        raw = yf_fixture(name)
+        return pd.Series(raw["data"], index=pd.to_datetime(raw["index"]), dtype=float)
+
+    return _load
+
+
+@pytest.fixture()
+def no_sleep(monkeypatch):
+    """Record time.sleep durations instead of sleeping (pacing/backoff tests)."""
+    import time as _time
+    calls: list[float] = []
+    monkeypatch.setattr(_time, "sleep", lambda s: calls.append(float(s)))
+    return calls
