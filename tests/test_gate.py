@@ -453,3 +453,95 @@ def test_status_rebuttal_reasked_until_nonempty():
     from agentcy.gate import _status_rebuttal
     ask = ScriptedAsker(["   ", "real rebuttal text"])
     assert _status_rebuttal(ask) == "real rebuttal text"
+
+
+# --- P4.9 finalize ------------------------------------------------------------
+
+from agentcy.gate import GateOutcome
+
+
+def _full_state(verdict_multiple=30.0, conviction="high"):
+    return {
+        "ticker": "VEEV",
+        "business_model_2s": TWO_SENTENCES,
+        "moat_phrase": "switching costs",
+        "moat_types": ["switching_costs"],
+        "moat_evidence": "retention >115%",
+        "fair_band_low": 25.0, "fair_band_high": 35.0,
+        "denominator_note": "P/owner-FCF",
+        "conviction": conviction, "mgmt_trust": "trusted_owner_operator",
+        "mgmt_trust_note": "founder-CEO", "circle_fit": "core",
+        "circle_fit_note": "healthcare SaaS", "ten_year_statement": TEN_YEAR,
+        "status_buy_flag": False, "status_buy_note": None,
+        "hell_no": {"HN1": "no", "HN2": "no", "HN3": "no", "HN4": "no", "HN5": "no"},
+        "triggers": [
+            {"type": "growth_floor", "statement": "rev YoY < 10% (2q)",
+             "metric": "revenue_yoy", "comparator": "<", "threshold": 10.0,
+             "moat_link": "switching_costs", "persistence": "2_consecutive_quarters",
+             "check_method": "automated", "data_source": "yf_quarterly_statements",
+             "cadence": "weekly", "yes_means": None},
+            {"type": "dilution", "statement": "shares +3%/12m", "metric": "shares_yoy",
+             "comparator": ">", "threshold": 3.0, "moat_link": None,
+             "persistence": "ttm", "check_method": "automated",
+             "data_source": "yf_shares_full", "cadence": "weekly", "yes_means": None},
+        ],
+    }
+
+
+def _dossier(multiple=30.0):
+    return {"ticker": "VEEV", "yf_ticker": "VEEV", "owner_earnings_json": "{}",
+            "owner_fcf_per_share_ttm": 4.0, "current_multiple": multiple,
+            "income_period_count": 4, "income_periods": ["2026-03-31"]}
+
+
+def test_finalize_buy_ready_creates_draft_thesis(tmp_db, fixed_clock):
+    from agentcy import gate
+    outcome = gate._finalize(tmp_db, mode="gate", state=_full_state(),
+                             dossier=_dossier(30.0), verdict={
+                                 "verdict": "BUY_READY", "reason_class": None,
+                                 "note": None, "standing_questions": (),
+                                 "suggested_max_weight_pct": 10.0,
+                                 "requires_status_rebuttal": False},
+                             clock=fixed_clock)
+    assert isinstance(outcome, GateOutcome)
+    assert outcome.verdict == "BUY_READY"
+    assert outcome.thesis_id is not None
+    th = db.fetch_thesis(tmp_db, outcome.thesis_id)
+    assert th["ticker"] == "VEEV"
+    assert th["origin"] == "gate"
+    ver = db.fetch_current_thesis_version(tmp_db, outcome.thesis_id)
+    assert ver["conviction"] == "high"
+    assert ver["value_at_purchase"] is None            # filled at true activation (BUF-12/contract)
+    triggers = db.fetch_armed_triggers(tmp_db, outcome.thesis_id)
+    assert len(triggers) == 2
+    # a gate_verdict journal entry exists
+    entries = db.fetch_journal_entries(tmp_db, decision_type="gate_verdict")
+    assert any(e["decision_subtype"] == "buy_ready" for e in entries)
+
+
+def test_finalize_pass_journals_only_no_thesis(tmp_db, fixed_clock):
+    from agentcy import gate
+    state = {"ticker": "VEEV",
+             "pending_pass": {"reason_class": "hell_no_HN2", "note": "leverage"}}
+    outcome = gate._finalize(tmp_db, mode="gate", state=state, dossier=None,
+                             verdict={"verdict": "PASS", "reason_class": "hell_no_HN2",
+                                      "note": "leverage", "standing_questions": (),
+                                      "suggested_max_weight_pct": None,
+                                      "requires_status_rebuttal": False},
+                             clock=fixed_clock)
+    assert outcome.verdict == "PASS"
+    assert outcome.thesis_id is None
+    entries = db.fetch_journal_entries(tmp_db, decision_type="gate_verdict")
+    assert entries[0]["decision_subtype"] == "pass"
+
+
+def test_finalize_watch_thesis_stays_draft(tmp_db, fixed_clock):
+    from agentcy import gate
+    outcome = gate._finalize(tmp_db, mode="gate", state=_full_state(),
+                             dossier=_dossier(40.0), verdict={
+                                 "verdict": "WATCH", "reason_class": None, "note": None,
+                                 "standing_questions": (), "suggested_max_weight_pct": None,
+                                 "requires_status_rebuttal": False},
+                             clock=fixed_clock)
+    status = db.fetch_current_thesis_status(tmp_db, outcome.thesis_id)
+    assert status["status"] == "draft"                 # WATCH: thesis stays draft (C.6)
