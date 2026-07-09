@@ -40,13 +40,10 @@ def enqueue(conn, *, dedupe_key: str, kind: str, payload_html: str, document_pat
         raise ValueError(
             f"dedupe_key {dedupe_key!r} already {existing['status']}; "
             "pass an attempt-qualified key (tech-arch §5.4)")
-    cur = conn.execute(
-        "INSERT INTO outbox (dedupe_key, kind, created_at, run_id, artifact_ref, ask_ref, "
-        "payload_html, document_path, reply_markup_json, status, attempts) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0)",
-        (dedupe_key, kind, db.to_iso(clock.now()), run_id, artifact_ref, ask_ref,
-         payload_html, document_path, reply_markup_json),
-    )
-    return cur.lastrowid
+    return db.append_outbox(
+        conn, dedupe_key=dedupe_key, kind=kind, created_at=db.to_iso(clock.now()),
+        run_id=run_id, artifact_ref=artifact_ref, ask_ref=ask_ref,
+        payload_html=payload_html, document_path=document_path,
+        reply_markup_json=reply_markup_json)
 
 # --- P7 (daemon) drain/backoff/collapse land below this marker ---
