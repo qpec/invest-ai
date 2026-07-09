@@ -1,0 +1,47 @@
+# Weekly review — Sat 11 Jul 2026
+
+## 1. Verdict
+2 decisions waiting.
+
+## 2. Portfolio
+
+```
+Ticker  Wt%  EUR      Fw         Status  v  Conv  Sector    Anchor  Band    Triggers
+DDOG    7.1  €42,000  framework  intact  2  high  software  24×     28–36×  4/4 pass
+```
+
+Total portfolio value: €420,000.
+
+## 3. Thesis re-validation
+DDOG — thesis intact; 4/4 triggers pass.
+Next in backfill queue: ASML.
+VEEV — annual re-affirmation due.
+
+## 4. Balance &amp; concentration
+Cash 8.1% · N_eff 5.2 vs floor 4.0 · unpriced weight 1.2%.
+MSFT — €120 received since last snapshot.
+
+## 5. Outside framework
+Outside framework: 6.0% (cap 10% ✓).
+
+## 6. Watchlist
+SNOW — raw, 40 days to expiry.
+
+## 7. Prompted questions
+[Q1041] Prompted check — VEEV — T3: Committed question: "Has the founder-CEO departed?"
+
+## 8. The Study
+
+Re-study — VEEV: Vertical SaaS…
+  Still deepening?
+
+Mental model — Inversion: what guarantees failure?
+
+From the journal:
+  • JE-0042 — bought DDOG.
+
+Reading queue: 2 reports.
+Did anything expand or shrink the circle this week? (optional)
+
+## 9. Data health appendix
+all sources fresh.
