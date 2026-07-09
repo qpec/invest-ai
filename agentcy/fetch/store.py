@@ -93,3 +93,67 @@ def fx_rate_eur(conn, currency: str, *, as_of: datetime) -> Stamped[float] | Non
     if stamped is None:
         return None
     return Stamped(float(stamped.value.close), stamped.fetched_at, stamped.state, stamped.note)
+
+
+def _fingerprint(payload_json: str) -> str:
+    """Stable content hash over one period's payload — a revision changes it, an
+    identical re-fetch does not (drives fundamentals_period dedup + the D.3 feed)."""
+    return hashlib.sha256(payload_json.encode("utf-8")).hexdigest()[:16]
+
+
+def store_statements(conn, yf_ticker: str, statements: dict[str, pd.DataFrame], *,
+                     run_id: int | None, fetched_at: str) -> list[str]:
+    """Append per-period rows on unseen fingerprint only; returns NEW fingerprint tags
+    '{statement_type}:{period_end}:{fp}' (the D.3 earnings-detector feed, §3.7)."""
+    new: list[str] = []
+    for stype in ("income", "balance", "cashflow"):
+        frame = statements.get(stype)
+        if frame is None or frame.shape[1] == 0:
+            continue
+        for col in frame.columns:
+            period_end = pd.Timestamp(col).date().isoformat()
+            # canonical per-period payload: {row_label: value}, NaN preserved as null, sorted keys
+            col_series = frame[col]
+            payload = {str(k): (None if pd.isna(v) else float(v)) for k, v in col_series.items()}
+            payload_json = json.dumps(payload, sort_keys=True)
+            fp = _fingerprint(payload_json)
+            wrote = db.append_fundamentals_period(
+                conn, yf_ticker=yf_ticker, statement_type=stype, period_end=period_end,
+                payload_json=payload_json, fingerprint=fp, fetched_at=fetched_at, run_id=run_id,
+            )
+            if wrote:
+                new.append(f"{stype}:{period_end}:{fp}")
+    return new
+
+
+def _statement_state(rows: list, as_of: datetime, next_earnings: str | None) -> DataState:
+    """§7.5 TTL (plan note 1): STALE when a passed calendar earnings (newer than the newest
+    archived period) is >14 days old with no new data, OR — with no such signal — the newest
+    period_end is older than 135 days. FRESH otherwise. Empty archive is STALE."""
+    if not rows:
+        return DataState.STALE
+    newest_period = max(date.fromisoformat(r["period_end"]) for r in rows)
+    if next_earnings:
+        exp = date.fromisoformat(next_earnings)
+        if exp > newest_period and exp <= as_of.date() and (as_of.date() - exp).days > STATEMENT_EARNINGS_GRACE_DAYS:
+            return DataState.STALE
+    if (as_of.date() - newest_period).days > STATEMENT_MAX_AGE_DAYS:
+        return DataState.STALE
+    return DataState.FRESH
+
+
+def statement_history(conn, yf_ticker: str, statement_type: str, *, as_of: datetime) -> Stamped[list]:
+    """Accumulated archive (latest fingerprint per period_end, ascending); STALE after 14
+    failed days past a passed earnings date or a 135-day-old newest period (§7.5)."""
+    rows = db.fetch_statement_periods(conn, yf_ticker, statement_type)
+    cal = db.fetch_earnings_calendar(conn, yf_ticker)
+    next_earnings = cal["expected_date"] if cal else None
+    state = _statement_state(rows, as_of, next_earnings)
+    if not rows:
+        return Stamped([], as_of, DataState.STALE, f"{yf_ticker} {statement_type}: no statements archived")
+    fetched_at = db.from_iso(max(r["fetched_at"] for r in rows))
+    note = None
+    if state is DataState.STALE:
+        newest = max(r["period_end"] for r in rows)
+        note = f"{yf_ticker} {statement_type}: newest period {newest} stale at {as_of.date().isoformat()} — suspended, not passed (§7.5)"
+    return Stamped(list(rows), fetched_at, state, note)
