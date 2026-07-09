@@ -91,3 +91,54 @@ def test_reject_bad_horizon(tmp_db, fixed_clock):
         register.create_thesis(tmp_db, ticker="X", origin="gate",
                                fields=_fields(conviction="insane"),
                                triggers=_triggers(), journal_ref=1, clock=fixed_clock)
+
+
+def _mk(tmp_db, fixed_clock, **kw):
+    from agentcy import register
+    return register.create_thesis(tmp_db, ticker=kw.pop("ticker", "VEEV"), origin="gate",
+                                  fields=_fields(**kw), triggers=_triggers(), journal_ref=1,
+                                  clock=fixed_clock)
+
+
+def test_activate_draft_to_intact(tmp_db, fixed_clock):
+    from agentcy import register
+    tid = _mk(tmp_db, fixed_clock)
+    register.activate(tmp_db, tid, cause="position appeared in snapshot", clock=fixed_clock)
+    assert db.fetch_current_thesis_status(tmp_db, tid)["status"] == "intact"
+
+
+def test_under_review_sets_deadline(tmp_db, fixed_clock):
+    from agentcy import register
+    tid = _mk(tmp_db, fixed_clock)
+    register.activate(tmp_db, tid, cause="c", clock=fixed_clock)
+    register.transition(tmp_db, tid, "under_review", cause="T2 fired", cause_ref="A1",
+                        clock=fixed_clock)
+    st = db.fetch_current_thesis_status(tmp_db, tid)
+    assert st["status"] == "under_review"
+    assert st["review_deadline"] == "2026-07-15T05:00:00Z"      # +7d alert_decision_days
+
+
+def test_broken_is_terminal(tmp_db, fixed_clock):
+    from agentcy import register
+    tid = _mk(tmp_db, fixed_clock)
+    register.activate(tmp_db, tid, cause="c", clock=fixed_clock)
+    register.transition(tmp_db, tid, "under_review", cause="c", cause_ref=None, clock=fixed_clock)
+    register.transition(tmp_db, tid, "broken", cause="confirmed", cause_ref=None, clock=fixed_clock)
+    with pytest.raises(ValueError, match="broken.*intact|terminal"):
+        register.transition(tmp_db, tid, "intact", cause="x", cause_ref=None, clock=fixed_clock)
+
+
+def test_illegal_draft_to_broken(tmp_db, fixed_clock):
+    from agentcy import register
+    tid = _mk(tmp_db, fixed_clock)
+    with pytest.raises(ValueError):
+        register.transition(tmp_db, tid, "broken", cause="x", cause_ref=None, clock=fixed_clock)
+
+
+def test_retired_is_terminal(tmp_db, fixed_clock):
+    from agentcy import register
+    tid = _mk(tmp_db, fixed_clock)
+    register.activate(tmp_db, tid, cause="c", clock=fixed_clock)
+    register.transition(tmp_db, tid, "retired", cause="closed", cause_ref=None, clock=fixed_clock)
+    with pytest.raises(ValueError):
+        register.transition(tmp_db, tid, "intact", cause="x", cause_ref=None, clock=fixed_clock)
