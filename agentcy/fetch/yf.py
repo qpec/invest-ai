@@ -42,3 +42,44 @@ def configure() -> None:
 def _utcnow() -> datetime:
     """Seam for the statement-sanity recency check (tests pin it; runtime = wall clock)."""
     return datetime.now(timezone.utc)
+
+
+PACE_BASE_SECONDS = 2.0
+PACE_JITTER = (0.5, 1.5)
+
+try:  # POSIX flock — production (Ubuntu, tech-arch §1.1)
+    import fcntl
+
+    def _lock(f) -> None:
+        fcntl.flock(f, fcntl.LOCK_EX)
+
+    def _unlock(f) -> None:
+        fcntl.flock(f, fcntl.LOCK_UN)
+
+except ImportError:  # Windows dev box only — suite parity, never deployed (plan note 3)
+    import msvcrt
+
+    def _lock(f) -> None:
+        f.seek(0)
+        msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+
+    def _unlock(f) -> None:
+        f.seek(0)
+        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+@contextmanager
+def yahoo_pacing(state_dir: Path):
+    """Acquire flock on <state_dir>/locks/yahoo.lock and hold the >=2s + 0.5-1.5s jitter
+    spacing INSIDE the lock (§7.2) — one mechanism, box-wide serialization of every
+    Yahoo call (daily job, Saturday batch, event checks, desk Gate runs)."""
+    lock_dir = Path(state_dir) / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    with open(lock_dir / "yahoo.lock", "a+b") as f:
+        _lock(f)
+        try:
+            yield
+        finally:
+            # Spacing inside the lock: the next acquirer anywhere on the box waits it out.
+            time.sleep(PACE_BASE_SECONDS + random.uniform(*PACE_JITTER))
+            _unlock(f)
