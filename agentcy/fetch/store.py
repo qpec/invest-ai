@@ -194,3 +194,36 @@ def shares_history(conn, yf_ticker: str, *, as_of: datetime) -> Stamped[pd.Serie
         note = f"{yf_ticker}: shares last observed {newest.isoformat()} — >{SHARES_GAP_DAYS}d gap at {as_of.date().isoformat()} (§7.4)"
     fetched_at = db.from_iso(max(fetched.values()))
     return Stamped(series, fetched_at, state, note)
+
+
+def store_officers(conn, yf_ticker: str, officers: list[dict], *, fetched_at: str) -> bool:
+    """Append snapshot; True when the fingerprint CHANGED vs the previous snapshot (queues
+    the B.2 officer-diff question). First-ever snapshot is a baseline -> False (plan note 6)."""
+    normalized = sorted(
+        ({"name": str(o.get("name", "")), "title": str(o.get("title", ""))} for o in officers),
+        key=lambda o: o["name"],
+    )
+    officers_json = json.dumps(normalized, sort_keys=True)
+    fp = _fingerprint(officers_json)
+    prev = db.fetch_latest_officers(conn, yf_ticker)
+    db.append_officer_snapshot(conn, yf_ticker=yf_ticker, officers_json=officers_json,
+                               fingerprint=fp, fetched_at=fetched_at)
+    if prev is None:
+        return False                     # baseline: no tripwire on first observation
+    return prev["fingerprint"] != fp
+
+
+def store_calendar(conn, yf_ticker: str, expected_date: str, *, run_id: int | None, fetched_at: str) -> None:
+    """Append a best-effort calendar-estimate row (MA-7; preview only, never triggers)."""
+    db.append_earnings_calendar(conn, yf_ticker=yf_ticker, expected_date=expected_date,
+                                fetched_at=fetched_at, run_id=run_id)
+
+
+def next_expected_earnings(conn, yf_ticker: str, *, as_of: datetime) -> str | None:
+    """Preview-only 'calendar estimate' date within 21 days of as_of (D.1 check 5); else None."""
+    cal = db.fetch_earnings_calendar(conn, yf_ticker)
+    if not cal:
+        return None
+    expected = date.fromisoformat(cal["expected_date"])
+    delta = (expected - as_of.date()).days
+    return cal["expected_date"] if 0 <= delta <= CALENDAR_PREVIEW_DAYS else None
