@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from agentcy import db
+from agentcy import asks as _asks, config as _config, register as _register
 from agentcy.clock import Clock, effective_elapsed
 from agentcy.fetch import store
 from agentcy.freshness import CheckResult, DataState
@@ -118,3 +119,55 @@ def _eval_prompted(conn, trigger_row, *, as_of: datetime) -> CheckOutcome:
     yes_fires = trigger_row["yes_means"] == "fire"
     fires = (choice == "yes") == yes_fires
     return _outcome(tid, "FIRE" if fires else "PASS")
+
+
+def evaluate_armed(conn, *, cadence: str, thesis_id: str | None = None, as_of: datetime,
+                   run_id: int) -> list[CheckOutcome]:
+    """Evaluate all armed triggers for the cadence and append trigger_check rows (never fires)."""
+    outcomes = []
+    for row in db.fetch_armed_triggers(conn, thesis_id):
+        if row["cadence"] != cadence:
+            continue
+        out = evaluate(conn, row, as_of=as_of)
+        db.append_trigger_check(conn, {
+            "trigger_id": out.trigger_id, "run_id": run_id, "checked_at": db.to_iso(as_of),
+            "result": out.result, "observed_value": out.observed_value, "headroom": out.headroom,
+            "evaluable_from": out.evaluable_from,
+        })
+        outcomes.append(out)
+    return outcomes
+
+
+def current_state(conn, trigger_id: int) -> CheckOutcome | None:
+    """Derived from the latest trigger_check row — the trigger table holds no state (§4.4)."""
+    r = db.fetch_latest_trigger_check(conn, trigger_id)
+    if r is None:
+        return None
+    return _outcome(trigger_id, r["result"], observed=r["observed_value"], headroom=r["headroom"],
+                    evaluable_from=r["evaluable_from"])
+
+
+def fire(conn, outcome: CheckOutcome, *, clock: Clock, run_id: int,
+         storm_key: str | None = None) -> int:
+    """FIRE consequence (B.3.1): thesis -> under_review, alert + A-ask minted; returns alert_id."""
+    trig = next(t for t in db.fetch_armed_triggers(conn) if t["trigger_id"] == outcome.trigger_id)
+    thesis_id = trig["thesis_id"]
+    # idempotence: an already-open alert for this trigger is not re-fired
+    for al in db.fetch_open_alerts(conn):
+        if al["trigger_id"] == outcome.trigger_id:
+            return al["alert_id"]
+    now = clock.now()
+    days = _config.get_int(conn, "alert_decision_days")
+    deadline = db.to_iso(now + timedelta(days=days))
+    status = db.fetch_current_thesis_status(conn, thesis_id)["status"]
+    if status == "intact":
+        _register.transition(conn, thesis_id, "under_review",
+                             cause=f"trigger {outcome.trigger_id} fired", cause_ref=None, clock=clock)
+    alert_id = db.append_alert(conn, {
+        "thesis_id": thesis_id, "trigger_id": outcome.trigger_id, "run_id": run_id,
+        "storm_key": storm_key, "created_at": db.to_iso(now), "deadline": deadline,
+    })
+    _asks.mint(conn, kind="A", prompt=trig["statement"], options=["confirm", "refute"],
+               expects_freetext=True, thesis_ref=thesis_id, trigger_ref=outcome.trigger_id,
+               alert_ref=alert_id, deadline=deadline, run_id=run_id, clock=clock)
+    return alert_id
