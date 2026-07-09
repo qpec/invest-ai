@@ -8,13 +8,17 @@ import dataclasses
 from datetime import timedelta
 from pathlib import Path
 
-from agentcy import asks, config as config_mod, db, events, mirror, register, study, triggers
-from agentcy.clock import Clock
+import pandas as pd
+
+from agentcy import (archive, asks, cluster, config as config_mod, db, events, mirror,
+                     register, study, triggers)
+from agentcy.clock import Clock, SystemClock
 from agentcy.events import EventRequest
 from agentcy.fetch import store, yf
 from agentcy.fetch.yf import FetchFailed
-from agentcy.jobs import runner
+from agentcy.jobs import keyboards, runner
 from agentcy.render import alert as render_alert_mod, contexts
+from agentcy.render import weekly as render_weekly_mod
 from agentcy.tg import outbox
 
 RUN_TYPE = "weekly"
@@ -295,3 +299,150 @@ def revalidation_lines(conn, *, as_of) -> tuple[str, ...]:
                           for r in rows) or "no armed triggers"
         out.append(f"{p.symbol} — {st['status'] if st else 'draft'} (v{tv['version']}) · {score}")
     return tuple(out)
+
+
+def main(*, clock: Clock | None = None, state_dir: Path | None = None) -> int:
+    clock = clock or SystemClock()
+    state_dir = state_dir or db.state_dir()
+    conn = db.open_db(state_dir)
+    try:
+        return runner.sweep_and_run(conn, RUN_TYPE, run_one, clock=clock, state_dir=state_dir)
+    finally:
+        conn.close()
+
+
+def run_one(conn, handle, *, clock: Clock, state_dir: Path) -> tuple[str, dict]:
+    batch = refresh_batch(conn, run_id=handle.run_id, clock=clock, state_dir=state_dir)
+    fired = run_trigger_tests(conn, run_id=handle.run_id, clock=clock)
+    qs = queue_prompted_questions(conn, run_id=handle.run_id, clock=clock)
+    sweeps = housekeeping(conn, run_id=handle.run_id, clock=clock)         # P6.13; stub {} below
+    ctx = build_weekly_context(conn, as_of=clock.now(), clock=clock, run_id=handle.run_id,
+                               refresh_notes=batch["data_health"])
+    series, doc = render_weekly_mod.render_weekly(ctx)
+    report_id = archive.archive_and_store(conn, doc, run_id=handle.run_id, report_type="weekly",
+                                          period=handle.scheduled_for,
+                                          freshness={"notes": batch["data_health"]}, clock=clock)
+    doc_path = db.fetch_report(conn, report_id)["archive_path"]
+    for i, msg in enumerate(series, start=1):
+        runner.enqueue_rendered(conn, msg,
+                                base_key=outbox.scheduled_key(RUN_TYPE, handle.scheduled_for, f"msg{i}"),
+                                kind="weekly_msg", run_id=handle.run_id, clock=clock,
+                                artifact_ref=report_id)
+    runner.enqueue_rendered(conn, doc,
+                            base_key=outbox.scheduled_key(RUN_TYPE, handle.scheduled_for, "doc"),
+                            kind="weekly_doc", run_id=handle.run_id, clock=clock,
+                            artifact_ref=report_id, document_path=doc_path)
+    conn.commit()
+    status = "degraded" if batch["data_health"] else "ok"
+    return status, {"fired": fired["fired_alert_ids"], "prompted": qs,
+                    "sweeps": sweeps, "data_health": batch["data_health"]}
+
+
+def build_weekly_context(conn, *, as_of, clock: Clock, run_id: int,
+                         refresh_notes: list[str]) -> contexts.WeeklyContext:
+    snap = db.fetch_latest_snapshot(conn)
+    positions = mirror.advice_positions(conn, snap["snapshot_id"]) if snap else []
+    designations = db.fetch_latest_designations(conn)
+    rows = []
+    total = (snap["cash_balance_eur"] if snap else 0.0)
+    for p in positions:
+        total += p.mv_eur
+        if p.instrument_type == "cash":
+            continue
+        tid = register.live_thesis_for(conn, p.symbol)
+        tv = db.fetch_current_thesis_version(conn, tid) if tid else None
+        st = db.fetch_current_thesis_status(conn, tid) if tid else None
+        des = designations.get(p.symbol)
+        armed = db.fetch_armed_triggers(conn, tid) if tid else []
+        n_armed = len(armed)
+        n_pass = sum(1 for t in armed
+                     if (c := db.fetch_latest_trigger_check(conn, t["trigger_id"]))
+                     and c["result"] == "PASS")
+        rows.append(contexts.PortfolioRow(
+            ticker=p.symbol, weight_pct=round(p.weight * 100, 1), mv_eur=p.mv_eur,
+            framework_status=(des["framework_status"] if des else "backfill_pending"),
+            thesis_status=(st["status"] if st else None),
+            thesis_version=(tv["version"] if tv else None),
+            conviction=(tv["conviction"] if tv else None), sector_label=None,
+            anchor_multiple=None,
+            band_low=(tv["fair_band_low"] if tv else None),
+            band_high=(tv["fair_band_high"] if tv else None),
+            trigger_scorecard=f"{n_pass}/{n_armed} pass"))
+    returns, weights = _returns_frame(conn, positions)
+    bal = mirror.balance(conn, as_of=as_of, returns_local=returns)   # populates n_eff (§E.5)
+    clus = cluster.compute_clusters(returns, weights,
+                                    threshold=config_mod.get_float(conn, "correlation_threshold"))
+    div_lines, reinvest = dividend_lines(conn, as_of=as_of)
+    unver = unverifiable_headlines(conn, as_of=as_of)
+    open_alerts = db.fetch_open_alerts(conn)
+    decisions = _decision_blocks(conn)
+    bq = mirror.backfill_queue(conn, as_of=as_of)
+    reaff_due = tuple(register.anniversaries_due(conn, as_of=as_of))
+    celebrated = not (open_alerts or unver or broken_but_held(conn, as_of=as_of) or decisions)
+    headline = ("No action needed. The document has the full picture when you want it."
+                if celebrated else
+                f"{len(open_alerts)} open review(s), {len(unver)} escalation(s), "
+                f"{len(decisions)} decision(s) waiting.")
+    outside_pct = bal.outside_framework_pct
+    return contexts.WeeklyContext(
+        as_of=as_of, headline_verdict=" ".join([headline] + list(unver)), celebrated=celebrated,
+        decisions=tuple(d for d in decisions if not d.ask_id.startswith("Q")),
+        portfolio=tuple(rows), total_eur=total,
+        revalidations=revalidation_lines(conn, as_of=as_of),
+        backfill_queue_line=(f"backfill next in queue: {bq[0]} ({len(bq)} pending, largest first)"
+                             if bq else None),
+        broken_but_held=broken_but_held(conn, as_of=as_of), reaffirmations_due=reaff_due,
+        balance=bal, clusters=clus, dividend_lines=div_lines, reinvest_reminder=reinvest,
+        loosening_echoes=tuple(str(dict(r)) for r in register.loosening_echoes(conn, as_of=as_of)),
+        outside_framework_line=(f"outside framework: {outside_pct:.1f}% of book "
+                                f"(cap {config_mod.get_float(conn, 'outside_framework_cap_pct'):.0f}%)"),
+        watchlist_lines=_watchlist_lines(conn, as_of=as_of),
+        prompted_questions=tuple(d for d in decisions if d.ask_id.startswith("Q")),
+        study=study_block(conn, run_id=run_id, clock=clock),
+        data_health=tuple(refresh_notes), generated_at=as_of)
+
+
+def _decision_blocks(conn) -> list[contexts.DecisionBlock]:
+    """Open Q/F/V asks as msg-2 decision blocks, each with its stable-ID keyboard (§2.2).
+    The kind IS the first character of ask_id (D.5 ID format), so no extra lookup is needed;
+    A-asks ride their alert message (P6.10), not msg 2."""
+    blocks = []
+    for kind, kb in (("Q", keyboards.q_keyboard), ("F", keyboards.reaff_keyboard),
+                     ("V", keyboards.v_keyboard)):
+        for a in db.fetch_open_asks(conn, kind=kind):
+            blocks.append(contexts.DecisionBlock(
+                ask_id=a["ask_id"], heading=f"{a['ask_id']} — decision waiting",
+                body=a["prompt"], reply_markup_json=kb(a["ask_id"])))
+    return blocks
+
+
+def _watchlist_lines(conn, *, as_of) -> tuple[str, ...]:
+    """G.2 §6: approved -> distance to fair entry; raw -> name + days-to-expiry ONLY."""
+    lines = []
+    for item in db.fetch_watchlist(conn, stage="gate_approved_waiting"):
+        lines.append(f"{item['ticker']}: WATCH — fair-entry check armed daily")
+    for item in db.fetch_watchlist(conn, stage="raw"):
+        left = 90 - (as_of - db.from_iso(item["added_at"])).days
+        lines.append(f"{item['ticker']}: raw, {left} days to expiry")
+    return tuple(lines)
+
+
+def _returns_frame(conn, positions):
+    """E.5 input: 252d local-currency daily returns + weights for mappable invested positions,
+    keyed by symbol so the one frame feeds both mirror.balance (n_eff, symbol-keyed weights)
+    and the weekly cluster block consistently."""
+    frames = {}
+    weights = {}
+    for p in positions:
+        if p.instrument_type == "cash" or not p.yf_ticker:
+            continue
+        rows = db.fetch_v_price(conn, p.yf_ticker)
+        if rows:
+            s = pd.Series({r["bar_date"]: r["adj_close"] for r in rows}).sort_index()
+            frames[p.symbol] = s.pct_change().dropna().tail(252)
+            weights[p.symbol] = p.weight
+    return pd.DataFrame(frames), weights
+
+
+def housekeeping(conn, *, run_id: int, clock: Clock) -> dict:   # P6.13
+    return {}
