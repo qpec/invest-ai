@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 
 from agentcy import db
 from agentcy import asks as _asks, config as _config, register as _register
-from agentcy.clock import Clock, effective_elapsed
+from agentcy.clock import Clock
 from agentcy.fetch import store
 from agentcy.freshness import CheckResult, DataState
 
@@ -190,7 +190,7 @@ def unverifiable_weeks(conn, trigger_id: int, *, as_of: datetime) -> int:
         streak.append(c)
     if not streak:
         return 0
-    earliest = db.from_iso(streak[-1]["checked_at"])
-    span = effective_elapsed(conn, earliest, as_of)
-    # weeks = distinct weekly checks in the streak (each weekly check = one week)
+    # The count is pause-correct without any elapsed-time adjustment: paused weeks write
+    # no checks, so distinct weekly checks in the streak already exclude paused weeks —
+    # each weekly UNVERIFIABLE check equals exactly one unverifiable week.
     return len(streak)
