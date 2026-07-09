@@ -1,0 +1,12 @@
+# Triggers fired — 3 theses — one decision window, by Tue 14 Jul (7 days)
+
+A market-wide move can fire several theses at once; this is not a price alarm.
+Take them in order of weight — there is no rush beyond the shared deadline, and
+each is a separate decision by you alone.
+
+1. CRWD (9.2% of book) — T2 owner-FCF margin < 20% (2q): Q1 18.4%, Q2 17.1%.
+2. DDOG (7.1%) — T1 revenue YoY < 10% (2q): 9.1%, 8.4%.
+3. NET (4.3%) — T4 dilution > 3%/12m: 3.6%.
+
+Cost basis is not shown for any of these and will not be considered.
+Open each below to see its committed statement and your 10-year words.
