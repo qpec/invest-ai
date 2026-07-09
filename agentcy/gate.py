@@ -375,3 +375,110 @@ def _status_rebuttal(ask: AskOwner) -> str:
         ask, "status_buy_flag is set (you hesitated on the status question). Write "
              "the rebuttal for why this belongs in the book anyway. Required before "
              "BUY_READY stands.")
+
+
+import json
+from dataclasses import dataclass
+
+from agentcy import journal, register
+from agentcy.clock import Clock
+from agentcy.journal import EntryIn
+from agentcy.register import ThesisFields, TriggerSpec
+
+
+@dataclass(frozen=True)
+class GateOutcome:
+    """The public result of a completed Gate run (C.6). Consumed by P5 render/gate
+    and P8 cli."""
+    ticker: str
+    mode: str                       # 'gate' | 'backfill'
+    verdict: str                    # BUY_READY | WATCH | PASS | activate_backfill | no_thesis_exists
+    thesis_id: str | None
+    reason_class: str | None
+    suggested_max_weight_pct: float | None
+    standing_questions: tuple[str, ...]
+    journal_entry_id: int
+    dossier: dict | None
+
+
+_VERDICT_SUBTYPE = {"BUY_READY": "buy_ready", "WATCH": "watch", "PASS": "pass",
+                    "activate_backfill": "activate_backfill",
+                    "no_thesis_exists": "no_thesis_exists"}
+
+
+def _finalize(conn, *, mode: str, state: dict, dossier: dict | None,
+              verdict: dict, clock: Clock) -> GateOutcome:
+    """Turn the assembled state + verdict into durable objects (C.6), one
+    transaction. PASS journals only; BUY_READY/WATCH create a draft thesis +
+    triggers + verdict journal."""
+    v = verdict["verdict"]
+    system_rec = _verdict_text(v, verdict, dossier)
+
+    if v in ("PASS", "no_thesis_exists"):
+        entry_id = journal.append(conn, EntryIn(
+            decision_type="gate_verdict", decision_subtype=_VERDICT_SUBTYPE[v],
+            ticker=state["ticker"], system_recommendation=system_rec,
+            owner_action="no_action", reasoning_at_the_moment=verdict.get("note"),
+            actor="owner"), clock=clock)
+        return GateOutcome(ticker=state["ticker"], mode=mode, verdict=v,
+                           thesis_id=None, reason_class=verdict.get("reason_class"),
+                           suggested_max_weight_pct=None, standing_questions=(),
+                           journal_entry_id=entry_id, dossier=dossier)
+
+    # BUY_READY / WATCH / activate_backfill -> a draft thesis and its triggers.
+    # journal-FK order: the verdict entry first, then the thesis references it.
+    entry_id = journal.append(conn, EntryIn(
+        decision_type="gate_verdict", decision_subtype=_VERDICT_SUBTYPE[v],
+        ticker=state["ticker"], system_recommendation=system_rec,
+        owner_action="no_action",
+        reasoning_at_the_moment=state.get("status_buy_rebuttal")
+        or state.get("displacement_note"),
+        actor="owner"), clock=clock)
+
+    fields = ThesisFields(
+        business_model_2s=state["business_model_2s"],
+        moat_types=tuple(state["moat_types"]),
+        moat_evidence=state["moat_evidence"],
+        owner_earnings_json=(dossier or {}).get("owner_earnings_json", "{}"),
+        owner_earnings_narrative=state.get("owner_earnings_narrative", ""),
+        value_at_purchase=None,                 # filled at true activation (contract)
+        fair_band_low=state["fair_band_low"], fair_band_high=state["fair_band_high"],
+        denominator_note=state.get("denominator_note"),
+        conviction=state["conviction"], mgmt_trust=state["mgmt_trust"],
+        mgmt_trust_note=state.get("mgmt_trust_note"), circle_fit=state["circle_fit"],
+        circle_fit_note=state.get("circle_fit_note"),
+        ten_year_statement=state["ten_year_statement"],
+        status_buy_flag=state["status_buy_flag"],
+        status_buy_note=state.get("status_buy_note"))
+    specs = [TriggerSpec(
+        type=t["type"], statement=t["statement"], metric=t.get("metric"),
+        comparator=t.get("comparator"), threshold=t.get("threshold"),
+        moat_link=t.get("moat_link"), persistence=t["persistence"],
+        yes_means=t.get("yes_means")) for t in state["triggers"]]
+    origin = "backfill" if mode == "backfill" else "gate"
+    thesis_id = register.create_thesis(conn, ticker=state["ticker"], origin=origin,
+                                       fields=fields, triggers=specs,
+                                       journal_ref=entry_id, clock=clock)
+    return GateOutcome(
+        ticker=state["ticker"], mode=mode, verdict=v, thesis_id=thesis_id,
+        reason_class=None,
+        suggested_max_weight_pct=verdict.get("suggested_max_weight_pct"),
+        standing_questions=tuple(verdict.get("standing_questions", ())),
+        journal_entry_id=entry_id, dossier=dossier)
+
+
+def _verdict_text(v: str, verdict: dict, dossier: dict | None) -> str:
+    if v == "PASS":
+        return f"Gate verdict PASS ({verdict.get('reason_class')})."
+    if v == "no_thesis_exists":
+        return ("Backfill: no thesis exists -> treated as broken -> sell advice, "
+                "cost basis ignored.")
+    if v == "activate_backfill":
+        return "Backfill: thesis activated for an existing holding."
+    m = (dossier or {}).get("current_multiple")
+    tail = f" Current multiple {m}x." if m is not None else ""
+    if v == "BUY_READY":
+        return (f"Gate verdict BUY_READY. Suggested max initial weight "
+                f"{verdict.get('suggested_max_weight_pct')}%.{tail} "
+                "This is an invitation, not an instruction.")
+    return f"Gate verdict WATCH. Business passes; price above the fair band.{tail}"
