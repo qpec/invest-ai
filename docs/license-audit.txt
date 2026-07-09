@@ -1,5 +1,5 @@
 PACKAGE             VERSION      LICENSE                                             SOURCE              VERDICT
-------------------  -----------  --------------------------------------------------  ------------------  ------------------------
+------------------  -----------  --------------------------------------------------  ------------------  ----------------------------
 beautifulsoup4      4.15.0       MIT                                                 License             OK
 certifi             2026.6.17    MPL-2.0                                             License             EXCEPTION (journaled S1)
 cffi                2.1.0        MIT-0                                               License-Expression  OK
@@ -19,7 +19,7 @@ multitasking        0.0.13       Apache-2.0                                     
 numpy               2.5.1        BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0  License-Expression  OK
 packaging           26.2         Apache-2.0 OR BSD-2-Clause                          License-Expression  OK
 pandas              3.0.3        BSD-3-Clause                                        Classifier          OK
-peewee              4.1.1        (no license metadata)                               missing             EXCEPTION (journaled S1)
+peewee              4.1.1        (no license metadata)                               missing             EXCEPTION (owner 2026-07-09)
 pillow              12.3.0       MIT-CMU                                             License-Expression  OK
 platformdirs        4.10.0       MIT                                                 License-Expression  OK
 pluggy              1.6.0        MIT                                                 License             OK

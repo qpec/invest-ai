@@ -133,6 +133,22 @@ def test_certifi_exception_journaled():
     assert row.verdict == "EXCEPTION (journaled S1)"
 
 
+def test_exception_rows_cite_distinct_correct_bases():
+    # A committed governance record: each journaled exception must cite ITS OWN
+    # basis. certifi is the certifi/MPL-2.0 owner sign-off S1; peewee is a
+    # DIFFERENT, newer owner decision (the license-wall resolution of 2026-07-09).
+    (certifi_row,) = audit([d("certifi", license_text="MPL-2.0")])
+    (peewee_row,) = audit([d("peewee")])
+    assert certifi_row.verdict.startswith("EXCEPTION (")
+    assert peewee_row.verdict.startswith("EXCEPTION (")
+    # distinct
+    assert certifi_row.verdict != peewee_row.verdict
+    # correct, per-package bases
+    assert "S1" in certifi_row.verdict
+    assert "2026-07-09" in peewee_row.verdict
+    assert peewee_row.verdict == "EXCEPTION (owner 2026-07-09)"
+
+
 def test_exception_is_a_name_license_pair_not_a_blanket():
     # if certifi ever ships under a different non-allowed license, S1 does NOT cover it
     (row,) = audit([d("certifi", license_expression="GPL-3.0-only")])

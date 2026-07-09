@@ -129,11 +129,25 @@ EXCEPTIONS: dict[str, str] = {
     "peewee": NO_METADATA,  # owner decision 2026-07-09 (permissive; license wall)
 }
 
+# Short basis tag per named exception -- the verdict cites its OWN governance
+# record. certifi is the certifi/MPL-2.0 owner sign-off S1; peewee is a
+# DIFFERENT, newer owner decision (the license-wall resolution of 2026-07-09).
+# The formatter reads this map (never hardcodes a per-package string).
+EXCEPTION_BASES: dict[str, str] = {
+    "certifi": "journaled S1",
+    "peewee": "owner 2026-07-09",
+}
+
 # Human-readable reason per named exception (audit trail; owner sign-off).
 EXCEPTION_REASONS: dict[str, str] = {
     "certifi": "MPL-2.0; owner sign-off S1 2026-07-09",
     "peewee": "MIT upstream; ships no license metadata; owner decision 2026-07-09",
 }
+
+
+def _exception_verdict(name: str) -> str:
+    """The EXCEPTION verdict for a named exception, citing its own basis tag."""
+    return f"EXCEPTION ({EXCEPTION_BASES[_norm(name)]})"
 
 # First-party: the wall governs third-party code, not this repo.
 SELF: frozenset[str] = frozenset({"stock-agentcy"})
@@ -301,7 +315,7 @@ def _allowed(expr: str) -> bool:
 
 
 def audit(dists: Iterable[DistInfo]) -> list[AuditRow]:
-    """Verdict per distribution: OK | EXCEPTION (journaled S1) | SELF | VIOLATION*."""
+    """Verdict per distribution: OK | EXCEPTION (<basis>) | SELF | VIOLATION*."""
     rows: list[AuditRow] = []
     for d in sorted(dists, key=lambda x: x.name.lower()):
         if _norm(d.name) in SELF:
@@ -314,7 +328,7 @@ def audit(dists: Iterable[DistInfo]) -> list[AuditRow]:
             # owner decision 2026-07-09 (permissive; license wall)
             if EXCEPTIONS.get(_norm(d.name)) == NO_METADATA:
                 rows.append(AuditRow(d.name, d.version, "(no license metadata)",
-                                     source, "EXCEPTION (journaled S1)"))
+                                     source, _exception_verdict(d.name)))
             else:
                 rows.append(AuditRow(d.name, d.version, "(no license metadata)",
                                      source, "VIOLATION"))
@@ -324,7 +338,7 @@ def audit(dists: Iterable[DistInfo]) -> list[AuditRow]:
         else:
             expected = EXCEPTIONS.get(_norm(d.name))
             if expected is not None and expr.strip().lower() == expected.lower():
-                verdict = "EXCEPTION (journaled S1)"
+                verdict = _exception_verdict(d.name)
             elif _GPL_RE.search(expr):
                 verdict = "VIOLATION (GPL family -- hard ban)"
             else:
