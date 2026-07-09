@@ -84,3 +84,36 @@ def step_circle(state: dict, ask: AskOwner) -> str:
         return "verdict"
     state["circle_fit_initial"] = fit
     return "hell_no"
+
+
+# C.3 - five binary tests; "yes" = FAIL on every question (phrased so the
+# dangerous answer is always yes). One FAIL = REJECT, no override path.
+HELL_NO_QUESTIONS = (
+    ("HN1", "Leverage - does the instrument embed leverage (CFD, leveraged ETF, "
+            "margin), or would the purchase require borrowing? (yes = FAIL)"),
+    ("HN2", "Understandability - does valuing it need more than ~5 core "
+            "assumptions? (yes = FAIL)"),
+    ("HN3", "Management - is there any reason to distrust management? "
+            "(yes = FAIL; prefer owner-operators with skin in the game)"),
+    ("HN4", "Fad - is it narrative rather than real present-day revenue and FCF? "
+            "(yes = FAIL)"),
+    ("HN5", "Fees - fee structure, 2-and-20, expense ratio, or a structure "
+            "requiring frequent trading? (yes = FAIL)"),
+)
+
+
+def step_hell_no(state: dict, ask: AskOwner) -> str:
+    """C.3 - one FAIL = REJECT, no override path; remaining tests still recorded."""
+    results: dict[str, str] = {}
+    for code, question in HELL_NO_QUESTIONS:
+        results[code] = _ask_enum(ask, f"{code} - {question}", ("yes", "no"))
+    state["hell_no"] = results
+    failed = [code for code, _ in HELL_NO_QUESTIONS if results[code] == "yes"]
+    if failed:
+        state["pending_pass"] = {
+            "reason_class": f"hell_no_{failed[0]}",
+            "note": ("Hell-No veto: one FAIL = automatic rejection, regardless of "
+                     f"upside (FR3). All five answers recorded: {results}"),
+        }
+        return "verdict"
+    return "dossier"

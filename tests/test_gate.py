@@ -97,3 +97,33 @@ def test_circle_step_cant_write_it_is_pass():
     ask = ScriptedAsker(["   "])                     # blank = can't write it
     assert step_circle(state, ask) == "verdict"
     assert state["pending_pass"]["reason_class"] == "outside_circle"
+
+
+# --- P4.3 hell-no step --------------------------------------------------------
+
+def test_hell_no_all_pass():
+    from agentcy.gate import step_hell_no
+    state = {}
+    ask = ScriptedAsker(["no"] * 5)
+    assert step_hell_no(state, ask) == "dossier"
+    assert state["hell_no"] == {"HN1": "no", "HN2": "no", "HN3": "no", "HN4": "no", "HN5": "no"}
+
+
+def test_hell_no_one_fail_rejects_but_records_all_five():
+    from agentcy.gate import step_hell_no
+    state = {}
+    # HN2 fails; HN3..HN5 must STILL be asked and recorded (C.3: "remaining tests
+    # still recorded for the journal")
+    ask = ScriptedAsker(["no", "yes", "no", "no", "yes"])
+    assert step_hell_no(state, ask) == "verdict"
+    assert state["pending_pass"]["reason_class"] == "hell_no_HN2"   # first failing test
+    assert state["hell_no"]["HN5"] == "yes"                          # all five recorded
+    assert len(ask.log) == 5
+
+
+def test_hell_no_prompts_are_binary():
+    from agentcy.gate import step_hell_no
+    state = {}
+    ask = ScriptedAsker(["no"] * 5)
+    step_hell_no(state, ask)
+    assert all(opts == ("yes", "no") for _, opts in ask.log)
