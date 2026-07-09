@@ -537,6 +537,16 @@ def fetch_open_asks(conn, *, kind: str | None = None) -> list[Row]:
     return conn.execute(sql + " ORDER BY created_at, ask_id", params).fetchall()
 
 
+def fetch_unanswered_asks(conn, *, kind: str | None = None) -> list[Row]:
+    """Counted-unanswered asks (past effective deadline); the daily letter escalates these."""
+    sql = "SELECT * FROM ask WHERE status='unanswered'"
+    params: list = []
+    if kind is not None:
+        sql += " AND kind=?"
+        params.append(kind)
+    return conn.execute(sql + " ORDER BY created_at, ask_id", params).fetchall()
+
+
 def fetch_outbox_queued(conn) -> list[Row]:
     """status='queued' ordered FIFO by created_at (drain applies alerts-first)."""
     return conn.execute(

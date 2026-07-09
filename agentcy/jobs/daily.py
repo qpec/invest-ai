@@ -15,8 +15,9 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from agentcy import archive, config as config_mod, db, deadman, mirror, register
+from agentcy import archive, asks, config as config_mod, db, deadman, journal, mirror, register
 from agentcy.clock import Clock, SystemClock
+from agentcy.journal import EntryIn
 from agentcy.fetch import store, yf
 from agentcy.fetch.yf import FetchFailed
 from agentcy.jobs import runner
@@ -270,11 +271,62 @@ def opportunity_lines(conn, *, as_of) -> tuple[tuple[contexts.OpportunityLine, .
     return ordered, max(0, len(ordered) - 3)
 
 
+def sweep_ask_deadlines(conn, *, clock: Clock, run_id: int) -> list[str]:
+    """asks.sweep_deadlines marks counted-unanswered past effective_deadline (pause-aware,
+    D.6 — frozen never fires); this applies the per-kind consequence (D.5/B.3):
+    A -> alert_ignored auto-journal (once; the alert row stays open and heads the letter)
+    Q -> trigger_check UNVERIFIABLE appended for its trigger (B.3.4)
+    F/V/R/N -> the unanswered status itself is the record (skip counters derive from it)."""
+    notes: list[str] = []
+    for outcome in asks.sweep_deadlines(conn, as_of=clock.now()):
+        a = outcome.ask
+        if a.kind == "A":
+            existing = [e for e in db.fetch_journal_entries(conn, decision_type="alert_ignored")
+                        if e["ask_ref"] == a.ask_id]
+            if not existing:
+                journal.append(conn, EntryIn(
+                    decision_type="alert_ignored", ticker=None, thesis_ref=a.thesis_ref,
+                    system_recommendation="alert unanswered by deadline; recorded, not judged today (B.3.3)",
+                    owner_action="no_action", inputs_ref=run_id, ask_ref=a.ask_id,
+                    actor="system"), clock=clock)
+                notes.append(f"{a.ask_id}: alert_ignored journaled")
+        elif a.kind == "Q" and a.trigger_ref is not None:
+            db.append_trigger_check(conn, dict(
+                trigger_id=a.trigger_ref, run_id=run_id, checked_at=db.to_iso(clock.now()),
+                result="UNVERIFIABLE", observed_value=None, headroom=None, evaluable_from=None))
+            notes.append(f"{a.ask_id}: UNVERIFIABLE recorded")
+    conn.commit()
+    return notes
+
+
+def open_loop_lines(conn, *, as_of: datetime) -> tuple[contexts.OpenLoopLine, ...]:
+    """Open loops for the letter: ignored-alert asks FIRST (B.3.3 heads the letter),
+    then open/reprompted asks, oldest first."""
+    head: list[contexts.OpenLoopLine] = []
+    rest: list[contexts.OpenLoopLine] = []
+    open_alert_ids = {r["alert_id"] for r in db.fetch_open_alerts(conn)}
+
+    def age(created_at: str) -> int:
+        return (as_of - db.from_iso(created_at)).days
+
+    for row in db.fetch_unanswered_asks(conn, kind="A"):
+        if row["alert_ref"] in open_alert_ids:
+            head.append(contexts.OpenLoopLine(
+                ask_id=row["ask_id"],
+                label=f"ALERT IGNORED — {row['thesis_ref'] or ''} — decision still open",
+                age_days=age(row["created_at"])))
+    for a in asks.open_asks(conn):
+        label = {"A": "alert decision open", "Q": "prompted question waiting",
+                 "R": "reconciliation waiting", "F": "re-affirmation waiting",
+                 "V": "verdict follow-up waiting", "N": "note invited"}[a.kind]
+        rest.append(contexts.OpenLoopLine(ask_id=a.ask_id, label=f"{label} ({a.ask_id})",
+                                          age_days=age(db.to_iso(a.created_at))))
+    head.sort(key=lambda l: -l.age_days)
+    rest.sort(key=lambda l: -l.age_days)
+    return tuple(head + rest)
+
+
 # ---- stubs completed by later tasks ------------------------------------------------
-def open_loop_lines(conn, *, as_of):                         # P6.6
-    return ()
-def sweep_ask_deadlines(conn, *, clock, run_id):             # P6.6
-    return []
 def events_line(conn, *, as_of):                             # P6.7
     return None
 def respool_lagging_events(conn, *, as_of, state_dir):       # P6.7
