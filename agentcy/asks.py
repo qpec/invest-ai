@@ -156,3 +156,20 @@ def sweep_deadlines(conn, *, as_of: datetime) -> list[AnswerOutcome]:
             ask.kind, f"{ {'R':'recon','N':'note'}.get(ask.kind, ask.kind.lower()) }.unanswered")
         out.append(AnswerOutcome(ask=ask, accepted=False, already_recorded=False, consequence=cons))
     return out
+
+
+def resolve_freetext(conn, *, reply_to_ask_id: str | None):
+    """tg-spec §4: reply-to authoritative; else one-open -> that ask; several -> list;
+    none -> None (never parsed, never stored)."""
+    open_ft = [_row_to_ask(r) for r in db.fetch_open_asks(conn)
+               if r["status"] in ("open", "reprompted") and r["expects_freetext"]]
+    if reply_to_ask_id is not None:
+        for a in open_ft:
+            if a.ask_id == reply_to_ask_id:
+                return a
+        # reply-to to a closed/absent ask falls through to the open-set rules
+    if len(open_ft) == 1:
+        return open_ft[0]
+    if len(open_ft) > 1:
+        return open_ft
+    return None

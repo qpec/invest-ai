@@ -135,3 +135,41 @@ def test_sweep_consequence_per_kind(tmp_db, fixed_clock):
                       deadline="2026-07-15T05:00:00Z", clock=fixed_clock)
         out = asks.sweep_deadlines(tmp_db, as_of=datetime(2026, 7, 16, tzinfo=timezone.utc))
         assert any(o.ask.ask_id == a.ask_id and o.consequence == cons for o in out)
+
+
+def test_resolve_freetext_reply_to_authoritative(tmp_db, fixed_clock):
+    from agentcy import asks
+    a = asks.mint(tmp_db, kind="A", prompt="refute?", options=["refute"], expects_freetext=True,
+                  clock=fixed_clock)
+    asks.mint(tmp_db, kind="Q", prompt="note?", options=["cant"], expects_freetext=True,
+              clock=fixed_clock)
+    got = asks.resolve_freetext(tmp_db, reply_to_ask_id=a.ask_id)
+    assert isinstance(got, asks.Ask) and got.ask_id == a.ask_id
+
+
+def test_resolve_freetext_exactly_one_open(tmp_db, fixed_clock):
+    from agentcy import asks
+    a = asks.mint(tmp_db, kind="A", prompt="refute?", options=["refute"], expects_freetext=True,
+                  clock=fixed_clock)
+    got = asks.resolve_freetext(tmp_db, reply_to_ask_id=None)
+    assert isinstance(got, asks.Ask) and got.ask_id == a.ask_id
+
+
+def test_resolve_freetext_several_open_returns_list(tmp_db, fixed_clock):
+    from agentcy import asks
+    a1 = asks.mint(tmp_db, kind="A", prompt="p", options=["refute"], expects_freetext=True,
+                   clock=fixed_clock)
+    a2 = asks.mint(tmp_db, kind="Q", prompt="p", options=["cant"], expects_freetext=True,
+                   clock=fixed_clock)
+    got = asks.resolve_freetext(tmp_db, reply_to_ask_id=None)
+    assert isinstance(got, list) and {x.ask_id for x in got} == {a1.ask_id, a2.ask_id}
+
+
+def test_resolve_freetext_none_when_no_open(tmp_db, fixed_clock):
+    from agentcy import asks
+    assert asks.resolve_freetext(tmp_db, reply_to_ask_id=None) is None
+    # a stale reply-to to an already-answered ask also yields None (never stored)
+    a = asks.mint(tmp_db, kind="A", prompt="p", options=["refute"], expects_freetext=True,
+                  clock=fixed_clock)
+    asks.answer(tmp_db, a.ask_id, text="evidence", clock=fixed_clock)
+    assert asks.resolve_freetext(tmp_db, reply_to_ask_id=a.ask_id) is None
