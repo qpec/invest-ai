@@ -206,3 +206,40 @@ def test_shares_history_empty_is_stale(tmp_db, fixed_clock):
     from agentcy.fetch import store
     st = store.shares_history(tmp_db, "NOPE", as_of=fixed_clock.now())
     assert len(st.value) == 0 and st.state is DataState.STALE
+
+
+def test_store_officers_first_snapshot_is_baseline_no_tripwire(tmp_db):
+    from agentcy.fetch import store
+    officers = [{"name": "Amy Hood", "title": "EVP & CFO"}, {"name": "Satya Nadella", "title": "CEO"}]
+    assert store.store_officers(tmp_db, "MSFT", officers, fetched_at=T1) is False   # baseline (plan note 6)
+
+
+def test_store_officers_unchanged_returns_false(tmp_db):
+    from agentcy.fetch import store
+    officers = [{"name": "Amy Hood", "title": "EVP & CFO"}, {"name": "Satya Nadella", "title": "CEO"}]
+    store.store_officers(tmp_db, "MSFT", officers, fetched_at=T1)
+    assert store.store_officers(tmp_db, "MSFT", list(officers), fetched_at=T2) is False
+
+
+def test_store_officers_change_returns_true(tmp_db):
+    from agentcy.fetch import store
+    store.store_officers(tmp_db, "MSFT", [{"name": "Amy Hood", "title": "EVP & CFO"}], fetched_at=T1)
+    changed = store.store_officers(
+        tmp_db, "MSFT", [{"name": "New CFO", "title": "EVP & CFO"}], fetched_at=T2)
+    assert changed is True                                   # queues the B.2 officer-diff question
+
+
+def test_store_calendar_and_next_expected_within_window(tmp_db):
+    from agentcy.fetch import store
+    store.store_calendar(tmp_db, "MSFT", "2026-07-24", run_id=None, fetched_at=T1)
+    assert store.next_expected_earnings(tmp_db, "MSFT",
+                                        as_of=datetime(2026, 7, 8, tzinfo=timezone.utc)) == "2026-07-24"
+
+
+def test_next_expected_earnings_outside_window_is_none(tmp_db):
+    from agentcy.fetch import store
+    store.store_calendar(tmp_db, "MSFT", "2026-09-30", run_id=None, fetched_at=T1)   # >21d away
+    assert store.next_expected_earnings(tmp_db, "MSFT",
+                                        as_of=datetime(2026, 7, 8, tzinfo=timezone.utc)) is None
+    assert store.next_expected_earnings(tmp_db, "NOPE",
+                                        as_of=datetime(2026, 7, 8, tzinfo=timezone.utc)) is None
