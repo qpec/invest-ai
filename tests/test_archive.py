@@ -96,3 +96,26 @@ def test_write_journal_entry_with_grade(tmp_db, tmp_path):
     text = p.read_text(encoding="utf-8")
     assert f"JE-{je:04d}" in text or f"JE-{je}" in text
     assert "good" in text and "thesis held" in text     # grade appended as a dated section
+
+
+def test_rebuild_regenerates_reports_theses_and_journal(tmp_db, tmp_path, monkeypatch):
+    from agentcy import gitio
+    arch = tmp_path / "archive"
+    gitio.ensure_repo(arch)
+    monkeypatch.setenv("AGENTCY_STATE_DIR", str(tmp_path))
+    # one report, one thesis, one journal entry
+    rh = runlog.start(tmp_db, "daily", "2026-07-08", clock=CLK)
+    archive.archive_and_store(tmp_db, RenderedOutput("x", "# Daily\n\nbody", "daily"),
+        run_id=rh.run_id, report_type="daily", period="2026-07-08",
+        freshness={}, clock=CLK, archive_dir=arch)
+    je = _seed_thesis(tmp_db)
+    # wipe the working tree (simulate archive corruption) then rebuild from the DB
+    for sub in ("letters", "theses", "journal"):
+        d = arch / sub
+        if d.exists():
+            shutil.rmtree(d)
+    n = archive.rebuild(tmp_db, archive_dir=arch)
+    assert n >= 3                                       # >=1 report + 1 thesis + 1 journal
+    assert (arch / "letters" / "2026-07-08.md").read_text(encoding="utf-8").startswith("# Daily")
+    assert (arch / "theses" / "TH-DDOG-001.md").exists()
+    assert list((arch / "journal").rglob("JE-*.md"))    # at least one journal file

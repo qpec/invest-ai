@@ -101,3 +101,32 @@ def write_journal_entry(conn, entry_id: int, *, archive_dir: Path | None = None)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     return path
+
+
+def rebuild(conn, *, archive_dir: Path | None = None) -> int:
+    """agentcy render --rebuild: regenerate EVERY archive file from the DB — archive
+    corruption is never data loss (§8). Reports come from the stored content_md; thesis
+    views and journal entries are re-rendered. Returns the count of files written.
+    Enumeration goes through the contracted readers (db.fetch_theses / db.fetch_journal_entries,
+    R10), never inline SELECTs."""
+    arch = _archive_dir(archive_dir)
+    n = 0
+
+    for rep in db.fetch_reports(conn):
+        try:
+            path = path_for(rep["type"], rep["period"], archive_dir=arch)
+        except KeyError:
+            continue   # unknown type (shouldn't happen; CHECK-constrained) -> skip, never crash rebuild
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(rep["content_md"], encoding="utf-8", newline="\n")
+        n += 1
+
+    for th in db.fetch_theses(conn):
+        write_thesis_view(conn, th["thesis_id"], archive_dir=arch)
+        n += 1
+
+    for e in db.fetch_journal_entries(conn):
+        write_journal_entry(conn, e["entry_id"], archive_dir=arch)
+        n += 1
+
+    return n
