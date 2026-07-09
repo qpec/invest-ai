@@ -26,8 +26,16 @@ def test_pre_table_markdown_is_fenced():
 
 def test_verbatim_constants_present_and_immutable_wording():
     assert "not a price alarm" in cm.WHAT_THIS_IS_NOT
-    assert "Cost basis is not shown and will not be considered." in cm.WHAT_THIS_IS_NOT
+    # phrase present modulo the G.3 line wrap (newline falls after "Cost basis is")
+    assert "Cost basis is\nnot shown and will not be considered." in cm.WHAT_THIS_IS_NOT
     assert "{pct}" in cm.WHAT_THIS_IS_NOT            # only substitution
+    # G.3 verbatim: line wrap is byte-exact per elaboration/telegram-spec — the
+    # internal newline falls after "Cost basis is", not after "what follows."
+    assert cm.WHAT_THIS_IS_NOT == (
+        "WHAT THIS IS NOT: not a price alarm. The stock is {pct} this month; that is not\n"
+        "why you are reading this and it plays no part in what follows. Cost basis is\n"
+        "not shown and will not be considered."
+    )
     assert cm.INVITATION_CLOSER == "this is an invitation, not an instruction."
     assert cm.DEGRADED_LINE == "Nothing is wrong; I just can't see."
     assert "decision by {date}" in cm.DEADLINE_FRAMING and "{n} days" in cm.DEADLINE_FRAMING

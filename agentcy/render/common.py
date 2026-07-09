@@ -91,8 +91,8 @@ def ams_datetime_label(dt: datetime) -> str:
 # --- Mandatory verbatim fragments (template constants; lint asserts presence) --------
 WHAT_THIS_IS_NOT = (
     "WHAT THIS IS NOT: not a price alarm. The stock is {pct} this month; that is not\n"
-    "why you are reading this and it plays no part in what follows.\n"
-    "Cost basis is not shown and will not be considered."
+    "why you are reading this and it plays no part in what follows. Cost basis is\n"
+    "not shown and will not be considered."
 )
 INVITATION_CLOSER = "this is an invitation, not an instruction."
 DEGRADED_LINE = "Nothing is wrong; I just can't see."
