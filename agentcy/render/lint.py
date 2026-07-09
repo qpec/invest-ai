@@ -25,6 +25,14 @@ _BENCH = re.compile(r"S&P|\^SP500TR|vs\s+index|outperform|underperform|benchmark
 _EURO_DIGITS = re.compile(r"€\s*\d")
 _IMPERATIVE = re.compile(r"\b(buy now|sell now|you must)\b", re.IGNORECASE)
 
+# Alert-class mandatory framing (§6.2, tg-spec G.3 + B.3.5). Two verbatim shapes carry
+# it: the single G.3 card (WHAT-THIS-IS-NOT block + "decision by {date}" subject) and the
+# storm bundle, whose elaboration-verbatim copy (tg-spec §B.3.5) frames the move as
+# market-wide and dates the shared window as "one decision window, by …". The lint accepts
+# EITHER, so the sacred storm copy is never rewritten to shoehorn the single-card phrasing.
+_ALERT_PRICE_DISOWNED = ("not a price alarm", "A market-wide move can fire several theses at once")
+_ALERT_DEADLINE_FRAMED = ("decision by", "one decision window, by")
+
 
 @dataclass(frozen=True)
 class LintViolation:
@@ -72,9 +80,9 @@ def lint(r: RenderedOutput) -> list[LintViolation]:
         v.append(LintViolation("no_imperative", cls, _hit(t, m.group(0))))
 
     if cls == "alert":
-        if "not a price alarm" not in r.telegram_html:
+        if not any(tok in r.telegram_html for tok in _ALERT_PRICE_DISOWNED):
             v.append(LintViolation("missing_verbatim", cls, "WHAT THIS IS NOT"))
-        if "decision by" not in r.telegram_html:
+        if not any(tok in r.telegram_html for tok in _ALERT_DEADLINE_FRAMED):
             v.append(LintViolation("missing_verbatim", cls, "deadline framing"))
 
     return v
