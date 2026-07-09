@@ -341,3 +341,37 @@ def classify_verdict(*, tmp_db_unused, state: dict, dossier: dict | None,
                                      if verdict == "BUY_READY" else None),
         "requires_status_rebuttal": verdict == "BUY_READY" and state["status_buy_flag"],
     }
+
+
+from agentcy import mirror
+
+
+def _framework_count(conn, as_of) -> int:
+    """Count current framework-designated positions in the latest snapshot."""
+    snap = db.fetch_latest_snapshot(conn)
+    if snap is None:
+        return 0
+    positions = mirror.advice_positions(conn, snap["snapshot_id"])
+    return sum(1 for p in positions
+               if mirror.framework_status(conn, p.symbol, as_of=as_of) == "framework")
+
+
+def _displacement_note(conn, ask: AskOwner, *, as_of) -> str | None:
+    """C.6 displacement rule — at >=15 framework positions a BUY_READY must name
+    which existing holding this candidate beats, and why (opportunity cost made
+    mechanical)."""
+    if _framework_count(conn, as_of) < 15:
+        return None
+    return _ask_nonempty(
+        ask, "Displacement rule (>=15 framework positions): name the existing "
+             "holding this candidate beats, and why. A BUY_READY may not stand "
+             "without it.")
+
+
+def _status_rebuttal(ask: AskOwner) -> str:
+    """C.6 status-buy friction — a set status_buy_flag requires the owner's written
+    rebuttal before BUY_READY stands."""
+    return _ask_nonempty(
+        ask, "status_buy_flag is set (you hesitated on the status question). Write "
+             "the rebuttal for why this belongs in the book anyway. Required before "
+             "BUY_READY stands.")

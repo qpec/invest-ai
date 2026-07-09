@@ -420,3 +420,36 @@ def test_classify_status_buy_requires_rebuttal_flag():
     v = classify_verdict(tmp_db_unused=None, state=state, dossier=dossier,
                          config_map=_config_map())
     assert v["requires_status_rebuttal"] is True
+
+
+# --- P4.8 displacement + status rebuttal --------------------------------------
+
+def test_displacement_prompt_fires_at_15_framework(tmp_db, fixed_clock, monkeypatch):
+    from agentcy import gate
+    monkeypatch.setattr(gate, "_framework_count", lambda conn, as_of: 15)
+    ask = ScriptedAsker(["VEEV beats WORK: it has a cleaner regulatory moat"])
+    note = gate._displacement_note(tmp_db, ask, as_of=fixed_clock.now())
+    assert "beats" in note.lower()
+    assert len(ask.log) == 1
+
+
+def test_displacement_skipped_below_15(tmp_db, fixed_clock, monkeypatch):
+    from agentcy import gate
+    monkeypatch.setattr(gate, "_framework_count", lambda conn, as_of: 12)
+    ask = ScriptedAsker([])                              # must NOT be asked
+    note = gate._displacement_note(tmp_db, ask, as_of=fixed_clock.now())
+    assert note is None
+    assert ask.log == []
+
+
+def test_status_rebuttal_required_and_captured():
+    from agentcy.gate import _status_rebuttal
+    ask = ScriptedAsker(["I own it for the compounding, not to discuss at dinners."])
+    reb = _status_rebuttal(ask)
+    assert reb.startswith("I own it")
+
+
+def test_status_rebuttal_reasked_until_nonempty():
+    from agentcy.gate import _status_rebuttal
+    ask = ScriptedAsker(["   ", "real rebuttal text"])
+    assert _status_rebuttal(ask) == "real rebuttal text"
