@@ -83,4 +83,6 @@ Functional baseline approved 2026-07-03 (`docs/plans/2026-07-08-functional-desig
 
 Core principle: **the thesis drives the monitoring** — the Watchdog tests only pre-committed invalidation triggers, never open-ended news scanning.
 
-Key locked decisions (2026-07-08): FR13 benchmark = S&P 500 TR in EUR (PFIC-aware) · balance defaults per elaboration §E.3 · ETFs outside-framework by default · daily letter carries no portfolio value. Technology/runtime choices: still parked.
+Key locked decisions (2026-07-08): FR13 benchmark = S&P 500 TR in EUR (PFIC-aware) · balance defaults per elaboration §E.3 · ETFs outside-framework by default · daily letter carries no portfolio value.
+
+**Technology/runtime decided 2026-07-08, owner-ratified 2026-07-09: `docs/plans/2026-07-08-technology-architecture.md`** (+ companion `2026-07-08-telegram-interaction-spec.md`) — always-on Ubuntu box, systemd timers + oneshot jobs + one small synchronous daemon; stdlib spine (hand-rolled 8-method Telegram client, HTML mode; GPL-family incl. LGPL banned per NFR7, certifi/MPL-2.0 the one journaled exception); two SQLite files (benchmark physically quarantined) + rendered-markdown archive in its own git repo under `/var/lib/stock-agentcy`; four runtime pip packages only (yfinance, pandas, scipy, quantstats); no LLM in the scheduled runtime (Gate/Study are desk sessions via the `agentcy` CLI); uv-pinned CPython + wheelhouse, quarterly upgrade ritual with a yfinance emergency lane; 7-day letter cadence + owner-elected external dead-man ping. Next step: implementation plan.
