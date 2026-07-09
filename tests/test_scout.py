@@ -8,7 +8,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from agentcy import scout
+from agentcy import db, scout
 
 
 TINY_CSV = (
@@ -46,3 +46,70 @@ def test_load_universe_empty_sha_pin_refuses(universe_file):
     # an unset pin ('' in config) must not silently pass any file
     with pytest.raises(scout.UniverseSHAError):
         scout.load_universe(path, expect_sha="")
+
+
+# --- P4.17 QV screen ----------------------------------------------------------
+
+def test_honest_evidence_note_is_present_and_specific():
+    assert "3" in scout.HONEST_EVIDENCE_NOTE and "6" in scout.HONEST_EVIDENCE_NOTE
+    assert "promises nothing" in scout.HONEST_EVIDENCE_NOTE.lower()
+    assert "gate" in scout.HONEST_EVIDENCE_NOTE.lower()
+
+
+def test_run_qv_uses_lazy_import_and_ranks_by_cheapness(tmp_db, monkeypatch, universe_file):
+    from agentcy import scout as sc
+    path, sha = universe_file
+    # pin the sha in config so run_qv can load the universe
+    from agentcy import config
+    config.set(tmp_db, "universe_pin_sha", sha, reason="test", actor="owner",
+               clock=__import__("agentcy.clock", fromlist=["SystemClock"]).SystemClock())
+
+    # fake the [scout]-extra screener: returns raw rows out of cheapness order
+    screener_rows = pd.DataFrame({
+        "symbol": ["ASML", "VEEV"],
+        "enterprise_value_ebitda_ttm": [18.0, 9.0],     # VEEV is cheaper
+        "return_on_invested_capital": [22.0, 30.0],
+        "debt_to_equity": [0.4, 0.2],
+    })
+    monkeypatch.setattr(sc, "_run_screener", lambda recipe: screener_rows)
+
+    result = sc.run_qv(tmp_db, universe_path=path)
+    assert [c.symbol for c in result.candidates] == ["VEEV", "ASML"]   # cheapest first
+    assert result.candidates[0].ev_ebitda == 9.0
+    assert result.evidence_note == sc.HONEST_EVIDENCE_NOTE
+    assert len(result.candidates) <= 20
+
+
+def test_run_qv_caps_at_top_20(tmp_db, monkeypatch, universe_file):
+    from agentcy import scout as sc
+    path, sha = universe_file
+    from agentcy import config, clock
+    config.set(tmp_db, "universe_pin_sha", sha, reason="t", actor="owner",
+               clock=clock.SystemClock())
+    # universe only has VEEV/ASML, so intersect first; build a 25-row screener that
+    # includes both universe symbols plus noise not in the universe
+    rows = pd.DataFrame({
+        "symbol": ["VEEV", "ASML"] + [f"X{i}" for i in range(25)],
+        "enterprise_value_ebitda_ttm": [9.0, 18.0] + [5.0] * 25,
+        "return_on_invested_capital": [30.0, 22.0] + [20.0] * 25,
+        "debt_to_equity": [0.2, 0.4] + [0.1] * 25,
+    })
+    monkeypatch.setattr(sc, "_run_screener", lambda recipe: rows)
+    result = sc.run_qv(tmp_db, universe_path=path)
+    # only VEEV/ASML survive the universe intersection
+    assert set(c.symbol for c in result.candidates) == {"VEEV", "ASML"}
+
+
+def test_run_qv_never_persists(tmp_db, monkeypatch, universe_file):
+    from agentcy import scout as sc
+    path, sha = universe_file
+    from agentcy import config, clock
+    config.set(tmp_db, "universe_pin_sha", sha, reason="t", actor="owner",
+               clock=clock.SystemClock())
+    monkeypatch.setattr(sc, "_run_screener", lambda recipe: pd.DataFrame({
+        "symbol": ["VEEV"], "enterprise_value_ebitda_ttm": [9.0],
+        "return_on_invested_capital": [30.0], "debt_to_equity": [0.2]}))
+    sc.run_qv(tmp_db, universe_path=path)
+    # no watchlist row, no report row created by the screen (H: never stored)
+    assert db.fetch_watchlist(tmp_db) == []
+    assert db.fetch_reports(tmp_db) == []

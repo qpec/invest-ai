@@ -9,9 +9,12 @@ from __future__ import annotations
 import bz2
 import hashlib
 import io
+from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
+
+from agentcy import config, db
 
 
 class UniverseSHAError(Exception):
@@ -30,3 +33,70 @@ def load_universe(path: Path, *, expect_sha: str) -> pd.DataFrame:
             f"universe SHA mismatch: file {actual}, pinned '{expect_sha}'. "
             "Set config universe_pin_sha to the verified commit's file hash (H.1).")
     return pd.read_csv(io.BytesIO(bz2.decompress(raw)))
+
+
+HONEST_EVIDENCE_NOTE = (
+    "Honest evidence note: independent replications put quality-value screening at "
+    "roughly 3-6%/yr gross outperformance with multi-year losing stretches - not the "
+    "book's 30%. This screen surfaces cheap, capital-productive businesses; it "
+    "promises nothing. Every candidate still passes the full Gate, and second-"
+    "guessing the screen's valuation call destroys the edge - the Gate judges the "
+    "framework, not price timing."
+)
+
+QV_TOP_N = 20
+QV_ROIC_MIN = 15.0
+QV_DEBT_TO_EQUITY_MAX = 1.0
+
+
+@dataclass(frozen=True)
+class Candidate:
+    symbol: str
+    ev_ebitda: float
+    roic: float
+    debt_to_equity: float
+
+
+@dataclass(frozen=True)
+class ScreenResult:
+    """Human-read only; never persisted (H)."""
+    recipe: str
+    candidates: tuple[Candidate, ...]
+    evidence_note: str
+
+
+def _run_screener(recipe: str) -> pd.DataFrame:
+    """The ONE lazy [scout]-extra import (FR14; keeps tradingview-screener off the
+    runtime import graph). Monkeypatched in tests."""
+    from tradingview_screener import Query, col  # noqa: F401  (lazy, [scout] extra)
+    # QV recipe (H.2): cheapness leg + quality cut + guards. The concrete Query
+    # column names track the screener's API; the recipe is documented, human-run,
+    # delayed-data. Returns a DataFrame with the four columns run_qv reads.
+    raise NotImplementedError("desk-only; monkeypatched in tests")
+
+
+def run_qv(conn, *, universe_path=None) -> ScreenResult:
+    """H.2 - QV screen: cheapness-leg-ranked top-20, intersected with the H.1
+    universe, guards applied. Results are returned for human reading and NEVER
+    persisted as monitoring state."""
+    pin = config.get(conn, "universe_pin_sha")
+    if universe_path is None:
+        universe_path = Path(db.state_dir()) / "universe" / "equities.bz2"
+    universe = load_universe(universe_path, expect_sha=pin)
+    universe_symbols = set(universe["symbol"])
+
+    raw = _run_screener("qv")
+    df = raw[
+        (raw["return_on_invested_capital"] > QV_ROIC_MIN)
+        & (raw["debt_to_equity"] < QV_DEBT_TO_EQUITY_MAX)
+        & (raw["symbol"].isin(universe_symbols))
+    ].copy()
+    # cheapness leg is load-bearing: ascending EV/EBITDA (MA-8), top 20
+    df = df.sort_values("enterprise_value_ebitda_ttm", ascending=True).head(QV_TOP_N)
+    candidates = tuple(
+        Candidate(symbol=r["symbol"], ev_ebitda=float(r["enterprise_value_ebitda_ttm"]),
+                  roic=float(r["return_on_invested_capital"]),
+                  debt_to_equity=float(r["debt_to_equity"]))
+        for _, r in df.iterrows())
+    return ScreenResult(recipe="qv", candidates=candidates,
+                        evidence_note=HONEST_EVIDENCE_NOTE)
