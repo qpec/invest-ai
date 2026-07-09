@@ -131,3 +131,16 @@ def no_sleep(monkeypatch):
     calls: list[float] = []
     monkeypatch.setattr(_time, "sleep", lambda s: calls.append(float(s)))
     return calls
+
+
+# --- P3 domain fixtures -------------------------------------------------------------
+
+@pytest.fixture()
+def stamped():
+    """Wrap a value as a FRESH/STALE/BOOTSTRAPPING Stamped for trigger-evaluator tests."""
+    from datetime import datetime, timezone
+    from agentcy.freshness import Stamped, DataState
+    def _mk(value, state="fresh", note=None):
+        return Stamped(value=value, fetched_at=datetime(2026, 7, 8, tzinfo=timezone.utc),
+                       state=DataState(state), note=note)
+    return _mk
