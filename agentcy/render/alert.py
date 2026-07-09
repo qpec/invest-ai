@@ -63,5 +63,31 @@ def render_alert(ctx: AlertContext) -> RenderedOutput:
     return _render_storm(ctx)
 
 
-def _render_storm(ctx: AlertContext) -> RenderedOutput:   # implemented in P5.10
-    raise NotImplementedError
+def _render_storm(ctx: AlertContext) -> RenderedOutput:
+    """B.3.5 storm bundle: several theses fire on one market-wide day → ONE alert,
+    items ranked by position weight, one shared deadline. The bundle quotes only the
+    trigger label + the template-authored `what_happened` fact; the owner's verbatim
+    committed statement and 10-year words surface only when an item is expanded into its
+    own single card (the daemon re-renders via render_alert with a one-item context), so
+    owner_spans=() here. The calm alert register still holds — 'not a price alarm' and a
+    'decision by' framing are carried template-side so the fail-closed lint passes."""
+    n = len(ctx.items)
+    subject = f"Triggers fired — {n} theses — one decision window, by {ctx.deadline_label}"
+    intro = ("A market-wide move can fire several theses at once; this is not a price alarm.\n"
+             "Take them in order of weight — there is no rush beyond the shared deadline, and\n"
+             "each is a separate decision by you alone.")
+    ranked = sorted(ctx.items, key=lambda i: i.weight_pct, reverse=True)
+    body_lines = []
+    for idx, it in enumerate(ranked, 1):
+        wt = f"({it.weight_pct:g}% of book)" if idx == 1 else f"({it.weight_pct:g}%)"
+        body_lines.append(f"{idx}. {it.ticker} {wt} — {it.trigger_label}: {it.what_happened}")
+    tail = ("Cost basis is not shown for any of these and will not be considered.\n"
+            "Open each below to see its committed statement and your 10-year words.")
+    plain = [intro, ""] + body_lines + ["", tail]
+    html = "<b>" + cm.esc(subject) + "</b>\n\n" + "\n".join(cm.esc(line) for line in plain)
+    md = "# " + subject + "\n\n" + "\n".join(plain)
+    kb = [[{"text": f"{idx}. {it.ticker}", "callback_data": f"alert:open:{it.ask_id}"}]
+          for idx, it in enumerate(ranked, 1)]
+    return RenderedOutput(telegram_html=html, markdown=md, output_class="alert",
+                          owner_spans=(), ask_id=ranked[0].ask_id,
+                          reply_markup_json=json.dumps({"inline_keyboard": kb}))
