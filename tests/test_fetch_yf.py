@@ -95,3 +95,72 @@ def test_non_rate_limit_errors_propagate_unretried(tmp_path, no_sleep):
     with pytest.raises(ValueError):
         yfd._paced_call(tmp_path, broken)
     assert calls["n"] == 1                                   # fail loud, no blind retries (§7.1)
+
+
+def _patch_history(monkeypatch, frame, currency):
+    from agentcy.fetch import yf as yfd
+    monkeypatch.setattr(yfd, "_raw_history", lambda ticker, period: (frame, currency))
+
+
+def test_fetch_daily_bars_normalizes_with_dividends(monkeypatch, tmp_path, no_sleep, yf_frame):
+    from agentcy.fetch import yf as yfd
+    frame, currency = yf_frame("msft_history")
+    _patch_history(monkeypatch, frame, currency)
+    out = yfd.fetch_daily_bars("MSFT", state_dir=tmp_path)
+    assert list(out.columns) == ["close", "adj_close", "dividend", "currency"]
+    assert len(out) == 10
+    assert out.loc[pd.Timestamp("2026-07-07"), "close"] == pytest.approx(523.60)
+    assert out.loc[pd.Timestamp("2026-06-26"), "dividend"] == pytest.approx(0.83)  # BUF-2 feed
+    assert out.loc[pd.Timestamp("2026-06-23"), "adj_close"] == pytest.approx(507.27)
+    assert (out["currency"] == "USD").all()
+
+
+def test_fetch_daily_bars_fx_and_benchmark_ride_same_door(monkeypatch, tmp_path, no_sleep, yf_frame):
+    from agentcy.fetch import yf as yfd
+    fx, fx_cur = yf_frame("eurusd_fx")
+    _patch_history(monkeypatch, fx, fx_cur)
+    out = yfd.fetch_daily_bars("USDEUR=X", state_dir=tmp_path)
+    assert (out["currency"] == "EUR").all() and len(out) == 5
+
+
+def test_fetch_daily_bars_empty_frame_is_failure(monkeypatch, tmp_path, no_sleep, yf_frame):
+    from agentcy.fetch import yf as yfd
+    empty, _ = yf_frame("empty_frame_0x0")
+    _patch_history(monkeypatch, empty, "USD")
+    with pytest.raises(yfd.FetchFailed, match="empty"):
+        yfd.fetch_daily_bars("MSFT", state_dir=tmp_path)
+
+
+def test_fetch_daily_bars_none_frame_is_failure(monkeypatch, tmp_path, no_sleep):
+    from agentcy.fetch import yf as yfd
+    _patch_history(monkeypatch, None, "USD")
+    with pytest.raises(yfd.FetchFailed):
+        yfd.fetch_daily_bars("MSFT", state_dir=tmp_path)
+
+
+def test_fetch_daily_bars_nan_close_is_failure(monkeypatch, tmp_path, no_sleep, yf_frame):
+    from agentcy.fetch import yf as yfd
+    frame, currency = yf_frame("msft_history")
+    frame = frame.copy()
+    frame.loc[frame.index[3], "Close"] = float("nan")
+    _patch_history(monkeypatch, frame, currency)
+    with pytest.raises(yfd.FetchFailed, match="NaN"):
+        yfd.fetch_daily_bars("MSFT", state_dir=tmp_path)
+
+
+def test_fetch_daily_bars_non_positive_close_is_failure(monkeypatch, tmp_path, no_sleep, yf_frame):
+    from agentcy.fetch import yf as yfd
+    frame, currency = yf_frame("msft_history")
+    frame = frame.copy()
+    frame.loc[frame.index[0], "Close"] = 0.0
+    _patch_history(monkeypatch, frame, currency)
+    with pytest.raises(yfd.FetchFailed, match="non-positive"):
+        yfd.fetch_daily_bars("MSFT", state_dir=tmp_path)
+
+
+def test_fetch_daily_bars_missing_currency_is_failure(monkeypatch, tmp_path, no_sleep, yf_frame):
+    from agentcy.fetch import yf as yfd
+    frame, _ = yf_frame("msft_history")
+    _patch_history(monkeypatch, frame, None)
+    with pytest.raises(yfd.FetchFailed, match="currency"):
+        yfd.fetch_daily_bars("MSFT", state_dir=tmp_path)
