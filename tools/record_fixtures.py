@@ -64,13 +64,27 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - desk-only,
 
     from agentcy.fetch import yf as yfd
 
+    # Record the RAW yfinance shapes (not the normalized public-fetcher outputs) so the
+    # fixtures round-trip through their loaders — but route every raw seam through the
+    # box-wide pacing lock (_paced_call -> yahoo_pacing), so the desk re-record obeys the
+    # same >=2s+jitter spacing and 30s/5m/30m rate-limit backoff as production (§7.2). The
+    # public fetchers can't be used here: fetch_daily_bars/fetch_officers reshape the raw
+    # data the fixtures must capture verbatim.
     sd = args.state_dir
     tk = args.ticker
-    hist_raw, cur = yfd._raw_history(tk, "10d")
+    hist_raw, cur = yfd._paced_call(sd, lambda: yfd._raw_history(tk, "10d"))
     write_fixture(args.out, f"{tk.lower()}_history", frame_to_fixture(hist_raw, currency=cur))
-    write_fixture(args.out, f"{tk.lower()}_statements", statements_to_fixture(yfd._raw_statements(tk)))
-    write_fixture(args.out, f"{tk.lower()}_shares_full", series_to_fixture(yfd._raw_shares_full(tk)))
-    write_fixture(args.out, f"officers_{tk.lower()}", {"officers": yfd._raw_officers(tk)})
+    write_fixture(
+        args.out,
+        f"{tk.lower()}_statements",
+        statements_to_fixture(yfd._paced_call(sd, lambda: yfd._raw_statements(tk))),
+    )
+    write_fixture(
+        args.out,
+        f"{tk.lower()}_shares_full",
+        series_to_fixture(yfd._paced_call(sd, lambda: yfd._raw_shares_full(tk))),
+    )
+    write_fixture(args.out, f"officers_{tk.lower()}", yfd._paced_call(sd, lambda: yfd._raw_officers(tk)))
     return 0
 
 
