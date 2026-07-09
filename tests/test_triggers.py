@@ -174,3 +174,60 @@ def test_prompted_yes_fires_when_yes_means_fire(tmp_db, fixed_clock):
                   clock=fixed_clock)
     asks.answer(tmp_db, q.ask_id, choice="yes", clock=fixed_clock)
     assert triggers.evaluate(tmp_db, trig, as_of=AS_OF).result == "FIRE"
+
+
+def test_evaluate_armed_appends_checks(tmp_db, fixed_clock, monkeypatch, stamped):
+    from agentcy import register, triggers
+    from agentcy.fetch import store
+    trig, tid = _thesis_with_trigger(tmp_db, fixed_clock, {})
+    monkeypatch.setattr(store, "revenue_yoy_series",
+                        lambda c, t, *, as_of: stamped([("2026-03-31", 12.1), ("2026-06-30", 14.2)]),
+                        raising=False)
+    monkeypatch.setattr(store, "margin_series",
+                        lambda c, t, *, as_of: stamped([("2026-06-30", 25.0)]), raising=False)
+    run_id = _mkrun(tmp_db, fixed_clock)
+    outs = triggers.evaluate_armed(tmp_db, cadence="weekly", thesis_id=tid, as_of=AS_OF,
+                                   run_id=run_id)
+    assert {o.result for o in outs} == {"PASS"}
+    cur = triggers.current_state(tmp_db, trig["trigger_id"])
+    assert cur.result == "PASS" and cur.observed_value == 14.2
+
+
+def test_fire_moves_thesis_and_mints_alert_and_ask(tmp_db, fixed_clock):
+    from agentcy import register, triggers
+    trig, tid = _thesis_with_trigger(tmp_db, fixed_clock, {})
+    run_id = _mkrun(tmp_db, fixed_clock)
+    out = triggers.CheckOutcome(trigger_id=trig["trigger_id"], result="FIRE",
+                                observed_value=8.4, headroom=-1.6, evaluable_from=None, note=None)
+    alert_id = triggers.fire(tmp_db, out, clock=fixed_clock, run_id=run_id)
+    assert db.fetch_current_thesis_status(tmp_db, tid)["status"] == "under_review"
+    al = db.fetch_alert(tmp_db, alert_id)
+    assert al["deadline"] == "2026-07-15T05:00:00Z" and al["status"] == "open"
+    a_asks = db.fetch_asks_for(tmp_db, kind="A", trigger_ref=trig["trigger_id"])
+    assert len(a_asks) == 1 and a_asks[0]["alert_ref"] == alert_id
+
+
+def test_fire_idempotent_while_alert_open(tmp_db, fixed_clock):
+    from agentcy import triggers
+    trig, tid = _thesis_with_trigger(tmp_db, fixed_clock, {})
+    run_id = _mkrun(tmp_db, fixed_clock)
+    out = triggers.CheckOutcome(trig["trigger_id"], "FIRE", 8.4, -1.6, None, None)
+    a1 = triggers.fire(tmp_db, out, clock=fixed_clock, run_id=run_id)
+    a2 = triggers.fire(tmp_db, out, clock=fixed_clock, run_id=run_id)
+    assert a1 == a2                                        # no second alert while the first is open
+    assert len(db.fetch_asks_for(tmp_db, kind="A", trigger_ref=trig["trigger_id"])) == 1
+
+
+def test_fire_with_storm_key_shares_deadline(tmp_db, fixed_clock):
+    from agentcy import triggers
+    trig, tid = _thesis_with_trigger(tmp_db, fixed_clock, {})
+    run_id = _mkrun(tmp_db, fixed_clock)
+    out = triggers.CheckOutcome(trig["trigger_id"], "FIRE", 8.4, -1.6, None, None)
+    aid = triggers.fire(tmp_db, out, clock=fixed_clock, run_id=run_id,
+                        storm_key="2026-07-08-storm")
+    assert db.fetch_alert(tmp_db, aid)["storm_key"] == "2026-07-08-storm"
+
+
+def _mkrun(conn, clock):
+    from agentcy import runlog
+    return runlog.start(conn, "weekly", "2026-07-11", clock=clock).run_id
