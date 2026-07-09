@@ -2,11 +2,13 @@
 import ast
 import pathlib
 
-RENDER = pathlib.Path("agentcy/render")
+RENDER = pathlib.Path(__file__).resolve().parents[1] / "agentcy" / "render"
 
 
 def _py_files():
-    return list(RENDER.glob("*.py"))
+    files = list(RENDER.glob("*.py"))
+    assert files, f"no render modules found under {RENDER}"
+    return files
 
 
 def test_no_avg_open_price_anywhere_in_render():
