@@ -171,3 +171,26 @@ def fire(conn, outcome: CheckOutcome, *, clock: Clock, run_id: int,
                expects_freetext=True, thesis_ref=thesis_id, trigger_ref=outcome.trigger_id,
                alert_ref=alert_id, deadline=deadline, run_id=run_id, clock=clock)
     return alert_id
+
+
+def headroom_table(conn, thesis_id: str, *, as_of: datetime) -> list[CheckOutcome]:
+    """Weekly per-thesis trigger scorecard (G.2 §3), evaluated live at as_of."""
+    return [evaluate(conn, row, as_of=as_of) for row in db.fetch_armed_triggers(conn, thesis_id)]
+
+
+def unverifiable_weeks(conn, trigger_id: int, *, as_of: datetime) -> int:
+    """Consecutive UNVERIFIABLE weeks back from the latest check, pause-aware (B.3.4)."""
+    checks = db.fetch_trigger_checks_since(conn, trigger_id, "1970-01-01T00:00:00Z")
+    run = [c for c in checks]                              # ascending by checked_at
+    # walk backwards while UNVERIFIABLE
+    streak = []
+    for c in reversed(run):
+        if c["result"] != "UNVERIFIABLE":
+            break
+        streak.append(c)
+    if not streak:
+        return 0
+    earliest = db.from_iso(streak[-1]["checked_at"])
+    span = effective_elapsed(conn, earliest, as_of)
+    # weeks = distinct weekly checks in the streak (each weekly check = one week)
+    return len(streak)
