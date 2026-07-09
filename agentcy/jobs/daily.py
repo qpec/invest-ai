@@ -3,9 +3,10 @@
 Never opens the benchmark store, never reads avg_open_price, never imports quantstats
 (invariants 4/7). Reads positions via mirror.advice_positions only.
 
-Catch-up honesty (§1.3): the sweep runs newest-first; only the on-time run assembles,
-archives and delivers a letter. Late (caught-up) keys record their run_log row so the
-gap can be named, but never emit a backdated pseudo-letter.
+Catch-up honesty (§1.3): the sweep runs newest-first; every swept key — on-time or late —
+assembles, archives and delivers its letter. Late (caught-up) keys carry a delivered-late
+banner (build_daily_context(..., late=handle.late) -> late_banner) so the archive holds a
+real letter per gap day; the on-time run additionally names the gap (P6.8).
 """
 from __future__ import annotations
 
@@ -43,8 +44,6 @@ def main(*, clock: Clock | None = None, state_dir: Path | None = None) -> int:
 
 def run_one(conn, handle, *, clock: Clock, state_dir: Path) -> tuple[str, dict]:
     as_of = clock.now()
-    if handle.late:                                  # §1.3: no backdated pseudo-letters
-        return "ok", {"late": True}
     if is_pulse_day(as_of):                          # Sun/Mon: no preceding US close (§1.4)
         ctx = build_pulse_context(conn, as_of=as_of, late=handle.late)
         _deliver(conn, ctx, handle, clock=clock, state_dir=state_dir)
