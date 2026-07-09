@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Mapping, Sequence
 
+from agentcy import config as _config
 from agentcy import db
 from agentcy.clock import Clock, effective_elapsed
 
@@ -156,3 +157,37 @@ def live_thesis_for(conn, ticker: str) -> str | None:
         if st and st["status"] != "retired":
             return t["thesis_id"]
     return None
+
+
+_ALLOWED = {
+    "draft": {"intact", "retired"},
+    "intact": {"under_review", "retired"},
+    "under_review": {"intact", "broken", "retired"},
+    "broken": {"retired"},
+    "retired": set(),
+}
+
+
+def activate(conn, thesis_id: str, *, cause: str, clock: Clock) -> None:
+    """draft -> intact when the position appears in a Snapshot / backfill confirmed (A.2)."""
+    transition(conn, thesis_id, "intact", cause=cause, cause_ref=None, clock=clock)
+
+
+def transition(conn, thesis_id: str, new_status: str, *, cause: str, cause_ref: str | None,
+               clock: Clock) -> None:
+    """Validated A.2 transition (broken terminal; broken->intact does not exist)."""
+    if new_status not in STATUSES:
+        raise ValueError(f"status must be one of {sorted(STATUSES)}")
+    cur = db.fetch_current_thesis_status(conn, thesis_id)
+    if cur is None:
+        raise KeyError(thesis_id)
+    if new_status not in _ALLOWED[cur["status"]]:
+        raise ValueError(
+            f"illegal transition {cur['status']!r} -> {new_status!r} (A.2; broken is terminal)")
+    now = db.to_iso(clock.now())
+    review_deadline = None
+    if new_status == "under_review":
+        days = _config.get_int(conn, "alert_decision_days")
+        review_deadline = db.to_iso(clock.now() + timedelta(days=days))
+    db.append_thesis_status(conn, thesis_id=thesis_id, status=new_status, changed_at=now,
+                            cause=cause, cause_ref=cause_ref, review_deadline=review_deadline)
