@@ -741,6 +741,18 @@ def append_alert(conn, row: Mapping) -> int:
     return cur.lastrowid
 
 
+def append_outbox(conn, *, dedupe_key: str, kind: str, created_at: str, payload_html: str,
+                  run_id: int | None = None, artifact_ref: int | None = None,
+                  ask_ref: str | None = None, document_path: str | None = None,
+                  reply_markup_json: str | None = None) -> int:
+    """Insert a fresh queued outbox row (status/attempts fall to schema DEFAULTs); returns outbox_id."""
+    return _insert(conn, "outbox", {
+        "dedupe_key": dedupe_key, "kind": kind, "created_at": created_at,
+        "run_id": run_id, "artifact_ref": artifact_ref, "ask_ref": ask_ref,
+        "payload_html": payload_html, "document_path": document_path,
+        "reply_markup_json": reply_markup_json})
+
+
 def fetch_theses(conn) -> list:
     """All thesis identity rows."""
     return conn.execute("SELECT * FROM thesis ORDER BY created_at, thesis_id").fetchall()
