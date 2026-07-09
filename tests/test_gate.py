@@ -651,3 +651,20 @@ def test_backfill_no_thesis_exists_from_circle_pass(tmp_db, fixed_clock, monkeyp
     assert outcome.thesis_id is None
     entries = db.fetch_journal_entries(tmp_db, decision_type="gate_verdict")
     assert entries[0]["decision_subtype"] == "no_thesis_exists"
+
+
+# --- P4.12 re-pitch confrontation ---------------------------------------------
+
+def test_read_prior_verdict_returns_prior_pass(tmp_db, fixed_clock, monkeypatch):
+    from agentcy import gate, register
+    # a prior PASS on VEEV
+    ask = ScriptedAsker([TWO_SENTENCES, "moat", "outside"])
+    gate.start(tmp_db, ticker="VEEV", mode="gate", ask_owner=ask, clock=fixed_clock)
+    prior = gate.read_prior_verdict(tmp_db, "VEEV")
+    assert prior is not None
+    assert prior["decision_subtype"] == "pass"
+
+
+def test_read_prior_verdict_none_when_fresh(tmp_db):
+    from agentcy import gate
+    assert gate.read_prior_verdict(tmp_db, "NEWCO") is None

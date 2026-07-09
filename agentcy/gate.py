@@ -595,3 +595,10 @@ def _run_verdict(conn, *, mode, state, dossier, ask_owner, clock) -> dict:
 def _persist(conn, session_id, *, step, state, clock, status) -> None:
     db.update_gate_session(conn, session_id, step=step, state_json=json.dumps(state),
                            status=status, updated_at=db.to_iso(clock.now()))
+
+
+def read_prior_verdict(conn, ticker: str):
+    """C.1 re-pitch confrontation — the original gate_verdict[pass] entry for a
+    re-added ticker, surfaced verbatim before the Gate re-runs. Delegates to
+    register.guard_repitch; returns the journal_entry Row or None."""
+    return register.guard_repitch(conn, ticker)
