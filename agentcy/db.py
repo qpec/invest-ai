@@ -710,8 +710,13 @@ def append_alert(conn, row: Mapping) -> int:
 
 
 def fetch_theses(conn) -> list:
-    """All thesis identity rows."""
-    return conn.execute("SELECT * FROM thesis ORDER BY created_at, thesis_id").fetchall()
+    """All thesis identity rows, in stable creation order.
+
+    Ordered by created_at, then rowid (insertion order) so ties on an identical
+    timestamp preserve creation order rather than sorting alphabetically by
+    thesis_id — the Study rotation (F.3) walks this list positionally.
+    """
+    return conn.execute("SELECT * FROM thesis ORDER BY created_at, rowid").fetchall()
 
 
 def fetch_thesis_versions(conn, thesis_id: str) -> list:
