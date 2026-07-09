@@ -1,0 +1,13 @@
+<b>Gate verdict — ASML — buy_ready</b>
+
+Reason: passed all gates.
+
+Dossier:
+  circle: core (cloud infra)
+  moat: switching costs + cost advantage
+  owner_earnings: owner-FCF margin 28%, growing
+
+Suggested max weight: 6% (from your conviction table; this is an invitation, not an instruction.)
+
+Standing questions:
+  • Is the litho monopoly durable for a decade?
