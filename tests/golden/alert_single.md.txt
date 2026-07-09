@@ -1,0 +1,20 @@
+# Trigger fired — CRWD — T2 (owner-FCF margin) — decision by Tue 14 Jul (7 days)
+
+WHAT YOU COMMITTED TO (thesis v2, committed 2026-03-14, verbatim):
+  "T2: owner-FCF margin < 20% for 2 consecutive quarters."
+WHAT HAPPENED: Q1 18.4%, Q2 17.1% (statements archive, fresh, both non-empty).
+  Baseline at purchase: 23%.
+
+WHAT THIS IS NOT: not a price alarm. The stock is −9% this month; that is not
+why you are reading this and it plays no part in what follows. Cost basis is
+not shown and will not be considered.
+
+YOU WROTE (10-year statement, v2): "…the security-platform consolidation trend runs a decade and the data moat compounds with scale."
+The question on the table: does this development invalidate that paragraph?
+
+YOUR OPTIONS (yours alone):
+ (a) confirm broken → sell advice for the full position, cost basis ignored
+ (b) refute → written evidence required; thesis returns to intact
+ (c) revise → only after an explicit refute (goalpost guard)
+No response by the deadline → journaled as "alert ignored" (recorded, not judged
+today) and escalated in every daily letter. Status meanwhile: under_review.

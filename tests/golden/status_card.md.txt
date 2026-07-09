@@ -1,0 +1,8 @@
+# Status — Tue 8 Jul 2026, 14:12 CET
+
+Snapshot: manual export of Sun 6 Jul (2 days old) · Prices: fresh (07:00 CET)
+Cash 8.1% (band 5–15% ✓) · 11 framework, 1 backfill pending, 2 outside-framework
+
+✓ All theses intact. No triggers fired. No open decisions.
+
+Next scheduled: daily letter after tonight's US close.
