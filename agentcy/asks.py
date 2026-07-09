@@ -120,3 +120,14 @@ def answer(conn, ask_id: str, *, choice: str | None = None, text: str | None = N
                         answered_at=db.to_iso(clock.now()), tg_message_id=tg_message_id)
     return AnswerOutcome(ask=_row_to_ask(db.fetch_ask(conn, ask_id)), accepted=True,
                          already_recorded=False, consequence=_consequence(ask.kind, choice))
+
+
+def reprompt(conn, ask_id: str, *, clock: Clock) -> Ask:
+    """Exactly ONE re-prompt (D.5): open -> reprompted; any other state raises."""
+    row = db.fetch_ask(conn, ask_id)
+    if row is None:
+        raise KeyError(ask_id)
+    if row["status"] != "open":
+        raise ValueError(f"cannot reprompt {ask_id}: status is {row['status']!r}, not 'open'")
+    db.update_ask_state(conn, ask_id, status="reprompted")
+    return _row_to_ask(db.fetch_ask(conn, ask_id))
