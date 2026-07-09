@@ -565,6 +565,17 @@ def fetch_run(conn, run_type: str, scheduled_for: str) -> Row | None:
         (run_type, scheduled_for)).fetchone()
 
 
+def fetch_ontime_finished_keys(conn, run_type: str) -> set[str]:
+    """scheduled_for of every run of run_type that finished ON TIME (late=0). The daily
+    gap line names due days NOT in this set — days no letter was ever sent for (§1.3).
+    Newest-first sweep means late keys are not yet started when the on-time letter is built,
+    so 'was a letter sent on schedule?' is the only reliable gap signal at that moment."""
+    rows = conn.execute(
+        "SELECT scheduled_for FROM run_log"
+        " WHERE run_type=? AND late=0 AND finished_at IS NOT NULL", (run_type,)).fetchall()
+    return {r["scheduled_for"] for r in rows}
+
+
 def fetch_last_finished_run(conn) -> Row | None:
     """Most recently finished run (the /status card reports this state, never runs checks)."""
     return conn.execute(

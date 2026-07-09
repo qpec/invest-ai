@@ -10,13 +10,15 @@ real letter per gap day; the on-time run additionally names the gap (P6.8).
 """
 from __future__ import annotations
 
+import dataclasses
 import json as _json
 import shutil
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from agentcy import archive, asks, config as config_mod, db, deadman, events, journal, mirror, register
+from agentcy import (archive, asks, clock as clock_mod, config as config_mod, db, deadman,
+                     events, journal, mirror, register, runlog)
 from agentcy.clock import Clock, SystemClock
 from agentcy.events import EventRequest
 from agentcy.journal import EntryIn
@@ -60,6 +62,10 @@ def run_one(conn, handle, *, clock: Clock, state_dir: Path) -> tuple[str, dict]:
     market = classify_market_day(outcomes)
     ctx = build_daily_context(conn, as_of=as_of, late=handle.late,
                               market=market, price_outcomes=outcomes)
+    if not handle.late:                              # the on-time letter names any gap (§1.3, P6.8)
+        g = gap_line(conn, as_of=as_of, scheduled_for=handle.scheduled_for)
+        if g:
+            ctx = dataclasses.replace(ctx, data_lines=ctx.data_lines + (g,))
     _deliver(conn, ctx, handle, clock=clock, state_dir=state_dir)
     status = "degraded" if market in ("degraded", "outage") else "ok"
     return status, {"market": market, "price_outcomes": outcomes,
@@ -72,7 +78,7 @@ def _deliver(conn, ctx, handle, *, clock: Clock, state_dir: Path) -> None:
     report_id = archive.archive_and_store(
         conn, r, run_id=handle.run_id, report_type="daily",
         period=handle.scheduled_for, freshness={"price_outcomes": "see outputs_json"}, clock=clock)
-    if letter_suppressed(conn, as_of=clock.now()):   # P6.8; stub below returns False
+    if letter_suppressed(conn, as_of=clock.now()):   # quiet-mode + declared absence (D.6)
         return
     base = outbox.scheduled_key(RUN_TYPE, handle.scheduled_for, "letter")
     runner.enqueue_rendered(conn, r, base_key=base, kind="daily",
@@ -388,15 +394,36 @@ def respool_lagging_events(conn, *, as_of: datetime, state_dir: Path) -> int:
     return n
 
 
-# ---- stubs completed by later tasks ------------------------------------------------
-def is_pulse_day(as_of: datetime) -> bool:                   # P6.8 tests this properly
+def is_pulse_day(as_of: datetime) -> bool:
+    """Sun/Mon: no preceding US close, so the daily is a two-line pulse, not a full letter (§1.4)."""
     return as_of.astimezone(AMS).weekday() in (6, 0)         # Sun, Mon
-def build_pulse_context(conn, *, as_of, late):               # P6.8
+
+
+def build_pulse_context(conn, *, as_of, late) -> contexts.DailyContext:
+    """S0 weekend pulse: two lines, no fetch — 'markets closed; N open items; data health ok'."""
     loops = open_loop_lines(conn, as_of=as_of)
     return contexts.DailyContext(kind="pulse", as_of=as_of, header=None,
                                  verdict_line=f"markets closed — nothing to check; {len(loops)} open items; data health ok",
                                  opportunities=(), more_opportunities=0, events_line=None,
                                  data_lines=(), open_loops=loops, open_items_count=len(loops),
                                  generated_at=as_of, late_banner=_late_banner(as_of) if late else None)
-def letter_suppressed(conn, *, as_of) -> bool:               # P6.8
-    return False
+
+
+def letter_suppressed(conn, *, as_of) -> bool:
+    """daily_letter_mode=quiet suppresses DELIVERY only, and only during a declared absence
+    (D.6): checks still run, RunLog still writes, the archive still gets the letter, alerts
+    still deliver (they enqueue on their own keys)."""
+    mode = config_mod.get(conn, "daily_letter_mode")
+    return mode == "quiet" and clock_mod.is_paused(conn, as_of)
+
+
+def gap_line(conn, *, as_of: datetime, scheduled_for: str) -> str | None:
+    """§1.3: the on-time letter NAMES the gap — the due days older than today that no letter
+    was ever sent for on schedule (they are caught up late in this same sweep, or earlier).
+    Never backdated pseudo-letters; the caught-up letters themselves sit in the archive."""
+    on_time = db.fetch_ontime_finished_keys(conn, RUN_TYPE)
+    missed = [k for k in runlog.due_keys(RUN_TYPE, as_of=as_of)
+              if k < scheduled_for and k not in on_time]
+    if not missed:
+        return None
+    return f"no letters were sent {', '.join(missed)} — box offline; earlier letters are in the archive."
