@@ -1,4 +1,4 @@
-"""THE sqlite door for agentcy.db (contracts §3.1). Never opens benchmark.db."""
+"""THE sqlite door for agentcy.db (contracts §3.1). Never opens the benchmark database."""
 from __future__ import annotations
 
 import hashlib
@@ -35,7 +35,7 @@ _MIGRATION_RE = re.compile(r"^(\d{3})_.+\.sql$")   # benchmark_000_init.sql deli
 def open_db(dir: Path | None = None) -> sqlite3.Connection:
     """Open <state_dir>/agentcy.db with WAL, busy_timeout=30000, foreign_keys=ON, row_factory=Row.
 
-    NEVER opens benchmark.db (invariant 7 wall 1)."""
+    NEVER opens the benchmark database (invariant 7 wall 1)."""
     base = Path(dir) if dir is not None else state_dir()
     base.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(base / "agentcy.db")
