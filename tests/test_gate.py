@@ -127,3 +127,83 @@ def test_hell_no_prompts_are_binary():
     ask = ScriptedAsker(["no"] * 5)
     step_hell_no(state, ask)
     assert all(opts == ("yes", "no") for _, opts in ask.log)
+
+
+# --- P4.4 dossier -------------------------------------------------------------
+
+from agentcy.freshness import Stamped, DataState
+from agentcy.fetch.store import OwnerEarnings
+
+
+def _fresh(value, note=None):
+    return Stamped(value=value, fetched_at=datetime(2026, 7, 8, tzinfo=timezone.utc),
+                   state=DataState.FRESH, note=note)
+
+
+def _oe(**kw):
+    base = dict(fcf_ttm=1.1e9, sbc_ttm=0.45e9, owner_fcf_ttm=0.65e9,
+                owner_fcf_per_share_ttm=4.0, owner_fcf_margin_ttm=0.28,
+                periods_used=("2026-03-31", "2025-12-31", "2025-09-30", "2025-06-30"))
+    base.update(kw)
+    return OwnerEarnings(**base)
+
+
+class FakeStore:
+    """Monkeypatch seam for the P2 store: only what the dossier + fair-band read."""
+    def __init__(self, *, owner_earnings=None, denom=None, close=None,
+                 income_periods=("2026-03-31", "2025-12-31", "2025-09-30", "2025-06-30")):
+        self._oe = owner_earnings
+        self._denom = denom
+        self._close = close
+        self._income_periods = income_periods
+
+    def owner_fcf_ttm(self, conn, yf_ticker, *, as_of):
+        return self._oe
+
+    def denominator_per_share(self, conn, yf_ticker, *, as_of):
+        return self._denom
+
+    def latest_close(self, conn, yf_ticker, *, as_of):
+        return self._close
+
+    def statement_history(self, conn, yf_ticker, statement_type, *, as_of):
+        rows = [{"period_end": p} for p in self._income_periods]
+        return _fresh(rows)
+
+
+def test_dossier_happy_prints_period_counts_and_multiple(tmp_db, fixed_clock):
+    from agentcy.gate import build_dossier
+    from agentcy.fetch.store import PriceBar
+    store = FakeStore(owner_earnings=_fresh(_oe()),
+                      denom=_fresh(4.0),
+                      close=_fresh(PriceBar(bar_date="2026-07-07", close=120.0,
+                                            adj_close=120.0, dividend=0.0, currency="USD")))
+    dossier = build_dossier(tmp_db, "VEEV", as_of=fixed_clock.now(), store=store)
+    assert dossier["income_period_count"] == 4
+    assert dossier["income_periods"][0] == "2026-03-31"
+    assert dossier["owner_fcf_per_share_ttm"] == 4.0
+    assert dossier["current_multiple"] == 30.0          # close 120 / owner-FCF/sh 4.0
+    assert dossier["owner_fcf_ttm"] == 0.65e9
+
+
+def test_dossier_pauses_on_absent_owner_earnings(tmp_db, fixed_clock):
+    from agentcy.gate import build_dossier, DossierPaused
+    store = FakeStore(owner_earnings=None)               # empty fundamentals
+    with pytest.raises(DossierPaused):
+        build_dossier(tmp_db, "VEEV", as_of=fixed_clock.now(), store=store)
+
+
+def test_dossier_pauses_on_stale_owner_earnings(tmp_db, fixed_clock):
+    from agentcy.gate import build_dossier, DossierPaused
+    stale = Stamped(value=_oe(), fetched_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                    state=DataState.STALE)
+    store = FakeStore(owner_earnings=stale)              # not usable()
+    with pytest.raises(DossierPaused):
+        build_dossier(tmp_db, "VEEV", as_of=fixed_clock.now(), store=store)
+
+
+def test_dossier_multiple_none_when_price_absent(tmp_db, fixed_clock):
+    from agentcy.gate import build_dossier
+    store = FakeStore(owner_earnings=_fresh(_oe()), denom=_fresh(4.0), close=None)
+    dossier = build_dossier(tmp_db, "VEEV", as_of=fixed_clock.now(), store=store)
+    assert dossier["current_multiple"] is None          # dossier still assembles (BUF-12 backfill safe)
