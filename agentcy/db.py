@@ -298,3 +298,272 @@ _EVENT_COLS = frozenset({"yf_ticker", "source", "kind", "note", "detected_at",
 def append_event(conn, row: Mapping) -> int:
     """Insert event identity row (D.3); returns event_id."""
     return _insert(conn, "event", _checked(row, _EVENT_COLS, "event"))
+
+
+# --- fetch helpers (named reads only) ---
+
+def _now_iso() -> str:
+    return to_iso(datetime.now(timezone.utc))
+
+
+def fetch_config_current(conn, *, as_of: str | None = None) -> dict[str, str]:
+    """Latest value per key at as_of (default: now)."""
+    ts = as_of if as_of is not None else _now_iso()
+    rows = conn.execute(
+        "SELECT key, value FROM config c"
+        " WHERE valid_from <= ?"
+        "   AND valid_from = (SELECT MAX(valid_from) FROM config c2"
+        "                     WHERE c2.key = c.key AND c2.valid_from <= ?)",
+        (ts, ts)).fetchall()
+    return {r["key"]: r["value"] for r in rows}
+
+
+def fetch_latest_designations(conn) -> dict[str, Row]:
+    """Latest designation row per symbol (E.2 latest-wins)."""
+    rows = conn.execute(
+        "SELECT * FROM designation d"
+        " WHERE valid_from = (SELECT MAX(valid_from) FROM designation d2"
+        "                     WHERE d2.symbol = d.symbol)").fetchall()
+    return {r["symbol"]: r for r in rows}
+
+
+def fetch_v_price(conn, yf_ticker: str, *, start: str | None = None,
+                  end: str | None = None) -> list[Row]:
+    """Rows from v_price (latest fetch per bar), ascending bar_date."""
+    sql = "SELECT * FROM v_price WHERE yf_ticker = ?"
+    params: list = [yf_ticker]
+    if start is not None:
+        sql += " AND bar_date >= ?"
+        params.append(start)
+    if end is not None:
+        sql += " AND bar_date <= ?"
+        params.append(end)
+    return conn.execute(sql + " ORDER BY bar_date", params).fetchall()
+
+
+def fetch_statement_periods(conn, yf_ticker: str, statement_type: str) -> list[Row]:
+    """Accumulated archive, latest fingerprint per period_end, ascending."""
+    return conn.execute(
+        "SELECT * FROM ("
+        "  SELECT f.*, ROW_NUMBER() OVER (PARTITION BY period_end"
+        "         ORDER BY fetched_at DESC, rowid DESC) AS rn"
+        "  FROM fundamentals_period f"
+        "  WHERE yf_ticker = ? AND statement_type = ?)"
+        " WHERE rn = 1 ORDER BY period_end",
+        (yf_ticker, statement_type)).fetchall()
+
+
+def fetch_latest_snapshot(conn) -> Row | None:
+    """Newest snapshot row by as_of."""
+    return conn.execute(
+        "SELECT * FROM snapshot ORDER BY as_of DESC, snapshot_id DESC LIMIT 1"
+    ).fetchone()
+
+
+def fetch_positions_advice(conn, snapshot_id: int) -> list[Row]:
+    """SELECT from positions_advice view ONLY (invariant 4)."""
+    return conn.execute(
+        "SELECT * FROM positions_advice WHERE snapshot_id=? ORDER BY symbol",
+        (snapshot_id,)).fetchall()
+
+
+def fetch_positions_records(conn, snapshot_id: int) -> list[Row]:
+    """Raw position rows incl. avg_open_price (AST-enforced caller restrictions, P5)."""
+    return conn.execute(
+        "SELECT * FROM position WHERE snapshot_id=? ORDER BY symbol",
+        (snapshot_id,)).fetchall()
+
+
+def fetch_current_symbol_map(conn) -> dict[str, str]:
+    """Latest yf_ticker per symbol (latest-wins)."""
+    rows = conn.execute(
+        "SELECT * FROM symbol_map s"
+        " WHERE valid_from = (SELECT MAX(valid_from) FROM symbol_map s2"
+        "                     WHERE s2.symbol = s.symbol)").fetchall()
+    return {r["symbol"]: r["yf_ticker"] for r in rows}
+
+
+def fetch_shares_raw(conn, yf_ticker: str) -> list[Row]:
+    """Raw shares rows (store.py dedups last-per-date at read)."""
+    return conn.execute(
+        "SELECT * FROM shares_series WHERE yf_ticker=?"
+        " ORDER BY obs_date, fetched_at, rowid", (yf_ticker,)).fetchall()
+
+
+def fetch_latest_officers(conn, yf_ticker: str) -> Row | None:
+    return conn.execute(
+        "SELECT * FROM officer_snapshot WHERE yf_ticker=?"
+        " ORDER BY fetched_at DESC, rowid DESC LIMIT 1", (yf_ticker,)).fetchone()
+
+
+def fetch_earnings_calendar(conn, yf_ticker: str) -> Row | None:
+    return conn.execute(
+        "SELECT * FROM earnings_calendar WHERE yf_ticker=?"
+        " ORDER BY fetched_at DESC, rowid DESC LIMIT 1", (yf_ticker,)).fetchone()
+
+
+def fetch_thesis(conn, thesis_id: str) -> Row | None:
+    return conn.execute(
+        "SELECT * FROM thesis WHERE thesis_id=?", (thesis_id,)).fetchone()
+
+
+def fetch_current_thesis_version(conn, thesis_id: str) -> Row | None:
+    """Row with version = max(version)."""
+    return conn.execute(
+        "SELECT * FROM thesis_version WHERE thesis_id=?"
+        " ORDER BY version DESC LIMIT 1", (thesis_id,)).fetchone()
+
+
+def fetch_current_thesis_status(conn, thesis_id: str) -> Row | None:
+    """Latest thesis_status_log row."""
+    return conn.execute(
+        "SELECT * FROM thesis_status_log WHERE thesis_id=?"
+        " ORDER BY changed_at DESC, log_id DESC LIMIT 1", (thesis_id,)).fetchone()
+
+
+def fetch_armed_triggers(conn, thesis_id: str | None = None) -> list[Row]:
+    """"trigger" rows with retired_at IS NULL, optionally per thesis."""
+    sql = 'SELECT * FROM "trigger" WHERE retired_at IS NULL'
+    params: list = []
+    if thesis_id is not None:
+        sql += " AND thesis_id=?"
+        params.append(thesis_id)
+    return conn.execute(sql + " ORDER BY trigger_id", params).fetchall()
+
+
+def fetch_latest_trigger_check(conn, trigger_id: int) -> Row | None:
+    """Current trigger state = latest trigger_check (§4.4)."""
+    return conn.execute(
+        "SELECT * FROM trigger_check WHERE trigger_id=?"
+        " ORDER BY checked_at DESC, check_id DESC LIMIT 1", (trigger_id,)).fetchone()
+
+
+def fetch_trigger_checks_since(conn, trigger_id: int, since: str) -> list[Row]:
+    return conn.execute(
+        "SELECT * FROM trigger_check WHERE trigger_id=? AND checked_at>=?"
+        " ORDER BY checked_at, check_id", (trigger_id, since)).fetchall()
+
+
+def fetch_journal_entry(conn, entry_id: int) -> Row | None:
+    return conn.execute(
+        "SELECT * FROM journal_entry WHERE entry_id=?", (entry_id,)).fetchone()
+
+
+def fetch_journal_entries(conn, *, decision_type: str | None = None,
+                          since: str | None = None) -> list[Row]:
+    clauses: list[str] = []
+    params: list = []
+    if decision_type is not None:
+        clauses.append("decision_type=?")
+        params.append(decision_type)
+    if since is not None:
+        clauses.append("ts>=?")
+        params.append(since)
+    sql = "SELECT * FROM journal_entry"
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    return conn.execute(sql + " ORDER BY ts, entry_id", params).fetchall()
+
+
+def fetch_grades_for(conn, entry_id: int) -> list[Row]:
+    return conn.execute(
+        "SELECT * FROM journal_grade WHERE entry_id=?"
+        " ORDER BY graded_at, grade_id", (entry_id,)).fetchall()
+
+
+def fetch_report(conn, report_id: int) -> Row | None:
+    return conn.execute(
+        "SELECT * FROM report WHERE report_id=?", (report_id,)).fetchone()
+
+
+def fetch_reports(conn, *, type: str | None = None) -> list[Row]:
+    """All report rows (render --rebuild walks this)."""
+    sql = "SELECT * FROM report"
+    params: list = []
+    if type is not None:
+        sql += " WHERE type=?"
+        params.append(type)
+    return conn.execute(sql + " ORDER BY generated_at, report_id", params).fetchall()
+
+
+def fetch_absence_events(conn) -> list[Row]:
+    """Full on/off stream, ascending (clock.py derives windows)."""
+    return conn.execute(
+        "SELECT * FROM absence_event ORDER BY at, event_id").fetchall()
+
+
+def fetch_open_alerts(conn) -> list[Row]:
+    return conn.execute(
+        "SELECT * FROM alert WHERE status='open'"
+        " ORDER BY created_at, alert_id").fetchall()
+
+
+def fetch_alert(conn, alert_id: int) -> Row | None:
+    return conn.execute(
+        "SELECT * FROM alert WHERE alert_id=?", (alert_id,)).fetchone()
+
+
+def fetch_ask(conn, ask_id: str) -> Row | None:
+    return conn.execute(
+        "SELECT * FROM ask WHERE ask_id=?", (ask_id,)).fetchone()
+
+
+def fetch_open_asks(conn, *, kind: str | None = None) -> list[Row]:
+    sql = "SELECT * FROM ask WHERE status IN ('open','reprompted')"
+    params: list = []
+    if kind is not None:
+        sql += " AND kind=?"
+        params.append(kind)
+    return conn.execute(sql + " ORDER BY created_at, ask_id", params).fetchall()
+
+
+def fetch_outbox_queued(conn) -> list[Row]:
+    """status='queued' ordered FIFO by created_at (drain applies alerts-first)."""
+    return conn.execute(
+        "SELECT * FROM outbox WHERE status='queued'"
+        " ORDER BY created_at, outbox_id").fetchall()
+
+
+def fetch_outbox_by_key(conn, dedupe_key: str) -> Row | None:
+    return conn.execute(
+        "SELECT * FROM outbox WHERE dedupe_key=?", (dedupe_key,)).fetchone()
+
+
+def fetch_run(conn, run_type: str, scheduled_for: str) -> Row | None:
+    return conn.execute(
+        "SELECT * FROM run_log WHERE run_type=? AND scheduled_for=?",
+        (run_type, scheduled_for)).fetchone()
+
+
+def fetch_watchlist(conn, *, stage: str | None = None) -> list[Row]:
+    sql = "SELECT * FROM watchlist_item"
+    params: list = []
+    if stage is not None:
+        sql += " WHERE stage=?"
+        params.append(stage)
+    return conn.execute(sql + " ORDER BY added_at, item_id", params).fetchall()
+
+
+def fetch_bot_state(conn) -> Row:
+    """Seeded singleton, never None."""
+    return conn.execute("SELECT * FROM bot_state WHERE id=1").fetchone()
+
+
+def fetch_active_gate_session(conn, ticker: str | None = None) -> Row | None:
+    sql = "SELECT * FROM gate_session WHERE status='active'"
+    params: list = []
+    if ticker is not None:
+        sql += " AND ticker=?"
+        params.append(ticker)
+    return conn.execute(
+        sql + " ORDER BY started_at DESC, session_id DESC LIMIT 1", params).fetchone()
+
+
+def fetch_study_state(conn) -> Row:
+    return conn.execute("SELECT * FROM study_state WHERE id=1").fetchone()
+
+
+def fetch_events_for(conn, yf_ticker: str) -> list[Row]:
+    return conn.execute(
+        "SELECT * FROM event WHERE yf_ticker=?"
+        " ORDER BY detected_at, event_id", (yf_ticker,)).fetchall()
