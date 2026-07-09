@@ -115,11 +115,15 @@ def ingest_snapshot(conn, snap: SnapshotIn, *, clock: Clock) -> tuple[int, list[
     snapshot_id = db.append_snapshot(conn, as_of=snap.as_of, source=snap.source,
                                      cash_balance_eur=snap.cash_balance_eur,
                                      created_at=db.to_iso(clock.now()))
+    # Persist the E.1/MA-4 invariants regardless of how the PositionIn was built:
+    # weight = fraction of invested MV; yf_ticker mappability = f(instrument_type).
+    total_mv = sum(p.mv_eur for p in snap.positions) or 1.0
     db.append_positions(conn, snapshot_id, [{
-        "symbol": p.symbol, "yf_ticker": p.yf_ticker, "instrument_type": p.instrument_type,
+        "symbol": p.symbol, "yf_ticker": _yf_for(p.symbol, p.instrument_type),
+        "instrument_type": p.instrument_type,
         "quantity": p.quantity, "avg_open_price": p.avg_open_price,
         "native_currency": p.native_currency, "mv_native": p.mv_native, "mv_eur": p.mv_eur,
-        "weight": p.weight, "leverage": p.leverage} for p in snap.positions])
+        "weight": p.mv_eur / total_mv, "leverage": p.leverage} for p in snap.positions])
     deltas: list[Delta] = []
     now_by_sym = {p.symbol: p for p in snap.positions}
     # leverage tripwire — every snapshot, regardless of previous state (E.1 continuous Hell-No)
@@ -210,3 +214,68 @@ def snapshot_age(conn, *, as_of: datetime) -> "timedelta | None":
         return None
     return as_of - db.from_iso(latest["as_of"]) if "T" in latest["as_of"] else \
         as_of - datetime.fromisoformat(latest["as_of"]).replace(tzinfo=as_of.tzinfo)
+
+
+from agentcy import cluster as _cluster, config as _config
+
+
+@dataclass(frozen=True)
+class BalanceReport:
+    cash_pct: float
+    cash_in_band: bool
+    n_framework: int
+    n_backfill: int
+    n_outside: int
+    position_count_in_band: bool
+    soft_cap_breaches: tuple[str, ...]
+    hard_cap_breaches: tuple[str, ...]
+    cluster_weight_breaches: tuple[str, ...]
+    n_eff: float | None
+    n_eff_ok: bool | None
+    outside_framework_pct: float
+    outside_cap_ok: bool
+    unpriced_weight_pct: float
+    leverage_violations: tuple[str, ...]
+
+
+def balance(conn, *, as_of: datetime, returns_local=None) -> BalanceReport:
+    """Compute E.3 balance from advice_positions + config + cluster.py; never touches avg_open_price."""
+    cfg = _config.effective(conn)
+    def f(key: str) -> float:
+        return float(cfg[key])
+    positions = advice_positions(conn)
+    latest = db.fetch_latest_snapshot(conn)
+    cash = latest["cash_balance_eur"] if latest else 0.0
+    invested = sum(p.mv_eur for p in positions) or 0.0
+    total = cash + invested
+    cash_pct = 100.0 * cash / total if total else 0.0
+    cash_in_band = f("cash_band_low_pct") <= cash_pct <= f("cash_band_high_pct")
+    status = {p.symbol: framework_status(conn, p.symbol, as_of=as_of) for p in positions}
+    n_framework = sum(1 for s in status.values() if s == "framework")
+    n_backfill = sum(1 for s in status.values() if s == "backfill_pending")
+    n_outside = sum(1 for s in status.values() if s == "outside_framework")
+    count_ok = f("position_count_low") <= n_framework <= f("position_count_high")
+    soft = tuple(p.symbol for p in positions if p.weight * 100 > f("max_position_soft_pct"))
+    hard = tuple(p.symbol for p in positions if p.weight * 100 > f("max_position_hard_pct"))
+    outside_pct = 100.0 * sum(p.weight for p in positions
+                              if status[p.symbol] == "outside_framework")
+    outside_ok = outside_pct <= f("outside_framework_cap_pct")
+    unpriced_of_invested = sum(p.mv_eur for p in positions if p.yf_ticker is None)
+    unpriced_pct = 100.0 * unpriced_of_invested / invested if invested else 0.0
+    leverage = tuple(p.symbol for p in positions if p.leverage > 1.0)
+    n_eff, n_eff_ok, cluster_breaches = None, None, ()
+    if returns_local is not None:
+        weights = {p.symbol: (p.mv_eur / invested if invested else 0.0)
+                   for p in positions if p.yf_ticker is not None}
+        cr = _cluster.compute_clusters(returns_local, weights, threshold=f("correlation_threshold"))
+        if not cr.stale:
+            n_eff = cr.n_eff
+            n_eff_ok = n_eff >= f("min_effective_bets")
+            cluster_breaches = tuple(str(cid) for cid, w in cr.cluster_weights.items()
+                                     if w * 100 > f("max_cluster_weight_pct"))
+    return BalanceReport(
+        cash_pct=cash_pct, cash_in_band=cash_in_band, n_framework=n_framework,
+        n_backfill=n_backfill, n_outside=n_outside, position_count_in_band=count_ok,
+        soft_cap_breaches=soft, hard_cap_breaches=hard, cluster_weight_breaches=cluster_breaches,
+        n_eff=n_eff, n_eff_ok=n_eff_ok, outside_framework_pct=outside_pct,
+        outside_cap_ok=outside_ok, unpriced_weight_pct=unpriced_pct, leverage_violations=leverage)

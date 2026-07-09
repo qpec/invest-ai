@@ -137,3 +137,56 @@ def test_snapshot_age(tmp_db, fixed_clock):
     age = mirror.snapshot_age(tmp_db, as_of=datetime(2026, 7, 8, tzinfo=timezone.utc))
     assert age == timedelta(days=7)
     assert mirror.snapshot_age(tmp_db, as_of=None) is None or isinstance(age, timedelta)
+
+
+def test_balance_bands_and_unpriced_weight(tmp_db, fixed_clock):
+    from agentcy import mirror
+    mirror.ingest_snapshot(tmp_db, _snap(1000.0, [                 # cash 1000
+        _pos("VEEV", 10, 6000, itype="stock"),                     # 6000
+        _pos("CRWD", 5, 3000, itype="stock"),                      # 3000
+        _pos("COPY", 1, 1000, itype="copyportfolio")]),            # non-mappable (yf None)
+        clock=fixed_clock)
+    mirror.designate(tmp_db, "VEEV", "framework", journal_ref=1, valid_from=db.to_iso(fixed_clock.now()))
+    mirror.designate(tmp_db, "CRWD", "framework", journal_ref=1, valid_from=db.to_iso(fixed_clock.now()))
+    mirror.designate(tmp_db, "COPY", "outside_framework", journal_ref=1,
+                     valid_from=db.to_iso(fixed_clock.now()))
+    rep = mirror.balance(tmp_db, as_of=fixed_clock.now())
+    invested = 6000 + 3000 + 1000
+    assert round(rep.cash_pct, 2) == round(100 * 1000 / (1000 + invested), 2)
+    assert rep.n_framework == 2 and rep.n_outside == 1 and rep.n_backfill == 0
+    # VEEV weight = 6000/10000 = 60% > hard 20%
+    assert "VEEV" in rep.hard_cap_breaches and "VEEV" in rep.soft_cap_breaches
+    # COPY is non-mappable -> unpriced weight printed
+    assert round(rep.unpriced_weight_pct, 1) == round(100 * 1000 / invested, 1)
+    # no returns frame passed -> N_eff suspended
+    assert rep.n_eff is None and rep.n_eff_ok is None
+
+
+def test_balance_cash_band_and_outside_cap(tmp_db, fixed_clock):
+    from agentcy import mirror
+    mirror.ingest_snapshot(tmp_db, _snap(100.0, [
+        _pos("VEEV", 10, 4500, itype="stock"),
+        _pos("BTC", 1, 500, itype="crypto")]), clock=fixed_clock)
+    mirror.designate(tmp_db, "VEEV", "framework", journal_ref=1, valid_from=db.to_iso(fixed_clock.now()))
+    mirror.designate(tmp_db, "BTC", "outside_framework", journal_ref=1,
+                     valid_from=db.to_iso(fixed_clock.now()))
+    rep = mirror.balance(tmp_db, as_of=fixed_clock.now())
+    assert rep.cash_in_band is False                       # 100/5100 ≈ 1.96% < 5% band low
+    # BTC 500/5000 = 10% outside == cap 10% -> ok (not strictly above)
+    assert rep.outside_cap_ok is True
+
+
+def test_balance_with_returns_computes_n_eff(tmp_db, fixed_clock):
+    import numpy as np, pandas as pd
+    from agentcy import mirror
+    mirror.ingest_snapshot(tmp_db, _snap(0.0, [
+        _pos("A", 1, 4000, itype="stock"), _pos("B", 1, 4000, itype="stock"),
+        _pos("C", 1, 2000, itype="stock")]), clock=fixed_clock)
+    rng = np.random.default_rng(1)
+    base = rng.normal(0, 0.01, 200)
+    idx = pd.date_range("2025-01-01", periods=200, freq="B")
+    rets = pd.DataFrame({"A": base + rng.normal(0, 0.001, 200),
+                         "B": base + rng.normal(0, 0.001, 200),
+                         "C": rng.normal(0, 0.01, 200)}, index=idx)
+    rep = mirror.balance(tmp_db, as_of=fixed_clock.now(), returns_local=rets)
+    assert rep.n_eff is not None and rep.n_eff_ok is not None
