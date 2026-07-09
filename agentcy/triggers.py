@@ -10,7 +10,11 @@ from agentcy.fetch import store
 from agentcy.freshness import CheckResult, DataState
 
 _QUARTER = timedelta(days=91)
-_WINDOW_QUARTERS = {"single_observation": 1, "2_consecutive_quarters": 2, "ttm": 4}
+# Plan-typo fix (P3.13): a `ttm` series is already a trailing-12m aggregate, so its persistence
+# window is one point — the latest TTM figure — not four (elaboration B.2 type-2; P3.13 margin_series
+# note: "one element satisfies the window"). P3.12 had this as 4, which is unreachable for the
+# one-element margin_series and would wrongly report BOOTSTRAPPING.
+_WINDOW_QUARTERS = {"single_observation": 1, "2_consecutive_quarters": 2, "ttm": 1}
 
 
 @dataclass(frozen=True)
@@ -97,3 +101,20 @@ def _yf(conn, trigger_row) -> str:
     """Resolve the thesis ticker to its yf_ticker (symbol_map latest wins; else the ticker)."""
     ticker = db.fetch_thesis(conn, trigger_row["thesis_id"])["ticker"]
     return db.fetch_current_symbol_map(conn).get(ticker, ticker)
+
+
+def _eval_prompted(conn, trigger_row, *, as_of: datetime) -> CheckOutcome:
+    """Type-5: read the latest Q-ask answer for this trigger; no answer / can't-verify -> UNVERIFIABLE."""
+    tid = trigger_row["trigger_id"]
+    asks_rows = db.fetch_asks_for(conn, trigger_ref=tid, kind="Q")
+    answered = [a for a in asks_rows if a["status"] == "answered" and a["answer_json"]]
+    if not answered:
+        return _outcome(tid, "UNVERIFIABLE", note="prompted question not yet answered (B.3.4)")
+    import json as _json
+    latest = answered[-1]
+    choice = _json.loads(latest["answer_json"]).get("choice")
+    if choice == "cant":
+        return _outcome(tid, "UNVERIFIABLE", note="owner could not verify")
+    yes_fires = trigger_row["yes_means"] == "fire"
+    fires = (choice == "yes") == yes_fires
+    return _outcome(tid, "FIRE" if fires else "PASS")

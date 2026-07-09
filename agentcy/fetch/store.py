@@ -308,3 +308,72 @@ def denominator_per_share(conn, yf_ticker: str, *, as_of: datetime) -> Stamped[f
             f"{yf_ticker}: owner-FCF per share {per_share:.4f} non-positive — checks suspended (MA-3)"
         return Stamped(per_share, oe.fetched_at, DataState.STALE, note)
     return Stamped(per_share, oe.fetched_at, oe.state, oe.note)
+
+
+# --- P3 derived series (pure functions of the append-only archive; no fetch) ---
+import json as _json
+
+
+def revenue_yoy_series(conn, yf_ticker, *, as_of):
+    """Per-period revenue YoY % from the income 'Total Revenue' row (same-quarter-prior-year lag)."""
+    hist = statement_history(conn, yf_ticker, "income", as_of=as_of)
+    if hist is None or not hist.usable():
+        return hist
+    periods = [(r["period_end"], _json.loads(r["payload_json"]).get("Total Revenue"))
+               for r in hist.value]
+    periods = [(pe, v) for pe, v in periods if v]
+    # Match each period to the observation one year earlier by date (month+day), so gapped or
+    # irregular archives still line up the correct comparison quarter (index-4-back breaks on gaps).
+    by_key = {pe[5:]: [] for pe, _ in periods}
+    for pe, v in periods:
+        by_key[pe[5:]].append((pe, v))
+    out = []
+    for pe, rev in periods:
+        prior_year = str(int(pe[:4]) - 1)
+        prior = next(((p, pv) for p, pv in by_key[pe[5:]] if p[:4] == prior_year and pv), None)
+        if prior:
+            out.append((pe, 100.0 * (rev - prior[1]) / prior[1]))
+    return _restamp(hist, out)
+
+
+def margin_series(conn, yf_ticker, *, as_of):
+    """Owner-FCF margin % TTM per period; delegates to owner_fcf_ttm's per-period construction."""
+    oe = owner_fcf_ttm(conn, yf_ticker, as_of=as_of)
+    if oe is None or not oe.usable():
+        return oe
+    return _restamp(oe, [(oe.value.periods_used[-1], 100.0 * oe.value.owner_fcf_margin_ttm)])
+
+
+def balance_safety_series(conn, yf_ticker, *, as_of):
+    """Net-debt / EBITDA per period (MA-2 pinned rows; drop periods with any absent row)."""
+    inc = statement_history(conn, yf_ticker, "income", as_of=as_of)
+    bal = statement_history(conn, yf_ticker, "balance", as_of=as_of)
+    if inc is None or bal is None or not (inc.usable() and bal.usable()):
+        return inc if inc is not None else bal
+    bal_by_pe = {r["period_end"]: _json.loads(r["payload_json"]) for r in bal.value}
+    out = []
+    for r in inc.value:
+        b = bal_by_pe.get(r["period_end"], {})
+        income = _json.loads(r["payload_json"])
+        debt, cash, ebitda = b.get("Total Debt"), b.get("Cash And Cash Equivalents"), income.get("EBITDA")
+        if None in (debt, cash, ebitda) or not ebitda:
+            continue                                       # any absent row -> drop (never a silent zero)
+        out.append((r["period_end"], (debt - cash) / ebitda))
+    return _restamp(inc, out)
+
+
+def shares_yoy(conn, yf_ticker, *, as_of):
+    """Trailing-12m share-count growth %."""
+    sh = shares_history(conn, yf_ticker, as_of=as_of)
+    if sh is None or not sh.usable():
+        return sh
+    series = sh.value                                      # pd.Series indexed by date, deduped
+    if len(series) < 2:
+        return _restamp(sh, None)
+    latest, year_ago = float(series.iloc[-1]), float(series.iloc[0])
+    return _restamp(sh, 100.0 * (latest - year_ago) / year_ago if year_ago else None)
+
+
+def _restamp(src, value):
+    from agentcy.freshness import Stamped
+    return Stamped(value=value, fetched_at=src.fetched_at, state=src.state, note=src.note)

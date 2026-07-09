@@ -106,3 +106,71 @@ def test_dilution_fires(tmp_db, fixed_clock, monkeypatch, stamped):
     monkeypatch.setattr(store, "shares_yoy", lambda c, t, *, as_of: stamped(3.6), raising=False)
     out = triggers.evaluate(tmp_db, trig, as_of=AS_OF)
     assert out.result == "FIRE" and out.observed_value == 3.6 and round(out.headroom, 1) == -0.6
+
+
+def test_margin_erosion_ttm_fires(tmp_db, fixed_clock, monkeypatch, stamped):
+    from agentcy import triggers
+    from agentcy.fetch import store
+    trig, tid = _thesis_with_trigger(tmp_db, fixed_clock, {})
+    margin_trig = [t for t in db.fetch_armed_triggers(tmp_db, tid)
+                   if t["type"] == "margin_erosion"][0]                 # threshold 20, ttm
+    monkeypatch.setattr(store, "margin_series",
+                        lambda c, t, *, as_of: stamped([("2026-06-30", 17.1)]), raising=False)
+    out = triggers.evaluate(tmp_db, margin_trig, as_of=AS_OF)
+    assert out.result == "FIRE" and out.observed_value == 17.1
+
+
+def test_balance_safety_stale_when_row_missing(tmp_db, fixed_clock, monkeypatch, stamped):
+    from agentcy import register, triggers
+    from agentcy.fetch import store
+    tid = register.create_thesis(tmp_db, ticker="ABC", origin="gate", fields=_rfields(),
+        triggers=[register.TriggerSpec(type="balance_sheet_safety", statement="netdebt/ebitda>3",
+                    metric="net_debt_ebitda", comparator=">", threshold=3.0,
+                    moat_link="cost_advantage", persistence="single_observation"),
+                  register.TriggerSpec(type="growth_floor", statement="s", metric="revenue_yoy",
+                    comparator="<", threshold=10.0, moat_link=None,
+                    persistence="single_observation")],
+        journal_ref=1, clock=fixed_clock)
+    register.activate(tmp_db, tid, cause="c", clock=fixed_clock)
+    trig = [t for t in db.fetch_armed_triggers(tmp_db, tid)
+            if t["type"] == "balance_sheet_safety"][0]
+    monkeypatch.setattr(store, "balance_safety_series",
+                        lambda c, t, *, as_of: stamped([], state="stale"), raising=False)
+    assert triggers.evaluate(tmp_db, trig, as_of=AS_OF).result == "STALE"
+
+
+def test_prompted_unverifiable_without_answer(tmp_db, fixed_clock):
+    from agentcy import register, triggers
+    tid = register.create_thesis(tmp_db, ticker="VEEV", origin="gate", fields=_rfields(),
+        triggers=[register.TriggerSpec(type="owner_attested_event",
+                    statement="Has the founder departed?", metric=None, comparator=None,
+                    threshold=None, moat_link="switching_costs", persistence="single_observation",
+                    yes_means="fire"),
+                  register.TriggerSpec(type="growth_floor", statement="s", metric="revenue_yoy",
+                    comparator="<", threshold=10.0, moat_link=None,
+                    persistence="single_observation")],
+        journal_ref=1, clock=fixed_clock)
+    register.activate(tmp_db, tid, cause="c", clock=fixed_clock)
+    trig = [t for t in db.fetch_armed_triggers(tmp_db, tid)
+            if t["type"] == "owner_attested_event"][0]
+    assert triggers.evaluate(tmp_db, trig, as_of=AS_OF).result == "UNVERIFIABLE"
+
+
+def test_prompted_yes_fires_when_yes_means_fire(tmp_db, fixed_clock):
+    from agentcy import asks, register, triggers
+    tid = register.create_thesis(tmp_db, ticker="VEEV", origin="gate", fields=_rfields(),
+        triggers=[register.TriggerSpec(type="owner_attested_event", statement="departed?",
+                    metric=None, comparator=None, threshold=None, moat_link="switching_costs",
+                    persistence="single_observation", yes_means="fire"),
+                  register.TriggerSpec(type="growth_floor", statement="s", metric="revenue_yoy",
+                    comparator="<", threshold=10.0, moat_link=None,
+                    persistence="single_observation")],
+        journal_ref=1, clock=fixed_clock)
+    register.activate(tmp_db, tid, cause="c", clock=fixed_clock)
+    trig = [t for t in db.fetch_armed_triggers(tmp_db, tid)
+            if t["type"] == "owner_attested_event"][0]
+    q = asks.mint(tmp_db, kind="Q", prompt="departed?", options=["yes", "no", "cant"],
+                  expects_freetext=True, thesis_ref=tid, trigger_ref=trig["trigger_id"],
+                  clock=fixed_clock)
+    asks.answer(tmp_db, q.ask_id, choice="yes", clock=fixed_clock)
+    assert triggers.evaluate(tmp_db, trig, as_of=AS_OF).result == "FIRE"
