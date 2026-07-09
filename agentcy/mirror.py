@@ -96,3 +96,52 @@ def parse_manual_text(text: str) -> SnapshotIn:
         for s, q, mv, ccy in rows)
     return SnapshotIn(as_of=datetime.now().date().isoformat(), source="manual_entry",
                       cash_balance_eur=cash, positions=positions)
+
+
+@dataclass(frozen=True)
+class Delta:
+    kind: str            # appeared | disappeared | quantity_change | unexplained_cash | leverage_violation
+    symbol: str | None
+    detail: str
+    old_value: float | None
+    new_value: float | None
+
+
+def ingest_snapshot(conn, snap: SnapshotIn, *, clock: Clock) -> tuple[int, list[Delta]]:
+    """Append snapshot+positions; reconcile vs previous; caller mints one R ask per Delta."""
+    prev = db.fetch_latest_snapshot(conn)
+    prev_positions = (db.fetch_positions_records(conn, prev["snapshot_id"]) if prev else [])
+    prev_by_sym = {p["symbol"]: p for p in prev_positions}
+    snapshot_id = db.append_snapshot(conn, as_of=snap.as_of, source=snap.source,
+                                     cash_balance_eur=snap.cash_balance_eur,
+                                     created_at=db.to_iso(clock.now()))
+    db.append_positions(conn, snapshot_id, [{
+        "symbol": p.symbol, "yf_ticker": p.yf_ticker, "instrument_type": p.instrument_type,
+        "quantity": p.quantity, "avg_open_price": p.avg_open_price,
+        "native_currency": p.native_currency, "mv_native": p.mv_native, "mv_eur": p.mv_eur,
+        "weight": p.weight, "leverage": p.leverage} for p in snap.positions])
+    deltas: list[Delta] = []
+    now_by_sym = {p.symbol: p for p in snap.positions}
+    # leverage tripwire — every snapshot, regardless of previous state (E.1 continuous Hell-No)
+    for p in snap.positions:
+        if p.leverage > 1.0:
+            deltas.append(Delta("leverage_violation", p.symbol,
+                                f"leverage {p.leverage} on {p.instrument_type}", 1.0, p.leverage))
+    if prev is None:
+        return snapshot_id, deltas                        # baseline: no appeared/disappeared
+    for sym, p in now_by_sym.items():
+        if sym not in prev_by_sym:
+            deltas.append(Delta("appeared", sym, f"new position {sym}", None, p.quantity))
+        elif p.quantity != prev_by_sym[sym]["quantity"]:
+            deltas.append(Delta("quantity_change", sym, "quantity changed",
+                                prev_by_sym[sym]["quantity"], p.quantity))
+    for sym in prev_by_sym:
+        if sym not in now_by_sym:
+            deltas.append(Delta("disappeared", sym, f"{sym} no longer present",
+                                prev_by_sym[sym]["quantity"], None))
+    cash_delta = snap.cash_balance_eur - prev["cash_balance_eur"]
+    position_moved = any(d.kind in ("disappeared", "quantity_change") for d in deltas)
+    if abs(cash_delta) > 1.0 and not position_moved:
+        deltas.append(Delta("unexplained_cash", None, f"cash moved by {cash_delta:+.1f}",
+                            prev["cash_balance_eur"], cash_delta))
+    return snapshot_id, deltas

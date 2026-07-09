@@ -37,3 +37,62 @@ def test_parse_manual_text(fixed_clock):
     assert snap.source == "manual_entry" and snap.cash_balance_eur == 300.0
     assert {p.symbol for p in snap.positions} == {"VEEV", "CRWD"}
     assert all(p.avg_open_price is None for p in snap.positions)
+
+
+def _pos(symbol, qty, mv, lev=1.0, itype="stock", ccy="USD"):
+    from agentcy import mirror
+    return mirror.PositionIn(symbol=symbol, yf_ticker=symbol, instrument_type=itype, quantity=qty,
+                             avg_open_price=None, native_currency=ccy, mv_native=mv, mv_eur=mv,
+                             weight=0.0, leverage=lev)
+
+
+def _snap(cash, positions, source="manual_entry", as_of="2026-07-08"):
+    from agentcy import mirror
+    return mirror.SnapshotIn(as_of=as_of, source=source, cash_balance_eur=cash,
+                             positions=tuple(positions))
+
+
+def test_first_ingest_no_appeared_deltas(tmp_db, fixed_clock):
+    from agentcy import mirror
+    sid, deltas = mirror.ingest_snapshot(tmp_db, _snap(300.0, [_pos("VEEV", 10, 2300)]),
+                                         clock=fixed_clock)
+    assert sid == 1 and [d.kind for d in deltas] == []       # baseline, nothing to reconcile
+    assert db.fetch_latest_snapshot(tmp_db)["cash_balance_eur"] == 300.0
+
+
+def test_appeared_and_disappeared(tmp_db, fixed_clock):
+    from agentcy import mirror
+    mirror.ingest_snapshot(tmp_db, _snap(300.0, [_pos("VEEV", 10, 2300)],
+                           as_of="2026-07-01"), clock=fixed_clock)
+    _, deltas = mirror.ingest_snapshot(tmp_db, _snap(300.0, [_pos("CRWD", 5, 1500)],
+                                       as_of="2026-07-08"), clock=fixed_clock)
+    kinds = {(d.kind, d.symbol) for d in deltas}
+    assert ("appeared", "CRWD") in kinds and ("disappeared", "VEEV") in kinds
+
+
+def test_quantity_change(tmp_db, fixed_clock):
+    from agentcy import mirror
+    mirror.ingest_snapshot(tmp_db, _snap(300.0, [_pos("MSFT", 40, 4000)], as_of="2026-07-01"),
+                           clock=fixed_clock)
+    _, deltas = mirror.ingest_snapshot(tmp_db, _snap(300.0, [_pos("MSFT", 55, 5500)],
+                                       as_of="2026-07-08"), clock=fixed_clock)
+    qd = [d for d in deltas if d.kind == "quantity_change"]
+    assert len(qd) == 1 and qd[0].old_value == 40 and qd[0].new_value == 55
+
+
+def test_unexplained_cash_pure_deposit(tmp_db, fixed_clock):
+    from agentcy import mirror
+    mirror.ingest_snapshot(tmp_db, _snap(300.0, [_pos("VEEV", 10, 2300)], as_of="2026-07-01"),
+                           clock=fixed_clock)
+    _, deltas = mirror.ingest_snapshot(tmp_db, _snap(4500.0, [_pos("VEEV", 10, 2300)],
+                                       as_of="2026-07-08"), clock=fixed_clock)
+    uc = [d for d in deltas if d.kind == "unexplained_cash"]
+    assert len(uc) == 1 and uc[0].new_value == 4200.0        # +4200 with no position change
+
+
+def test_leverage_tripwire(tmp_db, fixed_clock):
+    from agentcy import mirror
+    _, deltas = mirror.ingest_snapshot(tmp_db, _snap(0.0, [_pos("XLEV", 1, 1000, lev=2.0)]),
+                                       clock=fixed_clock)
+    lv = [d for d in deltas if d.kind == "leverage_violation"]
+    assert len(lv) == 1 and lv[0].symbol == "XLEV"
