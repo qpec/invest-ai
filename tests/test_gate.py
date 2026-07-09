@@ -621,3 +621,33 @@ def test_abandon_marks_session(tmp_db, fixed_clock):
                                  started_at="2026-07-08T05:00:00Z")
     gate.abandon(tmp_db, sid, clock=fixed_clock)
     assert db.fetch_active_gate_session(tmp_db, "VEEV") is None
+
+
+# --- P4.11 backfill variant ---------------------------------------------------
+
+def test_backfill_business_passes_activates(tmp_db, fixed_clock, monkeypatch):
+    from agentcy import gate
+    _patch_store_and_config(monkeypatch, tmp_db, multiple=999.0)   # price irrelevant
+    ask = _scripted_full_buy(monkeypatch)
+    outcome = gate.start(tmp_db, ticker="VEEV", mode="backfill",
+                         ask_owner=ask, clock=fixed_clock)
+    assert outcome.verdict == "activate_backfill"
+    assert outcome.thesis_id is not None
+    th = db.fetch_thesis(tmp_db, outcome.thesis_id)
+    assert th["origin"] == "backfill"
+    ver = db.fetch_current_thesis_version(tmp_db, outcome.thesis_id)
+    assert ver["value_at_purchase"] is None
+    entries = db.fetch_journal_entries(tmp_db, decision_type="gate_verdict")
+    assert entries[0]["decision_subtype"] == "activate_backfill"
+
+
+def test_backfill_no_thesis_exists_from_circle_pass(tmp_db, fixed_clock, monkeypatch):
+    from agentcy import gate
+    # owner cannot write the 2-sentence model for a held position -> no_thesis_exists
+    ask = ScriptedAsker(["   "])
+    outcome = gate.start(tmp_db, ticker="VEEV", mode="backfill",
+                         ask_owner=ask, clock=fixed_clock)
+    assert outcome.verdict == "no_thesis_exists"
+    assert outcome.thesis_id is None
+    entries = db.fetch_journal_entries(tmp_db, decision_type="gate_verdict")
+    assert entries[0]["decision_subtype"] == "no_thesis_exists"

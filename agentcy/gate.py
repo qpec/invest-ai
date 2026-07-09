@@ -567,8 +567,16 @@ def _drive(conn, session_id, *, ticker, mode, state, step, ask_owner, clock,
 def _run_verdict(conn, *, mode, state, dossier, ask_owner, clock) -> dict:
     """Classify, then apply the two BUY_READY frictions (displacement, status
     rebuttal) which need the owner and live DB state."""
-    if mode == "backfill" and "pending_pass" not in state:
-        # backfill has no price verdict (BUF-12); business passing => activate
+    if mode == "backfill":
+        # backfill has no price verdict (BUF-12): a pending PASS means the owner
+        # could not affirm a thesis for a held position -> no_thesis_exists (FR1,
+        # honest admission -> broken -> sell advice); otherwise the business
+        # passed -> activate_backfill.
+        if "pending_pass" in state:
+            return {"verdict": "no_thesis_exists",
+                    "reason_class": state["pending_pass"]["reason_class"],
+                    "note": state["pending_pass"]["note"], "standing_questions": (),
+                    "suggested_max_weight_pct": None, "requires_status_rebuttal": False}
         return {"verdict": "activate_backfill", "reason_class": None, "note": None,
                 "standing_questions": (), "suggested_max_weight_pct": None,
                 "requires_status_rebuttal": False}
