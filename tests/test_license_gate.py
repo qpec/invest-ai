@@ -187,3 +187,90 @@ def test_main_violation_exit_one(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "VIOLATION" in out
     assert "owner decision required" in out
+
+
+# --- owner decision 2026-07-09: the six ratified permissive resolutions ---------
+# yfinance/multitasking/python-dateutil (non-SPDX free-text License masking
+# permissive classifiers), cffi (MIT-0), numpy (Zlib/CC0-1.0), peewee (no
+# metadata). The wall must resolve these to PASS while still biting copyleft.
+
+
+def test_classifier_precedence_free_text_apache_masks_classifier():
+    # yfinance / multitasking: License="Apache" (not a valid SPDX id) but the
+    # OSI classifier says Apache -> resolve via classifier, PASS.
+    (row,) = audit([d("yfinance",
+                      license_text="Apache",
+                      classifiers=("License :: OSI Approved :: Apache Software License",))])
+    assert row.verdict == "OK"
+    assert row.source == "Classifier"
+
+
+def test_classifier_precedence_dual_license_free_text_masks_classifiers():
+    # python-dateutil: License="Dual License" (not SPDX) with BSD + Apache
+    # classifiers -> both permissive -> PASS.
+    (row,) = audit([d("python-dateutil",
+                      license_text="Dual License",
+                      classifiers=(
+                          "License :: OSI Approved :: BSD License",
+                          "License :: OSI Approved :: Apache Software License",
+                      ))])
+    assert row.verdict == "OK"
+    assert row.source == "Classifier"
+
+
+def test_license_expression_mit0_allowed():
+    # cffi: License-Expression = MIT-0 (valid SPDX; MIT No Attribution).
+    (row,) = audit([d("cffi", license_expression="MIT-0")])
+    assert row.verdict == "OK"
+
+
+def test_numpy_and_expression_allowed():
+    # numpy: the exact locked AND-expression, incl. Zlib and CC0-1.0.
+    (row,) = audit([d("numpy",
+                      license_expression="BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0")])
+    assert row.verdict == "OK"
+
+
+def test_peewee_named_exception_no_metadata():
+    # peewee: ships NO license metadata; MIT upstream -> named exception.
+    (row,) = audit([d("peewee")])
+    assert row.verdict.startswith("EXCEPTION")
+
+
+# --- the wall must still bite (negatives) --------------------------------------
+
+
+def test_gpl_classifier_still_fails():
+    (row,) = audit([d("gplpkg",
+                      classifiers=("License :: OSI Approved :: "
+                                   "GNU General Public License v3 (GPLv3)",))])
+    assert row.verdict.startswith("VIOLATION")
+
+
+def test_non_spdx_free_text_with_gpl_classifier_fails():
+    # non-SPDX free-text License must NOT be taken verbatim, but a GPL
+    # classifier alongside it must still FAIL (every classifier must be allowed).
+    (row,) = audit([d("sneaky",
+                      license_text="Free For All",
+                      classifiers=(
+                          "License :: OSI Approved :: BSD License",
+                          "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+                      ))])
+    assert row.verdict.startswith("VIOLATION")
+
+
+def test_absent_metadata_not_in_exception_list_fails():
+    (row,) = audit([d("mystery-no-meta")])
+    assert row.verdict == "VIOLATION"
+    assert "no license metadata" in row.license
+
+
+def test_unknown_spdx_id_still_fails():
+    (row,) = audit([d("weird", license_expression="WTFPL")])
+    assert row.verdict.startswith("VIOLATION")
+
+
+def test_free_text_non_spdx_no_classifier_fails_closed():
+    # "Apache" free text alone with NO classifier must not resolve to Apache-2.0.
+    (row,) = audit([d("orphan", license_text="Apache")])
+    assert row.verdict.startswith("VIOLATION")
