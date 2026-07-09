@@ -35,8 +35,6 @@ def test_gate_verdict_document(golden):
 
 
 def test_gate_pass_has_no_weight():
-    r = render_gate(_ctx(verdict="pass"))
-    from agentcy.render.gate import render_gate as rg
-    r2 = rg(GateContext("ASML", "pass", "failed hell-no filter", {"circle": "edge"},
-                        None, (), GEN))
+    r2 = render_gate(GateContext("ASML", "pass", "failed hell-no filter", {"circle": "edge"},
+                                 None, (), GEN))
     assert "suggested max weight" not in r2.telegram_html.lower()
