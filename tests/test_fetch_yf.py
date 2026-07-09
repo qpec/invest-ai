@@ -217,3 +217,77 @@ def test_fetch_statements_stale_period_end_is_failure(monkeypatch, tmp_path, no_
     _patch_statements(monkeypatch, stmts, now=datetime(2027, 9, 1, tzinfo=timezone.utc))
     with pytest.raises(yfd.FetchFailed, match="not recent"):
         yfd.fetch_statements("MSFT", state_dir=tmp_path)
+
+
+def test_fetch_shares_full_returns_raw_series_with_duplicates(monkeypatch, tmp_path, no_sleep, yf_series):
+    from agentcy.fetch import yf as yfd
+    series = yf_series()
+    monkeypatch.setattr(yfd, "_raw_shares_full", lambda ticker: series)
+    out = yfd.fetch_shares_full("MSFT", state_dir=tmp_path)
+    assert len(out) == 7 and out.index.duplicated().any()    # raw; store dedups at read (§7.4)
+
+
+def test_fetch_shares_full_empty_is_failure(monkeypatch, tmp_path, no_sleep):
+    from agentcy.fetch import yf as yfd
+    monkeypatch.setattr(yfd, "_raw_shares_full", lambda ticker: pd.Series(dtype=float))
+    with pytest.raises(yfd.FetchFailed):
+        yfd.fetch_shares_full("MSFT", state_dir=tmp_path)
+
+
+def test_fetch_officers_normalizes_to_name_title(monkeypatch, tmp_path, no_sleep, yf_fixture):
+    from agentcy.fetch import yf as yfd
+    monkeypatch.setattr(yfd, "_raw_officers", lambda ticker: yf_fixture("officers_msft"))
+    out = yfd.fetch_officers("MSFT", state_dir=tmp_path)
+    assert out == [
+        {"name": "Amy Hood", "title": "EVP & CFO"},
+        {"name": "Brad Smith", "title": "Vice Chair & President"},
+        {"name": "Satya Nadella", "title": "Chairman & CEO"},
+    ]  # sorted by name; volatile pay/age fields stripped (plan note 6)
+
+
+def test_fetch_officers_empty_is_failure(monkeypatch, tmp_path, no_sleep):
+    from agentcy.fetch import yf as yfd
+    monkeypatch.setattr(yfd, "_raw_officers", lambda ticker: [])
+    with pytest.raises(yfd.FetchFailed):                     # best-effort: the CALLER degrades (MA-6)
+        yfd.fetch_officers("MSFT", state_dir=tmp_path)
+
+
+def test_fetch_calendar_returns_iso_date(monkeypatch, tmp_path, no_sleep):
+    from datetime import date
+    from agentcy.fetch import yf as yfd
+    monkeypatch.setattr(yfd, "_raw_calendar",
+                        lambda ticker: {"Earnings Date": [date(2026, 7, 20), date(2026, 7, 24)]})
+    assert yfd.fetch_calendar("MSFT", state_dir=tmp_path) == "2026-07-20"
+
+
+def test_fetch_calendar_absence_is_none_never_error(monkeypatch, tmp_path, no_sleep):
+    from agentcy.fetch import yf as yfd
+    monkeypatch.setattr(yfd, "_raw_calendar", lambda ticker: {})
+    assert yfd.fetch_calendar("MSFT", state_dir=tmp_path) is None
+
+    def broken(ticker):
+        raise ValueError("calendar schema drifted")
+
+    monkeypatch.setattr(yfd, "_raw_calendar", broken)
+    assert yfd.fetch_calendar("MSFT", state_dir=tmp_path) is None   # MA-7: never an error
+
+
+def test_fetch_calendar_rate_limit_still_surfaces(monkeypatch, tmp_path, no_sleep):
+    from agentcy.fetch import yf as yfd
+    from yfinance.exceptions import YFRateLimitError
+
+    def limited(ticker):
+        raise YFRateLimitError()
+
+    monkeypatch.setattr(yfd, "_raw_calendar", limited)
+    with pytest.raises(yfd.RateLimited):                     # DEGRADED must not be masked by best-effort
+        yfd.fetch_calendar("MSFT", state_dir=tmp_path)
+
+
+def test_fetch_fast_info(monkeypatch, tmp_path, no_sleep):
+    from agentcy.fetch import yf as yfd
+    monkeypatch.setattr(yfd, "_raw_fast_info", lambda ticker: {"currency": "USD", "last_price": 523.6})
+    assert yfd.fetch_fast_info("MSFT", state_dir=tmp_path)["currency"] == "USD"
+    monkeypatch.setattr(yfd, "_raw_fast_info", lambda ticker: {})
+    with pytest.raises(yfd.FetchFailed):
+        yfd.fetch_fast_info("MSFT", state_dir=tmp_path)
