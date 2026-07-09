@@ -113,3 +113,19 @@ def test_run_qv_never_persists(tmp_db, monkeypatch, universe_file):
     # no watchlist row, no report row created by the screen (H: never stored)
     assert db.fetch_watchlist(tmp_db) == []
     assert db.fetch_reports(tmp_db) == []
+
+
+# --- P4.18 import-graph guard -------------------------------------------------
+
+def test_importing_scout_does_not_import_tradingview():
+    import sys
+    # scout is already imported by this test module; assert the extra is absent
+    assert "tradingview_screener" not in sys.modules, (
+        "tradingview-screener must be imported lazily inside _run_screener only "
+        "(NFR7 import-graph contract)")
+
+
+def test_gate_module_imports_no_scout_extra():
+    import sys, importlib
+    importlib.import_module("agentcy.gate")
+    assert "tradingview_screener" not in sys.modules
