@@ -1,0 +1,9 @@
+<b>Status — Wed 8 Jul 2026, 07:00 CET</b>
+
+Snapshot: manual export of 2026-07-06 (2 days old) · Prices: fresh (07:00 CET)
+Cash 16.93% (band 5–15% ×) · 0 framework, 1 backfill pending, 0 outside-framework
+
+✓ 1 open decision waiting — see below. No new triggers fired.
+OPEN LOOP [A1] — alert decision open (0d).
+
+Next scheduled: daily letter after tonight's US close.
