@@ -142,3 +142,101 @@ def test_retired_is_terminal(tmp_db, fixed_clock):
     register.transition(tmp_db, tid, "retired", cause="closed", cause_ref=None, clock=fixed_clock)
     with pytest.raises(ValueError):
         register.transition(tmp_db, tid, "intact", cause="x", cause_ref=None, clock=fixed_clock)
+
+
+from datetime import datetime, timezone
+
+from agentcy.clock import FixedClock
+
+
+def test_revise_bumps_version_with_diff(tmp_db, fixed_clock):
+    from agentcy import register
+    tid = _mk(tmp_db, fixed_clock)
+    register.activate(tmp_db, tid, cause="c", clock=fixed_clock)
+    v = register.revise(tmp_db, tid, {"moat_evidence": "retention now >120%"},
+                        reason="fresher data", actor="owner", journal_ref=1, clock=fixed_clock)
+    assert v == 2
+    row = db.fetch_current_thesis_version(tmp_db, tid)
+    assert row["version"] == 2 and row["moat_evidence"] == "retention now >120%"
+    assert json.loads(row["diff_json"])["moat_evidence"] == ["retention >115%", "retention now >120%"]
+
+
+def test_band_reanchor_needs_context_and_intact(tmp_db, fixed_clock):
+    from agentcy import register
+    tid = _mk(tmp_db, fixed_clock)
+    register.activate(tmp_db, tid, cause="c", clock=fixed_clock)
+    with pytest.raises(ValueError, match="anniversary|event|re-anchor"):
+        register.revise(tmp_db, tid, {"fair_band_high": 40.0}, reason="feels cheap",
+                        actor="owner", journal_ref=1, clock=fixed_clock)
+    v = register.revise(tmp_db, tid, {"fair_band_high": 40.0}, reason="anniversary review",
+                        actor="owner", journal_ref=1, clock=fixed_clock, context="anniversary")
+    assert v == 2 and db.fetch_current_thesis_version(tmp_db, tid)["fair_band_high"] == 40.0
+
+
+def test_no_revise_while_under_review(tmp_db, fixed_clock):
+    from agentcy import register
+    tid = _mk(tmp_db, fixed_clock)
+    register.activate(tmp_db, tid, cause="c", clock=fixed_clock)
+    register.transition(tmp_db, tid, "under_review", cause="fired", cause_ref=None, clock=fixed_clock)
+    with pytest.raises(ValueError, match="under_review|goalpost"):
+        register.revise(tmp_db, tid, {"moat_evidence": "x"}, reason="r", actor="owner",
+                        journal_ref=1, clock=fixed_clock)
+
+
+def test_distrust_revision_auto_opens_review(tmp_db, fixed_clock):
+    from agentcy import register
+    tid = _mk(tmp_db, fixed_clock)
+    register.activate(tmp_db, tid, cause="c", clock=fixed_clock)
+    register.revise(tmp_db, tid, {"mgmt_trust": "distrust"}, reason="CEO scandal", actor="owner",
+                    journal_ref=1, clock=fixed_clock)
+    assert db.fetch_current_thesis_status(tmp_db, tid)["status"] == "under_review"
+
+
+def test_revise_trigger_loosening_only_intact_and_captures_headroom(tmp_db, fixed_clock):
+    from agentcy import register
+    tid = _mk(tmp_db, fixed_clock)
+    register.activate(tmp_db, tid, cause="c", clock=fixed_clock)
+    old = db.fetch_armed_triggers(tmp_db, tid)[0]                  # growth_floor threshold 10
+    loose = register.TriggerSpec(type="growth_floor", statement="rev YoY < 8% (2q)",
+                                 metric="revenue_yoy", comparator="<", threshold=8.0,
+                                 moat_link=None, persistence="2_consecutive_quarters")
+    new_id = register.revise_trigger(tmp_db, old["trigger_id"], loose, reason="noise",
+                                     actor="owner", journal_ref=1, clock=fixed_clock, headroom=2.7)
+    armed_ids = {t["trigger_id"] for t in db.fetch_armed_triggers(tmp_db, tid)}
+    assert old["trigger_id"] not in armed_ids and new_id in armed_ids   # retire + new row
+    echoes = register.loosening_echoes(tmp_db, as_of=fixed_clock.now())
+    assert any(e["headroom"] == 2.7 for e in echoes)
+
+
+def test_revise_trigger_forbidden_under_review(tmp_db, fixed_clock):
+    from agentcy import register
+    tid = _mk(tmp_db, fixed_clock)
+    register.activate(tmp_db, tid, cause="c", clock=fixed_clock)
+    register.transition(tmp_db, tid, "under_review", cause="c", cause_ref=None, clock=fixed_clock)
+    old = db.fetch_armed_triggers(tmp_db, tid)[0]
+    loose = register.TriggerSpec(type="growth_floor", statement="s", metric="revenue_yoy",
+                                 comparator="<", threshold=5.0, moat_link=None,
+                                 persistence="2_consecutive_quarters")
+    with pytest.raises(ValueError, match="intact|goalpost"):
+        register.revise_trigger(tmp_db, old["trigger_id"], loose, reason="r", actor="owner",
+                                journal_ref=1, clock=fixed_clock, headroom=1.0)
+
+
+def test_anniversaries_due(tmp_db, fixed_clock):
+    from agentcy import register
+    tid = _mk(tmp_db, fixed_clock)
+    register.activate(tmp_db, tid, cause="c", clock=fixed_clock)   # activated 2026-07-08
+    assert register.anniversaries_due(tmp_db, as_of=fixed_clock.now()) == []
+    one_year = datetime(2027, 7, 9, tzinfo=timezone.utc)
+    assert register.anniversaries_due(tmp_db, as_of=one_year) == [tid]
+
+
+def test_guard_repitch_returns_prior_pass(tmp_db, fixed_clock):
+    from agentcy import journal, register
+    eid = journal.append(tmp_db, journal.EntryIn(decision_type="gate_verdict",
+                         decision_subtype="pass", ticker="NVDA",
+                         system_recommendation="PASS: outside_circle", actor="system"),
+                         clock=fixed_clock)
+    got = register.guard_repitch(tmp_db, "NVDA")
+    assert got is not None and got["entry_id"] == eid
+    assert register.guard_repitch(tmp_db, "VEEV") is None
