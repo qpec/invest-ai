@@ -350,3 +350,73 @@ def test_drafting_type5_captures_yes_means():
     t5row = next(t for t in state["triggers"] if t["type"] == "owner_attested_event")
     assert t5row["yes_means"] == "fire"
     assert t5row["check_method"] == "prompted"
+
+
+# --- P4.7 verdict classification ---------------------------------------------
+
+def test_classify_pass_from_pending():
+    from agentcy.gate import classify_verdict
+    state = {"pending_pass": {"reason_class": "hell_no_HN2", "note": "x"}}
+    v = classify_verdict(tmp_db_unused=None, state=state, dossier=None, config_map={})
+    assert v["verdict"] == "PASS"
+    assert v["reason_class"] == "hell_no_HN2"
+
+
+def _config_map():
+    return {"initial_weight_high_pct": "10", "initial_weight_medium_pct": "6",
+            "initial_weight_low_pct": "3", "buy_opportunity_discount_pct": "20",
+            "position_count_high": "15"}
+
+
+def test_classify_buy_ready_price_at_band_high():
+    from agentcy.gate import classify_verdict
+    state = {"conviction": "high", "fair_band_low": 25.0, "fair_band_high": 35.0,
+             "circle_fit": "core", "status_buy_flag": False}
+    dossier = {"current_multiple": 34.0}                 # at/below high -> BUY_READY
+    v = classify_verdict(tmp_db_unused=None, state=state, dossier=dossier,
+                         config_map=_config_map())
+    assert v["verdict"] == "BUY_READY"
+    assert v["suggested_max_weight_pct"] == 10.0         # high conviction
+
+
+def test_classify_watch_price_above_band():
+    from agentcy.gate import classify_verdict
+    state = {"conviction": "medium", "fair_band_low": 25.0, "fair_band_high": 35.0,
+             "circle_fit": "core", "status_buy_flag": False}
+    dossier = {"current_multiple": 40.0}                 # above high -> WATCH
+    v = classify_verdict(tmp_db_unused=None, state=state, dossier=dossier,
+                         config_map=_config_map())
+    assert v["verdict"] == "WATCH"
+    assert v["suggested_max_weight_pct"] is None         # WATCH suggests no size
+
+
+def test_classify_low_conviction_carries_standing_question():
+    from agentcy.gate import classify_verdict
+    state = {"conviction": "low", "fair_band_low": 25.0, "fair_band_high": 35.0,
+             "circle_fit": "core", "status_buy_flag": False}
+    dossier = {"current_multiple": 30.0}
+    v = classify_verdict(tmp_db_unused=None, state=state, dossier=dossier,
+                         config_map=_config_map())
+    assert v["verdict"] == "BUY_READY"
+    assert v["suggested_max_weight_pct"] == 3.0
+    assert any("high-conviction" in q for q in v["standing_questions"])
+
+
+def test_classify_edge_circle_fit_carries_standing_question():
+    from agentcy.gate import classify_verdict
+    state = {"conviction": "high", "fair_band_low": 25.0, "fair_band_high": 35.0,
+             "circle_fit": "edge", "status_buy_flag": False}
+    dossier = {"current_multiple": 30.0}
+    v = classify_verdict(tmp_db_unused=None, state=state, dossier=dossier,
+                         config_map=_config_map())
+    assert any("high-conviction" in q for q in v["standing_questions"])
+
+
+def test_classify_status_buy_requires_rebuttal_flag():
+    from agentcy.gate import classify_verdict
+    state = {"conviction": "high", "fair_band_low": 25.0, "fair_band_high": 35.0,
+             "circle_fit": "core", "status_buy_flag": True}
+    dossier = {"current_multiple": 30.0}
+    v = classify_verdict(tmp_db_unused=None, state=state, dossier=dossier,
+                         config_map=_config_map())
+    assert v["requires_status_rebuttal"] is True
