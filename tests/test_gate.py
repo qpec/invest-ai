@@ -1,0 +1,847 @@
+"""tests/test_gate.py — Gate, watchlist, and gate-session behavior (P4)."""
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+
+import pytest
+
+from agentcy import db
+
+
+def test_append_gate_session_row(tmp_db):
+    sid = db.append_gate_session(tmp_db, ticker="VEEV", mode="gate",
+                                 started_at="2026-07-08T05:00:00Z")
+    row = db.fetch_active_gate_session(tmp_db, "VEEV")
+    assert row is not None
+    assert row["session_id"] == sid
+    assert row["step"] == "circle"          # DDL default
+    assert row["state_json"] == "{}"        # DDL default
+    assert row["status"] == "active"        # DDL default
+    assert row["mode"] == "gate"
+
+
+def test_gate_session_identity_guarded(tmp_db):
+    db.append_gate_session(tmp_db, ticker="VEEV", mode="gate",
+                           started_at="2026-07-08T05:00:00Z")
+    import sqlite3
+    with pytest.raises(sqlite3.IntegrityError):
+        tmp_db.execute("UPDATE gate_session SET ticker='MSFT' WHERE session_id=1")
+
+
+def test_append_watchlist_item_row(tmp_db):
+    item_id = db.append_watchlist_item(tmp_db, ticker="VEEV",
+                                       added_at="2026-07-08T05:00:00Z",
+                                       idea_source="own_research",
+                                       one_line_why="validated GxP record layer")
+    rows = db.fetch_watchlist(tmp_db, stage="raw")
+    assert [r["item_id"] for r in rows] == [item_id]
+    assert rows[0]["one_line_why"] == "validated GxP record layer"
+
+
+# --- P4.2 circle step ---------------------------------------------------------
+
+class ScriptedAsker:
+    """Injected ask_owner: pops pre-scripted answers, logs every prompt (FR9 test seam)."""
+    def __init__(self, answers):
+        self.answers = list(answers)
+        self.log = []
+
+    def __call__(self, prompt, options=None):
+        self.log.append((prompt, tuple(options) if options else None))
+        return self.answers.pop(0)
+
+
+TWO_SENTENCES = ("Veeva sells the system-of-record SaaS suite that life-sciences "
+                 "companies run regulated core processes on. Customers pay recurring "
+                 "subscriptions and effectively cannot leave.")
+THREE_SENTENCES = TWO_SENTENCES + " Also it is great."
+
+
+def test_sentence_count():
+    from agentcy.gate import sentence_count
+    assert sentence_count(TWO_SENTENCES) == 2
+    assert sentence_count(THREE_SENTENCES) == 3
+    assert sentence_count("One sentence without a period") == 1
+
+
+def test_circle_step_happy_path():
+    from agentcy.gate import step_circle
+    state = {}
+    ask = ScriptedAsker([TWO_SENTENCES, "validated-system switching costs", "core"])
+    assert step_circle(state, ask) == "hell_no"
+    assert state["business_model_2s"] == TWO_SENTENCES
+    assert state["circle_fit_initial"] == "core"
+    assert "pending_pass" not in state
+
+
+def test_circle_step_rejects_three_sentences_then_accepts_two():
+    from agentcy.gate import step_circle
+    state = {}
+    ask = ScriptedAsker([THREE_SENTENCES, TWO_SENTENCES, "moat phrase", "edge"])
+    assert step_circle(state, ask) == "hell_no"     # hard 2-sentence limit: re-asked
+    assert state["business_model_2s"] == TWO_SENTENCES
+
+
+def test_circle_step_outside_is_pass():
+    from agentcy.gate import step_circle
+    state = {}
+    ask = ScriptedAsker([TWO_SENTENCES, "moat phrase", "outside"])
+    assert step_circle(state, ask) == "verdict"
+    assert state["pending_pass"]["reason_class"] == "outside_circle"
+
+
+def test_circle_step_cant_write_it_is_pass():
+    from agentcy.gate import step_circle
+    state = {}
+    ask = ScriptedAsker(["   "])                     # blank = can't write it
+    assert step_circle(state, ask) == "verdict"
+    assert state["pending_pass"]["reason_class"] == "outside_circle"
+
+
+# --- P4.3 hell-no step --------------------------------------------------------
+
+def test_hell_no_all_pass():
+    from agentcy.gate import step_hell_no
+    state = {}
+    ask = ScriptedAsker(["no"] * 5)
+    assert step_hell_no(state, ask) == "dossier"
+    assert state["hell_no"] == {"HN1": "no", "HN2": "no", "HN3": "no", "HN4": "no", "HN5": "no"}
+
+
+def test_hell_no_one_fail_rejects_but_records_all_five():
+    from agentcy.gate import step_hell_no
+    state = {}
+    # HN2 fails; HN3..HN5 must STILL be asked and recorded (C.3: "remaining tests
+    # still recorded for the journal")
+    ask = ScriptedAsker(["no", "yes", "no", "no", "yes"])
+    assert step_hell_no(state, ask) == "verdict"
+    assert state["pending_pass"]["reason_class"] == "hell_no_HN2"   # first failing test
+    assert state["hell_no"]["HN5"] == "yes"                          # all five recorded
+    assert len(ask.log) == 5
+
+
+def test_hell_no_prompts_are_binary():
+    from agentcy.gate import step_hell_no
+    state = {}
+    ask = ScriptedAsker(["no"] * 5)
+    step_hell_no(state, ask)
+    assert all(opts == ("yes", "no") for _, opts in ask.log)
+
+
+# --- P4.4 dossier -------------------------------------------------------------
+
+from agentcy.freshness import Stamped, DataState
+from agentcy.fetch.store import OwnerEarnings
+
+
+def _fresh(value, note=None):
+    return Stamped(value=value, fetched_at=datetime(2026, 7, 8, tzinfo=timezone.utc),
+                   state=DataState.FRESH, note=note)
+
+
+def _oe(**kw):
+    base = dict(fcf_ttm=1.1e9, sbc_ttm=0.45e9, owner_fcf_ttm=0.65e9,
+                owner_fcf_per_share_ttm=4.0, owner_fcf_margin_ttm=0.28,
+                periods_used=("2026-03-31", "2025-12-31", "2025-09-30", "2025-06-30"))
+    base.update(kw)
+    return OwnerEarnings(**base)
+
+
+class FakeStore:
+    """Monkeypatch seam for the P2 store: only what the dossier + fair-band read."""
+    def __init__(self, *, owner_earnings=None, denom=None, close=None,
+                 income_periods=("2026-03-31", "2025-12-31", "2025-09-30", "2025-06-30")):
+        self._oe = owner_earnings
+        self._denom = denom
+        self._close = close
+        self._income_periods = income_periods
+
+    def owner_fcf_ttm(self, conn, yf_ticker, *, as_of):
+        return self._oe
+
+    def denominator_per_share(self, conn, yf_ticker, *, as_of):
+        return self._denom
+
+    def latest_close(self, conn, yf_ticker, *, as_of):
+        return self._close
+
+    def statement_history(self, conn, yf_ticker, statement_type, *, as_of):
+        rows = [{"period_end": p} for p in self._income_periods]
+        return _fresh(rows)
+
+
+def test_dossier_happy_prints_period_counts_and_multiple(tmp_db, fixed_clock):
+    from agentcy.gate import build_dossier
+    from agentcy.fetch.store import PriceBar
+    store = FakeStore(owner_earnings=_fresh(_oe()),
+                      denom=_fresh(4.0),
+                      close=_fresh(PriceBar(bar_date="2026-07-07", close=120.0,
+                                            adj_close=120.0, dividend=0.0, currency="USD")))
+    dossier = build_dossier(tmp_db, "VEEV", as_of=fixed_clock.now(), store=store)
+    assert dossier["income_period_count"] == 4
+    assert dossier["income_periods"][0] == "2026-03-31"
+    assert dossier["owner_fcf_per_share_ttm"] == 4.0
+    assert dossier["current_multiple"] == 30.0          # close 120 / owner-FCF/sh 4.0
+    assert dossier["owner_fcf_ttm"] == 0.65e9
+
+
+def test_dossier_pauses_on_absent_owner_earnings(tmp_db, fixed_clock):
+    from agentcy.gate import build_dossier, DossierPaused
+    store = FakeStore(owner_earnings=None)               # empty fundamentals
+    with pytest.raises(DossierPaused):
+        build_dossier(tmp_db, "VEEV", as_of=fixed_clock.now(), store=store)
+
+
+def test_dossier_pauses_on_stale_owner_earnings(tmp_db, fixed_clock):
+    from agentcy.gate import build_dossier, DossierPaused
+    stale = Stamped(value=_oe(), fetched_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                    state=DataState.STALE)
+    store = FakeStore(owner_earnings=stale)              # not usable()
+    with pytest.raises(DossierPaused):
+        build_dossier(tmp_db, "VEEV", as_of=fixed_clock.now(), store=store)
+
+
+def test_dossier_multiple_none_when_price_absent(tmp_db, fixed_clock):
+    from agentcy.gate import build_dossier
+    store = FakeStore(owner_earnings=_fresh(_oe()), denom=_fresh(4.0), close=None)
+    dossier = build_dossier(tmp_db, "VEEV", as_of=fixed_clock.now(), store=store)
+    assert dossier["current_multiple"] is None          # dossier still assembles (BUF-12 backfill safe)
+
+
+# --- P4.5 judgment step -------------------------------------------------------
+
+TEN_YEAR = ("Yes. Life-sciences regulation only accumulates; the vendor that owns "
+            "the validated record layer compounds with the industry.")
+
+STATUS_Q = "Would you still buy this if you could never tell anyone you owned it?"
+
+
+def _judgment_answers(*, conviction="high", mgmt="trusted_owner_operator",
+                      circle="core", status="yes"):
+    # order: conviction, mgmt_trust, mgmt_note, circle_fit, circle_note,
+    #        ten_year_statement, status_answer, [status_buy_note if not "yes"]
+    return [conviction, mgmt, "founder-CEO, large stake", circle,
+            "healthcare SaaS", TEN_YEAR, status, "dinner-party temptation, honestly"]
+
+
+def test_judgment_happy_no_status_flag():
+    from agentcy.gate import step_judgment
+    state = {"circle_fit_initial": "core"}
+    ask = ScriptedAsker(_judgment_answers(status="yes"))
+    assert step_judgment(state, ask) == "drafting"
+    assert state["conviction"] == "high"
+    assert state["mgmt_trust"] == "trusted_owner_operator"
+    assert state["circle_fit"] == "core"
+    assert state["ten_year_statement"] == TEN_YEAR
+    assert state["status_buy_flag"] is False
+
+
+def test_judgment_status_question_is_verbatim():
+    from agentcy.gate import step_judgment
+    state = {"circle_fit_initial": "core"}
+    ask = ScriptedAsker(_judgment_answers())
+    step_judgment(state, ask)
+    prompts = [p for p, _ in ask.log]
+    assert any(STATUS_Q in p for p in prompts)
+
+
+def test_judgment_hesitant_status_sets_flag():
+    from agentcy.gate import step_judgment
+    state = {"circle_fit_initial": "core"}
+    ask = ScriptedAsker(_judgment_answers(status="no"))
+    step_judgment(state, ask)
+    assert state["status_buy_flag"] is True
+
+
+def test_judgment_conviction_reasked_until_in_set():
+    from agentcy.gate import step_judgment
+    state = {"circle_fit_initial": "core"}
+    ask = ScriptedAsker(["huge", "high"] + _judgment_answers()[1:])
+    assert step_judgment(state, ask) == "drafting"
+    assert state["conviction"] == "high"        # 'huge' rejected, re-asked
+
+
+def test_judgment_no_default_prompts_enumerate():
+    from agentcy.gate import step_judgment
+    state = {"circle_fit_initial": "core"}
+    ask = ScriptedAsker(_judgment_answers())
+    step_judgment(state, ask)
+    conv_opts = next(opts for p, opts in ask.log if "conviction" in p.lower())
+    assert conv_opts == ("high", "medium", "low")
+
+
+# --- P4.6 drafting step -------------------------------------------------------
+
+def _one_trigger(*, type="growth_floor", statement="rev YoY < 10% for 2q",
+                 metric="revenue_yoy", comparator="<", threshold="10",
+                 moat_link="", persistence="2_consecutive_quarters", yes_means=""):
+    # order per _ask_trigger: type, statement, metric, comparator, threshold,
+    #   moat_link, persistence, (yes_means only if type-5)
+    seq = [type, statement, metric, comparator, threshold, moat_link, persistence]
+    if type == "owner_attested_event":
+        seq.append(yes_means)
+    return seq
+
+
+def _drafting_answers(triggers, *, moat_types="switching_costs", moat_evidence="retention >115%",
+                      band_low="25", band_high="35", denom_note="P/owner-FCF"):
+    seq = [moat_types, moat_evidence, band_low, band_high, denom_note, str(len(triggers))]
+    for t in triggers:
+        seq += t
+    return seq
+
+
+def test_drafting_happy_two_triggers_one_moat_linked():
+    from agentcy.gate import step_drafting
+    state = {}
+    triggers = [
+        _one_trigger(moat_link="switching_costs"),                 # moat-linked
+        _one_trigger(type="dilution", statement="shares +3%/12m",
+                     metric="shares_yoy", threshold="3", persistence="ttm"),
+    ]
+    ask = ScriptedAsker(_drafting_answers(triggers))
+    assert step_drafting(state, ask) == "verdict"
+    assert state["moat_types"] == ["switching_costs"]
+    assert state["fair_band_low"] == 25.0
+    assert state["fair_band_high"] == 35.0
+    assert len(state["triggers"]) == 2
+    assert state["triggers"][0]["moat_link"] == "switching_costs"
+
+
+def test_drafting_rejects_count_below_2_and_above_5():
+    from agentcy.gate import step_drafting
+    state = {}
+    t = _one_trigger(moat_link="switching_costs")
+    # count answers: '1' rejected, '6' rejected, then '2' accepted
+    ask = ScriptedAsker(
+        ["switching_costs", "retention >115%", "25", "35", "P/owner-FCF",
+         "1", "6", "2"] + t + t)
+    assert step_drafting(state, ask) == "verdict"
+    assert len(state["triggers"]) == 2
+
+
+def test_drafting_requires_at_least_one_moat_link():
+    from agentcy.gate import step_drafting
+    state = {}
+    # first pass: two triggers, neither moat-linked -> rejected, owner re-drafts
+    # with a moat_link on the second attempt. Simulate by scripting a full re-ask.
+    no_link = _one_trigger(moat_link="")
+    linked = _one_trigger(moat_link="switching_costs")
+    ask = ScriptedAsker(
+        ["switching_costs", "retention >115%", "25", "35", "P/owner-FCF",
+         "2"] + no_link + no_link +                         # first draft: no moat_link
+        ["2"] + linked + no_link)                           # re-draft: one linked
+    assert step_drafting(state, ask) == "verdict"
+    assert any(t["moat_link"] for t in state["triggers"])
+
+
+def test_drafting_type5_captures_yes_means():
+    from agentcy.gate import step_drafting
+    state = {}
+    t5 = _one_trigger(type="owner_attested_event",
+                      statement="Has the founder-CEO departed?",
+                      metric="", comparator="", threshold="",
+                      moat_link="switching_costs",
+                      persistence="single_observation", yes_means="fire")
+    growth = _one_trigger(moat_link="")
+    ask = ScriptedAsker(_drafting_answers([t5, growth]))
+    step_drafting(state, ask)
+    t5row = next(t for t in state["triggers"] if t["type"] == "owner_attested_event")
+    assert t5row["yes_means"] == "fire"
+    assert t5row["check_method"] == "prompted"
+
+
+# --- P4.7 verdict classification ---------------------------------------------
+
+def test_classify_pass_from_pending():
+    from agentcy.gate import classify_verdict
+    state = {"pending_pass": {"reason_class": "hell_no_HN2", "note": "x"}}
+    v = classify_verdict(tmp_db_unused=None, state=state, dossier=None, config_map={})
+    assert v["verdict"] == "PASS"
+    assert v["reason_class"] == "hell_no_HN2"
+
+
+def _config_map():
+    return {"initial_weight_high_pct": "10", "initial_weight_medium_pct": "6",
+            "initial_weight_low_pct": "3", "buy_opportunity_discount_pct": "20",
+            "position_count_high": "15"}
+
+
+def test_classify_buy_ready_price_at_band_high():
+    from agentcy.gate import classify_verdict
+    state = {"conviction": "high", "fair_band_low": 25.0, "fair_band_high": 35.0,
+             "circle_fit": "core", "status_buy_flag": False}
+    dossier = {"current_multiple": 34.0}                 # at/below high -> BUY_READY
+    v = classify_verdict(tmp_db_unused=None, state=state, dossier=dossier,
+                         config_map=_config_map())
+    assert v["verdict"] == "BUY_READY"
+    assert v["suggested_max_weight_pct"] == 10.0         # high conviction
+
+
+def test_classify_watch_price_above_band():
+    from agentcy.gate import classify_verdict
+    state = {"conviction": "medium", "fair_band_low": 25.0, "fair_band_high": 35.0,
+             "circle_fit": "core", "status_buy_flag": False}
+    dossier = {"current_multiple": 40.0}                 # above high -> WATCH
+    v = classify_verdict(tmp_db_unused=None, state=state, dossier=dossier,
+                         config_map=_config_map())
+    assert v["verdict"] == "WATCH"
+    assert v["suggested_max_weight_pct"] is None         # WATCH suggests no size
+
+
+def test_classify_low_conviction_carries_standing_question():
+    from agentcy.gate import classify_verdict
+    state = {"conviction": "low", "fair_band_low": 25.0, "fair_band_high": 35.0,
+             "circle_fit": "core", "status_buy_flag": False}
+    dossier = {"current_multiple": 30.0}
+    v = classify_verdict(tmp_db_unused=None, state=state, dossier=dossier,
+                         config_map=_config_map())
+    assert v["verdict"] == "BUY_READY"
+    assert v["suggested_max_weight_pct"] == 3.0
+    assert any("high-conviction" in q for q in v["standing_questions"])
+
+
+def test_classify_edge_circle_fit_carries_standing_question():
+    from agentcy.gate import classify_verdict
+    state = {"conviction": "high", "fair_band_low": 25.0, "fair_band_high": 35.0,
+             "circle_fit": "edge", "status_buy_flag": False}
+    dossier = {"current_multiple": 30.0}
+    v = classify_verdict(tmp_db_unused=None, state=state, dossier=dossier,
+                         config_map=_config_map())
+    assert any("high-conviction" in q for q in v["standing_questions"])
+
+
+def test_classify_status_buy_requires_rebuttal_flag():
+    from agentcy.gate import classify_verdict
+    state = {"conviction": "high", "fair_band_low": 25.0, "fair_band_high": 35.0,
+             "circle_fit": "core", "status_buy_flag": True}
+    dossier = {"current_multiple": 30.0}
+    v = classify_verdict(tmp_db_unused=None, state=state, dossier=dossier,
+                         config_map=_config_map())
+    assert v["requires_status_rebuttal"] is True
+
+
+# --- P4.8 displacement + status rebuttal --------------------------------------
+
+def test_displacement_prompt_fires_at_15_framework(tmp_db, fixed_clock, monkeypatch):
+    from agentcy import gate
+    monkeypatch.setattr(gate, "_framework_count", lambda conn, as_of: 15)
+    ask = ScriptedAsker(["VEEV beats WORK: it has a cleaner regulatory moat"])
+    note = gate._displacement_note(tmp_db, ask, as_of=fixed_clock.now())
+    assert "beats" in note.lower()
+    assert len(ask.log) == 1
+
+
+def test_displacement_skipped_below_15(tmp_db, fixed_clock, monkeypatch):
+    from agentcy import gate
+    monkeypatch.setattr(gate, "_framework_count", lambda conn, as_of: 12)
+    ask = ScriptedAsker([])                              # must NOT be asked
+    note = gate._displacement_note(tmp_db, ask, as_of=fixed_clock.now())
+    assert note is None
+    assert ask.log == []
+
+
+def test_status_rebuttal_required_and_captured():
+    from agentcy.gate import _status_rebuttal
+    ask = ScriptedAsker(["I own it for the compounding, not to discuss at dinners."])
+    reb = _status_rebuttal(ask)
+    assert reb.startswith("I own it")
+
+
+def test_status_rebuttal_reasked_until_nonempty():
+    from agentcy.gate import _status_rebuttal
+    ask = ScriptedAsker(["   ", "real rebuttal text"])
+    assert _status_rebuttal(ask) == "real rebuttal text"
+
+
+# --- P4.9 finalize ------------------------------------------------------------
+
+from agentcy.gate import GateOutcome
+
+
+def _full_state(verdict_multiple=30.0, conviction="high"):
+    return {
+        "ticker": "VEEV",
+        "business_model_2s": TWO_SENTENCES,
+        "moat_phrase": "switching costs",
+        "moat_types": ["switching_costs"],
+        "moat_evidence": "retention >115%",
+        "fair_band_low": 25.0, "fair_band_high": 35.0,
+        "denominator_note": "P/owner-FCF",
+        "conviction": conviction, "mgmt_trust": "trusted_owner_operator",
+        "mgmt_trust_note": "founder-CEO", "circle_fit": "core",
+        "circle_fit_note": "healthcare SaaS", "ten_year_statement": TEN_YEAR,
+        "status_buy_flag": False, "status_buy_note": None,
+        "hell_no": {"HN1": "no", "HN2": "no", "HN3": "no", "HN4": "no", "HN5": "no"},
+        "triggers": [
+            {"type": "growth_floor", "statement": "rev YoY < 10% (2q)",
+             "metric": "revenue_yoy", "comparator": "<", "threshold": 10.0,
+             "moat_link": "switching_costs", "persistence": "2_consecutive_quarters",
+             "check_method": "automated", "data_source": "yf_quarterly_statements",
+             "cadence": "weekly", "yes_means": None},
+            {"type": "dilution", "statement": "shares +3%/12m", "metric": "shares_yoy",
+             "comparator": ">", "threshold": 3.0, "moat_link": None,
+             "persistence": "ttm", "check_method": "automated",
+             "data_source": "yf_shares_full", "cadence": "weekly", "yes_means": None},
+        ],
+    }
+
+
+def _dossier(multiple=30.0):
+    return {"ticker": "VEEV", "yf_ticker": "VEEV", "owner_earnings_json": "{}",
+            "owner_fcf_per_share_ttm": 4.0, "current_multiple": multiple,
+            "income_period_count": 4, "income_periods": ["2026-03-31"]}
+
+
+def test_finalize_buy_ready_creates_draft_thesis(tmp_db, fixed_clock):
+    from agentcy import gate
+    outcome = gate._finalize(tmp_db, mode="gate", state=_full_state(),
+                             dossier=_dossier(30.0), verdict={
+                                 "verdict": "BUY_READY", "reason_class": None,
+                                 "note": None, "standing_questions": (),
+                                 "suggested_max_weight_pct": 10.0,
+                                 "requires_status_rebuttal": False},
+                             clock=fixed_clock)
+    assert isinstance(outcome, GateOutcome)
+    assert outcome.verdict == "BUY_READY"
+    assert outcome.thesis_id is not None
+    th = db.fetch_thesis(tmp_db, outcome.thesis_id)
+    assert th["ticker"] == "VEEV"
+    assert th["origin"] == "gate"
+    ver = db.fetch_current_thesis_version(tmp_db, outcome.thesis_id)
+    assert ver["conviction"] == "high"
+    assert ver["value_at_purchase"] is None            # filled at true activation (BUF-12/contract)
+    triggers = db.fetch_armed_triggers(tmp_db, outcome.thesis_id)
+    assert len(triggers) == 2
+    # a gate_verdict journal entry exists
+    entries = db.fetch_journal_entries(tmp_db, decision_type="gate_verdict")
+    assert any(e["decision_subtype"] == "buy_ready" for e in entries)
+
+
+def test_finalize_pass_journals_only_no_thesis(tmp_db, fixed_clock):
+    from agentcy import gate
+    state = {"ticker": "VEEV",
+             "pending_pass": {"reason_class": "hell_no_HN2", "note": "leverage"}}
+    outcome = gate._finalize(tmp_db, mode="gate", state=state, dossier=None,
+                             verdict={"verdict": "PASS", "reason_class": "hell_no_HN2",
+                                      "note": "leverage", "standing_questions": (),
+                                      "suggested_max_weight_pct": None,
+                                      "requires_status_rebuttal": False},
+                             clock=fixed_clock)
+    assert outcome.verdict == "PASS"
+    assert outcome.thesis_id is None
+    entries = db.fetch_journal_entries(tmp_db, decision_type="gate_verdict")
+    assert entries[0]["decision_subtype"] == "pass"
+
+
+def test_finalize_watch_thesis_stays_draft(tmp_db, fixed_clock):
+    from agentcy import gate
+    outcome = gate._finalize(tmp_db, mode="gate", state=_full_state(),
+                             dossier=_dossier(40.0), verdict={
+                                 "verdict": "WATCH", "reason_class": None, "note": None,
+                                 "standing_questions": (), "suggested_max_weight_pct": None,
+                                 "requires_status_rebuttal": False},
+                             clock=fixed_clock)
+    status = db.fetch_current_thesis_status(tmp_db, outcome.thesis_id)
+    assert status["status"] == "draft"                 # WATCH: thesis stays draft (C.6)
+
+
+# --- P4.10 driver: start / resume / abandon -----------------------------------
+
+def _scripted_full_buy(monkeypatch):
+    """A full BUY_READY script (circle -> hell_no -> judgment -> drafting)."""
+    return ScriptedAsker(
+        # circle
+        [TWO_SENTENCES, "switching costs", "core"]
+        # hell_no
+        + ["no"] * 5
+        # judgment
+        + _judgment_answers()
+        # drafting: moat_types, evidence, band_low, band_high, denom, count, 2 triggers
+        + ["switching_costs", "retention >115%", "25", "35", "P/owner-FCF", "2"]
+        + _one_trigger(moat_link="switching_costs")
+        + _one_trigger(type="dilution", statement="shares +3%/12m", metric="shares_yoy",
+                       comparator=">", threshold="3", persistence="ttm"))
+
+
+def _patch_store_and_config(monkeypatch, tmp_db, multiple=30.0):
+    from agentcy import gate
+    def fake_dossier(conn, ticker, *, as_of, store=None):
+        return _dossier(multiple)
+    monkeypatch.setattr(gate, "build_dossier", fake_dossier)
+    monkeypatch.setattr(gate, "_framework_count", lambda conn, as_of: 5)
+
+
+def test_start_runs_to_buy_ready(tmp_db, fixed_clock, monkeypatch):
+    from agentcy import gate
+    _patch_store_and_config(monkeypatch, tmp_db, multiple=30.0)
+    ask = _scripted_full_buy(monkeypatch)
+    outcome = gate.start(tmp_db, ticker="VEEV", mode="gate",
+                         ask_owner=ask, clock=fixed_clock)
+    assert outcome.verdict == "BUY_READY"
+    sess = tmp_db.execute("SELECT status, step FROM gate_session").fetchone()
+    assert sess["status"] == "done"
+    assert sess["step"] == "verdict"
+
+
+def test_start_pass_at_circle_short_circuits(tmp_db, fixed_clock, monkeypatch):
+    from agentcy import gate
+    ask = ScriptedAsker([TWO_SENTENCES, "moat", "outside"])
+    outcome = gate.start(tmp_db, ticker="VEEV", mode="gate",
+                         ask_owner=ask, clock=fixed_clock)
+    assert outcome.verdict == "PASS"
+    assert outcome.reason_class == "outside_circle"
+
+
+def test_resume_continues_from_stored_step(tmp_db, fixed_clock, monkeypatch):
+    from agentcy import gate
+    _patch_store_and_config(monkeypatch, tmp_db, multiple=30.0)
+    # Simulate a crash after circle+hell_no by pre-seeding a session at 'dossier'.
+    sid = db.append_gate_session(tmp_db, ticker="VEEV", mode="gate",
+                                 started_at="2026-07-08T05:00:00Z")
+    state = {"ticker": "VEEV", "business_model_2s": TWO_SENTENCES,
+             "moat_phrase": "switching costs", "circle_fit_initial": "core",
+             "hell_no": {"HN1": "no", "HN2": "no", "HN3": "no", "HN4": "no", "HN5": "no"}}
+    db.update_gate_session(tmp_db, sid, step="dossier", state_json=json.dumps(state),
+                           status="active", updated_at="2026-07-08T05:00:00Z")
+    ask = ScriptedAsker(
+        _judgment_answers()
+        + ["switching_costs", "retention >115%", "25", "35", "P/owner-FCF", "2"]
+        + _one_trigger(moat_link="switching_costs")
+        + _one_trigger(type="dilution", statement="shares +3%/12m", metric="shares_yoy",
+                       comparator=">", threshold="3", persistence="ttm"))
+    outcome = gate.resume(tmp_db, session_id=sid, ask_owner=ask, clock=fixed_clock)
+    assert outcome.verdict == "BUY_READY"
+
+
+def test_abandon_marks_session(tmp_db, fixed_clock):
+    from agentcy import gate
+    sid = db.append_gate_session(tmp_db, ticker="VEEV", mode="gate",
+                                 started_at="2026-07-08T05:00:00Z")
+    gate.abandon(tmp_db, sid, clock=fixed_clock)
+    assert db.fetch_active_gate_session(tmp_db, "VEEV") is None
+
+
+# --- P4.11 backfill variant ---------------------------------------------------
+
+def test_backfill_business_passes_activates(tmp_db, fixed_clock, monkeypatch):
+    from agentcy import gate
+    _patch_store_and_config(monkeypatch, tmp_db, multiple=999.0)   # price irrelevant
+    ask = _scripted_full_buy(monkeypatch)
+    outcome = gate.start(tmp_db, ticker="VEEV", mode="backfill",
+                         ask_owner=ask, clock=fixed_clock)
+    assert outcome.verdict == "activate_backfill"
+    assert outcome.thesis_id is not None
+    th = db.fetch_thesis(tmp_db, outcome.thesis_id)
+    assert th["origin"] == "backfill"
+    ver = db.fetch_current_thesis_version(tmp_db, outcome.thesis_id)
+    assert ver["value_at_purchase"] is None
+    entries = db.fetch_journal_entries(tmp_db, decision_type="gate_verdict")
+    assert entries[0]["decision_subtype"] == "activate_backfill"
+
+
+def test_backfill_no_thesis_exists_from_circle_pass(tmp_db, fixed_clock, monkeypatch):
+    from agentcy import gate
+    # owner cannot write the 2-sentence model for a held position -> no_thesis_exists
+    ask = ScriptedAsker(["   "])
+    outcome = gate.start(tmp_db, ticker="VEEV", mode="backfill",
+                         ask_owner=ask, clock=fixed_clock)
+    assert outcome.verdict == "no_thesis_exists"
+    assert outcome.thesis_id is None
+    entries = db.fetch_journal_entries(tmp_db, decision_type="gate_verdict")
+    assert entries[0]["decision_subtype"] == "no_thesis_exists"
+
+
+# --- P4.12 re-pitch confrontation ---------------------------------------------
+
+def test_read_prior_verdict_returns_prior_pass(tmp_db, fixed_clock, monkeypatch):
+    from agentcy import gate
+    # a prior PASS on VEEV
+    ask = ScriptedAsker([TWO_SENTENCES, "moat", "outside"])
+    gate.start(tmp_db, ticker="VEEV", mode="gate", ask_owner=ask, clock=fixed_clock)
+    prior = gate.read_prior_verdict(tmp_db, "VEEV")
+    assert prior is not None
+    assert prior["decision_subtype"] == "pass"
+
+
+def test_read_prior_verdict_none_when_fresh(tmp_db):
+    from agentcy import gate
+    assert gate.read_prior_verdict(tmp_db, "NEWCO") is None
+
+
+# --- P4.13 watchlist add ------------------------------------------------------
+
+def test_watchlist_add_creates_raw_item(tmp_db, fixed_clock):
+    from agentcy import gate
+    item_id = gate.watchlist_add(tmp_db, ticker="VEEV", idea_source="own_research",
+                                 one_line_why="validated GxP record layer",
+                                 clock=fixed_clock)
+    rows = db.fetch_watchlist(tmp_db, stage="raw")
+    assert [r["item_id"] for r in rows] == [item_id]
+
+
+def test_watchlist_add_rejects_over_cap_10(tmp_db, fixed_clock):
+    from agentcy import gate
+    for i in range(10):
+        gate.watchlist_add(tmp_db, ticker=f"T{i}", idea_source="reading",
+                           one_line_why="why", clock=fixed_clock)
+    with pytest.raises(gate.WatchlistFull):
+        gate.watchlist_add(tmp_db, ticker="T10", idea_source="reading",
+                           one_line_why="why", clock=fixed_clock)
+
+
+def test_watchlist_add_cap_counts_only_raw(tmp_db, fixed_clock):
+    from agentcy import gate
+    # 9 raw + 1 advanced-past-raw should still allow a 10th raw add
+    for i in range(9):
+        gate.watchlist_add(tmp_db, ticker=f"T{i}", idea_source="reading",
+                           one_line_why="why", clock=fixed_clock)
+    adv = gate.watchlist_add(tmp_db, ticker="ADV", idea_source="reading",
+                             one_line_why="why", clock=fixed_clock)
+    db.update_watchlist_stage(tmp_db, adv, stage="rejected",
+                              stage_changed_at="2026-07-08T05:00:00Z")
+    # now only 9 raw -> a 10th raw add succeeds
+    gate.watchlist_add(tmp_db, ticker="TENTH", idea_source="reading",
+                       one_line_why="why", clock=fixed_clock)
+
+
+# --- P4.14 stage transitions --------------------------------------------------
+
+def _seed_thesis(conn, thesis_id="TH-VEEV-001", ticker="VEEV"):
+    # watchlist_item.thesis_ref has a real FK to thesis(thesis_id); in production the
+    # Gate mints the thesis in the same transaction before linking it, so the ref
+    # always resolves. Seed the identity row so these unit tests honor that FK.
+    db.append_thesis(conn, thesis_id=thesis_id, ticker=ticker, origin="gate",
+                     created_at="2026-07-08T05:00:00Z")
+
+
+def test_advance_watchlist_for_verdict_buy_ready(tmp_db, fixed_clock):
+    from agentcy import gate
+    _seed_thesis(tmp_db)
+    item_id = gate.watchlist_add(tmp_db, ticker="VEEV", idea_source="scout_screen",
+                                 one_line_why="cheap QV", clock=fixed_clock)
+    gate.advance_watchlist_for_verdict(tmp_db, ticker="VEEV", verdict="BUY_READY",
+                                       thesis_id="TH-VEEV-001", clock=fixed_clock)
+    row = db.fetch_watchlist(tmp_db)[0]
+    assert row["stage"] == "buy_ready_waiting"
+    assert row["thesis_ref"] == "TH-VEEV-001"
+
+
+def test_advance_watchlist_for_verdict_watch(tmp_db, fixed_clock):
+    from agentcy import gate
+    _seed_thesis(tmp_db)
+    gate.watchlist_add(tmp_db, ticker="VEEV", idea_source="scout_screen",
+                       one_line_why="cheap QV", clock=fixed_clock)
+    gate.advance_watchlist_for_verdict(tmp_db, ticker="VEEV", verdict="WATCH",
+                                       thesis_id="TH-VEEV-001", clock=fixed_clock)
+    assert db.fetch_watchlist(tmp_db)[0]["stage"] == "gate_approved_waiting"
+
+
+def test_advance_watchlist_for_verdict_pass_rejects(tmp_db, fixed_clock):
+    from agentcy import gate
+    gate.watchlist_add(tmp_db, ticker="VEEV", idea_source="scout_screen",
+                       one_line_why="cheap QV", clock=fixed_clock)
+    gate.advance_watchlist_for_verdict(tmp_db, ticker="VEEV", verdict="PASS",
+                                       thesis_id=None, clock=fixed_clock)
+    assert db.fetch_watchlist(tmp_db)[0]["stage"] == "rejected"
+
+
+def test_advance_watchlist_noop_when_not_on_list(tmp_db, fixed_clock):
+    from agentcy import gate
+    # a Gate run on a ticker never added to the watchlist -> no error, no row
+    gate.advance_watchlist_for_verdict(tmp_db, ticker="MSFT", verdict="BUY_READY",
+                                       thesis_id="TH-MSFT-001", clock=fixed_clock)
+    assert db.fetch_watchlist(tmp_db) == []
+
+
+def test_mark_activated_moves_waiting_to_activated(tmp_db, fixed_clock):
+    from agentcy import gate
+    _seed_thesis(tmp_db)
+    item = gate.watchlist_add(tmp_db, ticker="VEEV", idea_source="scout_screen",
+                              one_line_why="cheap QV", clock=fixed_clock)
+    gate.advance_watchlist_for_verdict(tmp_db, ticker="VEEV", verdict="BUY_READY",
+                                       thesis_id="TH-VEEV-001", clock=fixed_clock)
+    gate.mark_activated(tmp_db, "VEEV", clock=fixed_clock)
+    assert db.fetch_watchlist(tmp_db)[0]["stage"] == "activated"
+
+
+# --- P4.15 weekly sweeps ------------------------------------------------------
+
+from datetime import timedelta
+
+
+def _days_ago(base, n):
+    return (base - timedelta(days=n)).isoformat().replace("+00:00", "Z")
+
+
+def test_sweep_raw_expiry_expires_over_90_days(tmp_db, fixed_clock):
+    from agentcy import gate
+    now = fixed_clock.now()
+    fresh = db.append_watchlist_item(tmp_db, ticker="FRESH", added_at=_days_ago(now, 10),
+                                     idea_source="reading", one_line_why="w")
+    stale = db.append_watchlist_item(tmp_db, ticker="STALE", added_at=_days_ago(now, 91),
+                                     idea_source="reading", one_line_why="w")
+    expired = gate.sweep_raw_expiry(tmp_db, as_of=now)
+    assert expired == [stale]
+    stages = {r["ticker"]: r["stage"] for r in db.fetch_watchlist(tmp_db)}
+    assert stages["STALE"] == "expired"
+    assert stages["FRESH"] == "raw"
+
+
+def test_sweep_approval_expiry_lapses_over_12_months(tmp_db, fixed_clock):
+    from agentcy import gate
+    now = fixed_clock.now()
+    _seed_thesis(tmp_db, thesis_id="TH-OLD-001", ticker="OLD")
+    item = db.append_watchlist_item(tmp_db, ticker="OLD", added_at=_days_ago(now, 400),
+                                    idea_source="scout_screen", one_line_why="w")
+    db.update_watchlist_stage(tmp_db, item, stage="gate_approved_waiting",
+                              stage_changed_at=_days_ago(now, 366),
+                              thesis_ref="TH-OLD-001")
+    lapsed = gate.sweep_approval_expiry(tmp_db, as_of=now)
+    assert lapsed == [item]
+    assert db.fetch_watchlist(tmp_db)[0]["stage"] == "lapsed"   # WATCH check disarmed by stage
+
+
+def test_sweep_approval_expiry_leaves_fresh_approval(tmp_db, fixed_clock):
+    from agentcy import gate
+    now = fixed_clock.now()
+    _seed_thesis(tmp_db, thesis_id="TH-NEW-001", ticker="NEW")
+    item = db.append_watchlist_item(tmp_db, ticker="NEW", added_at=_days_ago(now, 100),
+                                    idea_source="scout_screen", one_line_why="w")
+    db.update_watchlist_stage(tmp_db, item, stage="buy_ready_waiting",
+                              stage_changed_at=_days_ago(now, 100),
+                              thesis_ref="TH-NEW-001")
+    assert gate.sweep_approval_expiry(tmp_db, as_of=now) == []
+    assert db.fetch_watchlist(tmp_db)[0]["stage"] == "buy_ready_waiting"
+
+
+def test_sweep_nonexecution_mints_v_ask_at_30_days(tmp_db, fixed_clock):
+    from agentcy import gate, asks
+    now = fixed_clock.now()
+    _seed_thesis(tmp_db, thesis_id="TH-WAIT-001", ticker="WAIT")
+    item = db.append_watchlist_item(tmp_db, ticker="WAIT", added_at=_days_ago(now, 40),
+                                    idea_source="scout_screen", one_line_why="w")
+    db.update_watchlist_stage(tmp_db, item, stage="buy_ready_waiting",
+                              stage_changed_at=_days_ago(now, 31),
+                              thesis_ref="TH-WAIT-001")
+    minted = gate.sweep_nonexecution(tmp_db, as_of=now, clock=fixed_clock)
+    assert len(minted) == 1
+    v_asks = asks.open_asks(tmp_db, kind="V")
+    assert len(v_asks) == 1
+    assert v_asks[0].thesis_ref == "TH-WAIT-001"
+
+
+def test_sweep_nonexecution_idempotent_no_duplicate_ask(tmp_db, fixed_clock):
+    from agentcy import gate, asks
+    now = fixed_clock.now()
+    _seed_thesis(tmp_db, thesis_id="TH-WAIT-001", ticker="WAIT")
+    item = db.append_watchlist_item(tmp_db, ticker="WAIT", added_at=_days_ago(now, 40),
+                                    idea_source="scout_screen", one_line_why="w")
+    db.update_watchlist_stage(tmp_db, item, stage="buy_ready_waiting",
+                              stage_changed_at=_days_ago(now, 31),
+                              thesis_ref="TH-WAIT-001")
+    gate.sweep_nonexecution(tmp_db, as_of=now, clock=fixed_clock)
+    second = gate.sweep_nonexecution(tmp_db, as_of=now, clock=fixed_clock)
+    assert second == []                                 # no second V-ask for the same item
+    assert len(asks.open_asks(tmp_db, kind="V")) == 1
