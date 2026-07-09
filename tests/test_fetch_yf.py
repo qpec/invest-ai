@@ -50,3 +50,48 @@ def test_yahoo_pacing_reentrant_sequential(tmp_path, no_sleep):
     with yfd.yahoo_pacing(tmp_path):
         pass
     assert len(no_sleep) == 2            # lock released each time; stale lock file harmless (fd-scoped)
+
+
+def test_rate_limit_backoff_ladder_then_rate_limited(tmp_path, no_sleep):
+    from agentcy.fetch import yf as yfd
+    from yfinance.exceptions import YFRateLimitError
+    calls = {"n": 0}
+
+    def always_429():
+        calls["n"] += 1
+        raise YFRateLimitError()
+
+    with pytest.raises(yfd.RateLimited):
+        yfd._paced_call(tmp_path, always_429)
+    assert calls["n"] == 4                                   # initial + 3 backoff retries
+    assert [s for s in no_sleep if s >= 30] == [30.0, 300.0, 1800.0]  # §7.2 ladder
+    # every attempt was paced (4 pacing sleeps interleaved)
+    assert len([s for s in no_sleep if s < 30]) == 4
+
+
+def test_rate_limit_recovers_after_one_429(tmp_path, no_sleep):
+    from agentcy.fetch import yf as yfd
+    from yfinance.exceptions import YFRateLimitError
+    calls = {"n": 0}
+
+    def once_429():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise YFRateLimitError()
+        return "ok"
+
+    assert yfd._paced_call(tmp_path, once_429) == "ok"
+    assert [s for s in no_sleep if s >= 30] == [30.0]        # no retry storm
+
+
+def test_non_rate_limit_errors_propagate_unretried(tmp_path, no_sleep):
+    from agentcy.fetch import yf as yfd
+    calls = {"n": 0}
+
+    def broken():
+        calls["n"] += 1
+        raise ValueError("upstream schema change")
+
+    with pytest.raises(ValueError):
+        yfd._paced_call(tmp_path, broken)
+    assert calls["n"] == 1                                   # fail loud, no blind retries (§7.1)

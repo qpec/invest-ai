@@ -83,3 +83,23 @@ def yahoo_pacing(state_dir: Path):
             # Spacing inside the lock: the next acquirer anywhere on the box waits it out.
             time.sleep(PACE_BASE_SECONDS + random.uniform(*PACE_JITTER))
             _unlock(f)
+
+
+RATE_LIMIT_BACKOFF: tuple[float, ...] = (30.0, 300.0, 1800.0)  # 30s -> 5min -> 30min (§7.2)
+
+
+def _paced_call(state_dir: Path, fn):
+    """Run one raw Yahoo call inside the pacing lock; on YFRateLimitError back off
+    30s -> 5min -> 30min, then raise RateLimited — the caller marks the run DEGRADED
+    and stops; no retry storms (§7.2). Backoff sleeps happen OUTSIDE the lock so a
+    rate-limit wait never wedges the box-wide pacing for other processes."""
+    attempts = len(RATE_LIMIT_BACKOFF) + 1
+    for attempt in range(attempts):
+        try:
+            with yahoo_pacing(state_dir):
+                return fn()
+        except YFRateLimitError as e:
+            if attempt == attempts - 1:
+                raise RateLimited(f"rate-limited after {attempts} paced attempts (§7.2): {e}") from e
+            time.sleep(RATE_LIMIT_BACKOFF[attempt])
+    raise AssertionError("unreachable")
