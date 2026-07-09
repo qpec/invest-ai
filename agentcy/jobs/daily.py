@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from agentcy import archive, config as config_mod, db, deadman, mirror
+from agentcy import archive, config as config_mod, db, deadman, mirror, register
 from agentcy.clock import Clock, SystemClock
 from agentcy.fetch import store, yf
 from agentcy.fetch.yf import FetchFailed
@@ -207,9 +207,70 @@ def _late_banner(as_of: datetime) -> str:
     return f"catch-up run — generated {db.to_iso(as_of)}"
 
 
+def opportunity_lines(conn, *, as_of) -> tuple[tuple[contexts.OpportunityLine, ...], int]:
+    """E.4 daily comparisons. on_sale: held framework positions with a live INTACT thesis,
+    multiple <= (1 - discount) * fair_band_mid. fair_entry: WATCH items (stage
+    gate_approved_waiting), multiple <= fair_band_high. A stale/empty/non-positive
+    denominator or stale price SUSPENDS that ticker's line with a printed note (MA-3).
+    Sorted by position weight desc (held first); renderer shows top 3 + tail."""
+    discount = config_mod.get_float(conn, "buy_opportunity_discount_pct") / 100.0
+    lines: list[tuple[float, contexts.OpportunityLine]] = []
+    snap = db.fetch_latest_snapshot(conn)
+    positions = mirror.advice_positions(conn, snap["snapshot_id"]) if snap else []
+    smap = db.fetch_current_symbol_map(conn)
+
+    def one(ticker: str, thesis_id: str, kind: str, weight: float) -> None:
+        tv = db.fetch_current_thesis_version(conn, thesis_id)
+        armed = db.fetch_armed_triggers(conn, thesis_id)
+        n_pass = sum(1 for t in armed
+                     if (c := db.fetch_latest_trigger_check(conn, t["trigger_id"]))
+                     and c["result"] == "PASS")
+        low, high = tv["fair_band_low"], tv["fair_band_high"]
+        denom = store.denominator_per_share(conn, ticker, as_of=as_of)
+        price = store.latest_close(conn, ticker, as_of=as_of)
+        suspended = None
+        if denom is None or not denom.usable() or denom.value <= 0:
+            suspended = (f"{ticker}: check suspended — denominator stale/empty/non-positive "
+                         "(MA-3); suspension stated, silence never means no opportunity.")
+        elif price is None or not price.usable():
+            suspended = f"{ticker}: check suspended — price stale (MA-3)."
+        if suspended:
+            lines.append((weight, contexts.OpportunityLine(
+                ticker=ticker, multiple=None, band_low=low, band_high=high,
+                thesis_version=tv["version"], triggers_pass=n_pass, triggers_total=len(armed),
+                kind=kind, suspended_note=suspended)))
+            return
+        multiple = price.value.close / denom.value
+        mid = (low + high) / 2.0
+        hit = (multiple <= (1.0 - discount) * mid) if kind == "on_sale" else (multiple <= high)
+        if hit:
+            lines.append((weight, contexts.OpportunityLine(
+                ticker=ticker, multiple=multiple, band_low=low, band_high=high,
+                thesis_version=tv["version"], triggers_pass=n_pass, triggers_total=len(armed),
+                kind=kind, suspended_note=None)))
+
+    for p in positions:
+        if p.instrument_type == "cash" or not p.yf_ticker:
+            continue
+        tid = register.live_thesis_for(conn, p.symbol)
+        if tid is None:
+            continue
+        status = db.fetch_current_thesis_status(conn, tid)
+        if status is None or status["status"] != "intact":
+            continue
+        one(p.yf_ticker, tid, "on_sale", p.weight)
+
+    for item in db.fetch_watchlist(conn, stage="gate_approved_waiting"):
+        if not item["thesis_ref"]:
+            continue
+        one(smap.get(item["ticker"], item["ticker"]), item["thesis_ref"], "fair_entry", 0.0)
+
+    lines.sort(key=lambda pair: -pair[0])
+    ordered = tuple(l for _, l in lines)
+    return ordered, max(0, len(ordered) - 3)
+
+
 # ---- stubs completed by later tasks ------------------------------------------------
-def opportunity_lines(conn, *, as_of):                       # P6.5
-    return (), 0
 def open_loop_lines(conn, *, as_of):                         # P6.6
     return ()
 def sweep_ask_deadlines(conn, *, clock, run_id):             # P6.6
