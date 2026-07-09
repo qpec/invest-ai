@@ -64,4 +64,12 @@ def test_strict_scheduled_html_goldens_have_no_red_glyphs():
         text = p.read_text(encoding="utf-8")
         assert not any(g in text for g in _RED), f"{name} has a red glyph"
         assert "€" not in text, f"{name} leaked a euro amount"
-        assert "S&P" not in text, f"{name} leaked a benchmark token"
+        # The HTML surface is cm.esc()'d: '&' -> '&amp;', so a leaked benchmark token
+        # ships as 'S&amp;P', never the literal 'S&P' (verified against the quarterly
+        # doc golden, which carries 'S&amp;P' and zero 'S&P'). Check the escaped form
+        # here — mirroring lint._template_text's raw-and-escaped handling — and scan the
+        # unescaped .md.txt surface for the literal token below.
+        assert "S&amp;P" not in text, f"{name} leaked a benchmark token"
+        md = GOLDEN / f"{name}.md.txt"
+        assert md.exists(), f"missing {md}"
+        assert "S&P" not in md.read_text(encoding="utf-8"), f"{name} leaked a benchmark token"
