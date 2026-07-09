@@ -96,3 +96,44 @@ def test_leverage_tripwire(tmp_db, fixed_clock):
                                        clock=fixed_clock)
     lv = [d for d in deltas if d.kind == "leverage_violation"]
     assert len(lv) == 1 and lv[0].symbol == "XLEV"
+
+
+def test_advice_positions_no_cost_basis(tmp_db, fixed_clock):
+    from agentcy import mirror
+    mirror.ingest_snapshot(tmp_db, _snap(300.0, [_pos("VEEV", 10, 2300)]), clock=fixed_clock)
+    ap = mirror.advice_positions(tmp_db)
+    assert [p.symbol for p in ap] == ["VEEV"]
+    assert not hasattr(ap[0], "avg_open_price")            # invariant 4: structurally absent
+
+
+def test_framework_status_defaults_and_designation(tmp_db, fixed_clock):
+    from agentcy import mirror
+    mirror.ingest_snapshot(tmp_db, _snap(0.0, [
+        _pos("VEEV", 10, 2300, itype="stock"),
+        _pos("BTC", 1, 5000, itype="crypto"),
+        _pos("SPY", 5, 2000, itype="etf")]), clock=fixed_clock)
+    at = fixed_clock.now()
+    assert mirror.framework_status(tmp_db, "VEEV", as_of=at) == "backfill_pending"
+    assert mirror.framework_status(tmp_db, "BTC", as_of=at) == "outside_framework"
+    assert mirror.framework_status(tmp_db, "SPY", as_of=at) == "outside_framework"
+    mirror.designate(tmp_db, "VEEV", "framework", journal_ref=1, valid_from=db.to_iso(at))
+    assert mirror.framework_status(tmp_db, "VEEV", as_of=at) == "framework"
+
+
+def test_backfill_queue_by_weight_desc(tmp_db, fixed_clock):
+    from agentcy import mirror
+    mirror.ingest_snapshot(tmp_db, _snap(0.0, [
+        _pos("AAA", 1, 1000, itype="stock"),
+        _pos("BBB", 1, 3000, itype="stock")]), clock=fixed_clock)
+    # both default backfill_pending; BBB heavier -> first
+    assert mirror.backfill_queue(tmp_db, as_of=fixed_clock.now()) == ["BBB", "AAA"]
+
+
+def test_snapshot_age(tmp_db, fixed_clock):
+    from datetime import datetime, timezone, timedelta
+    from agentcy import mirror
+    mirror.ingest_snapshot(tmp_db, _snap(0.0, [_pos("VEEV", 10, 2300)], as_of="2026-07-01"),
+                           clock=fixed_clock)
+    age = mirror.snapshot_age(tmp_db, as_of=datetime(2026, 7, 8, tzinfo=timezone.utc))
+    assert age == timedelta(days=7)
+    assert mirror.snapshot_age(tmp_db, as_of=None) is None or isinstance(age, timedelta)
