@@ -48,3 +48,22 @@ def test_ams_date_label_uses_europe_amsterdam():
     dt = datetime(2026, 7, 8, 5, 0, tzinfo=timezone.utc)
     assert cm.ams_date_label(dt) == "Wed 8 Jul 2026"
     assert cm.ams_datetime_label(dt) == "Wed 8 Jul 2026, 07:00 CET"
+
+
+def test_split_returns_single_when_fits():
+    assert cm.split_4096("short") == ["short"]
+
+
+def test_split_prefers_blank_line_boundaries():
+    a = "A" * 3000
+    b = "B" * 3000
+    parts = cm.split_4096(a + "\n\n" + b)
+    assert parts == [a, b]                      # split on the blank line, not mid-run
+
+
+def test_split_oversize_single_paragraph_hard_cuts():
+    big = "X" * 9000                             # no boundary at all
+    parts = cm.split_4096(big)
+    assert all(len(p) <= 4096 for p in parts)
+    assert "".join(parts) == big
+    assert len(parts) == 3
