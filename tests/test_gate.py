@@ -656,7 +656,7 @@ def test_backfill_no_thesis_exists_from_circle_pass(tmp_db, fixed_clock, monkeyp
 # --- P4.12 re-pitch confrontation ---------------------------------------------
 
 def test_read_prior_verdict_returns_prior_pass(tmp_db, fixed_clock, monkeypatch):
-    from agentcy import gate, register
+    from agentcy import gate
     # a prior PASS on VEEV
     ask = ScriptedAsker([TWO_SENTENCES, "moat", "outside"])
     gate.start(tmp_db, ticker="VEEV", mode="gate", ask_owner=ask, clock=fixed_clock)
