@@ -377,7 +377,6 @@ def _status_rebuttal(ask: AskOwner) -> str:
              "BUY_READY stands.")
 
 
-import json
 from dataclasses import dataclass
 
 from agentcy import journal, register
