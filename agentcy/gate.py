@@ -492,7 +492,7 @@ def start(conn, *, ticker: str, mode: str, ask_owner: AskOwner, clock: Clock,
           store=_store_default) -> GateOutcome:
     """Open a gate_session and run C.2-C.6 to a verdict. mode in {'gate','backfill'}.
     Re-pitch confrontation (C.1) is enforced by the CLI before calling start."""
-    started = _iso(clock.now())
+    started = db.to_iso(clock.now())
     session_id = db.append_gate_session(conn, ticker=ticker, mode=mode,
                                         started_at=started)
     state = {"ticker": ticker}
@@ -521,7 +521,7 @@ def abandon(conn, session_id: int, *, clock: Clock) -> None:
         return
     db.update_gate_session(conn, session_id, step=row["step"],
                            state_json=row["state_json"], status="abandoned",
-                           updated_at=_iso(clock.now()))
+                           updated_at=db.to_iso(clock.now()))
 
 
 def _drive(conn, session_id, *, ticker, mode, state, step, ask_owner, clock,
@@ -586,8 +586,4 @@ def _run_verdict(conn, *, mode, state, dossier, ask_owner, clock) -> dict:
 
 def _persist(conn, session_id, *, step, state, clock, status) -> None:
     db.update_gate_session(conn, session_id, step=step, state_json=json.dumps(state),
-                           status=status, updated_at=_iso(clock.now()))
-
-
-def _iso(dt) -> str:
-    return dt.isoformat().replace("+00:00", "Z")
+                           status=status, updated_at=db.to_iso(clock.now()))
