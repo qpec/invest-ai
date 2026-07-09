@@ -227,3 +227,84 @@ def next_expected_earnings(conn, yf_ticker: str, *, as_of: datetime) -> str | No
     expected = date.fromisoformat(cal["expected_date"])
     delta = (expected - as_of.date()).days
     return cal["expected_date"] if 0 <= delta <= CALENDAR_PREVIEW_DAYS else None
+
+
+@dataclass(frozen=True)
+class OwnerEarnings:
+    """MA-11 pinned construction, all-or-STALE."""
+    fcf_ttm: float
+    sbc_ttm: float
+    owner_fcf_ttm: float
+    owner_fcf_per_share_ttm: float
+    owner_fcf_margin_ttm: float
+    periods_used: tuple[str, ...]
+
+
+def _period_payloads(rows: list) -> dict[str, dict]:
+    """period_end -> decoded payload dict (latest fingerprint per period, from the archive)."""
+    return {r["period_end"]: json.loads(r["payload_json"]) for r in rows}
+
+
+def owner_fcf_ttm(conn, yf_ticker: str, *, as_of: datetime) -> Stamped[OwnerEarnings] | None:
+    """Sum of last 4 quarterly (OCF - |CapEx|) - SBC; ANY empty/missing period -> None (not
+    computable), any stale input -> Stamped(STALE); never a partial sum (MA-11/BUF-5)."""
+    cf = statement_history(conn, yf_ticker, "cashflow", as_of=as_of)
+    inc = statement_history(conn, yf_ticker, "income", as_of=as_of)
+    cf_pay = _period_payloads(cf.value)
+    inc_pay = _period_payloads(inc.value)
+    periods = sorted(cf_pay, reverse=True)[:4]               # newest 4 quarters
+    if len(periods) < 4:
+        return None                                          # too short -> not computable (MA-1/MA-11)
+    fcf = sbc = revenue = 0.0
+    for p in periods:
+        cell = cf_pay[p]
+        ocf = cell.get("Operating Cash Flow")
+        capex = cell.get("Capital Expenditure")
+        if ocf is None or capex is None:
+            return None                                      # a required pinned value missing -> not computable
+        fcf += float(ocf) - abs(float(capex))
+        sbc += float(cell.get("Stock Based Compensation") or 0.0)  # SBC-free filer -> 0 (plan note 4)
+        rev = inc_pay.get(p, {}).get("Total Revenue")
+        revenue += float(rev) if rev is not None else 0.0
+    owner_fcf = fcf - sbc
+
+    shares = shares_history(conn, yf_ticker, as_of=as_of)
+    if len(shares.value) == 0:
+        return None                                          # no share count -> per-share not computable
+    # latest observation at/before as_of; shares_history is not as_of-filtered so iloc[-1]
+    # would overshoot to a post-as_of print (plan typo fix — matches the healthy test's
+    # "deduped last-per-date shares near as_of (7.434e9 on 2026-04-01)").
+    at_or_before = shares.value[shares.value.index <= pd.Timestamp(as_of.date())]
+    if len(at_or_before) == 0:
+        return None                                          # no share count at/before as_of
+    share_count = float(at_or_before.iloc[-1])
+    if share_count <= 0:
+        return None
+    per_share = owner_fcf / share_count
+    margin = (owner_fcf / revenue) if revenue > 0 else 0.0
+
+    # all-or-STALE: any stale input degrades the whole figure (never a partial-fresh sum)
+    state = DataState.FRESH
+    notes = []
+    for s in (cf, inc, shares):
+        if s.state is not DataState.FRESH:
+            state = DataState.STALE
+            if s.note:
+                notes.append(s.note)
+    fetched_at = min(cf.fetched_at, inc.fetched_at, shares.fetched_at)
+    oe = OwnerEarnings(fcf, sbc, owner_fcf, per_share, margin, tuple(sorted(periods)))
+    return Stamped(oe, fetched_at, state, "; ".join(notes) or None)
+
+
+def denominator_per_share(conn, yf_ticker: str, *, as_of: datetime) -> Stamped[float] | None:
+    """Owner-FCF per share for E.4; stale/empty/non-positive -> not usable() -> that ticker's
+    checks SUSPENDED with a printed note (MA-3). None only when not computable at all."""
+    oe = owner_fcf_ttm(conn, yf_ticker, as_of=as_of)
+    if oe is None:
+        return None
+    per_share = oe.value.owner_fcf_per_share_ttm
+    if per_share <= 0:
+        note = (oe.note + "; " if oe.note else "") + \
+            f"{yf_ticker}: owner-FCF per share {per_share:.4f} non-positive — checks suspended (MA-3)"
+        return Stamped(per_share, oe.fetched_at, DataState.STALE, note)
+    return Stamped(per_share, oe.fetched_at, oe.state, oe.note)
