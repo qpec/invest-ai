@@ -545,3 +545,79 @@ def test_finalize_watch_thesis_stays_draft(tmp_db, fixed_clock):
                              clock=fixed_clock)
     status = db.fetch_current_thesis_status(tmp_db, outcome.thesis_id)
     assert status["status"] == "draft"                 # WATCH: thesis stays draft (C.6)
+
+
+# --- P4.10 driver: start / resume / abandon -----------------------------------
+
+def _scripted_full_buy(monkeypatch):
+    """A full BUY_READY script (circle -> hell_no -> judgment -> drafting)."""
+    return ScriptedAsker(
+        # circle
+        [TWO_SENTENCES, "switching costs", "core"]
+        # hell_no
+        + ["no"] * 5
+        # judgment
+        + _judgment_answers()
+        # drafting: moat_types, evidence, band_low, band_high, denom, count, 2 triggers
+        + ["switching_costs", "retention >115%", "25", "35", "P/owner-FCF", "2"]
+        + _one_trigger(moat_link="switching_costs")
+        + _one_trigger(type="dilution", statement="shares +3%/12m", metric="shares_yoy",
+                       comparator=">", threshold="3", persistence="ttm"))
+
+
+def _patch_store_and_config(monkeypatch, tmp_db, multiple=30.0):
+    from agentcy import gate
+    def fake_dossier(conn, ticker, *, as_of, store=None):
+        return _dossier(multiple)
+    monkeypatch.setattr(gate, "build_dossier", fake_dossier)
+    monkeypatch.setattr(gate, "_framework_count", lambda conn, as_of: 5)
+
+
+def test_start_runs_to_buy_ready(tmp_db, fixed_clock, monkeypatch):
+    from agentcy import gate
+    _patch_store_and_config(monkeypatch, tmp_db, multiple=30.0)
+    ask = _scripted_full_buy(monkeypatch)
+    outcome = gate.start(tmp_db, ticker="VEEV", mode="gate",
+                         ask_owner=ask, clock=fixed_clock)
+    assert outcome.verdict == "BUY_READY"
+    sess = tmp_db.execute("SELECT status, step FROM gate_session").fetchone()
+    assert sess["status"] == "done"
+    assert sess["step"] == "verdict"
+
+
+def test_start_pass_at_circle_short_circuits(tmp_db, fixed_clock, monkeypatch):
+    from agentcy import gate
+    ask = ScriptedAsker([TWO_SENTENCES, "moat", "outside"])
+    outcome = gate.start(tmp_db, ticker="VEEV", mode="gate",
+                         ask_owner=ask, clock=fixed_clock)
+    assert outcome.verdict == "PASS"
+    assert outcome.reason_class == "outside_circle"
+
+
+def test_resume_continues_from_stored_step(tmp_db, fixed_clock, monkeypatch):
+    from agentcy import gate
+    _patch_store_and_config(monkeypatch, tmp_db, multiple=30.0)
+    # Simulate a crash after circle+hell_no by pre-seeding a session at 'dossier'.
+    sid = db.append_gate_session(tmp_db, ticker="VEEV", mode="gate",
+                                 started_at="2026-07-08T05:00:00Z")
+    state = {"ticker": "VEEV", "business_model_2s": TWO_SENTENCES,
+             "moat_phrase": "switching costs", "circle_fit_initial": "core",
+             "hell_no": {"HN1": "no", "HN2": "no", "HN3": "no", "HN4": "no", "HN5": "no"}}
+    db.update_gate_session(tmp_db, sid, step="dossier", state_json=json.dumps(state),
+                           status="active", updated_at="2026-07-08T05:00:00Z")
+    ask = ScriptedAsker(
+        _judgment_answers()
+        + ["switching_costs", "retention >115%", "25", "35", "P/owner-FCF", "2"]
+        + _one_trigger(moat_link="switching_costs")
+        + _one_trigger(type="dilution", statement="shares +3%/12m", metric="shares_yoy",
+                       comparator=">", threshold="3", persistence="ttm"))
+    outcome = gate.resume(tmp_db, session_id=sid, ask_owner=ask, clock=fixed_clock)
+    assert outcome.verdict == "BUY_READY"
+
+
+def test_abandon_marks_session(tmp_db, fixed_clock):
+    from agentcy import gate
+    sid = db.append_gate_session(tmp_db, ticker="VEEV", mode="gate",
+                                 started_at="2026-07-08T05:00:00Z")
+    gate.abandon(tmp_db, sid, clock=fixed_clock)
+    assert db.fetch_active_gate_session(tmp_db, "VEEV") is None

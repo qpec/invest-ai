@@ -481,3 +481,121 @@ def _verdict_text(v: str, verdict: dict, dossier: dict | None) -> str:
                 f"{verdict.get('suggested_max_weight_pct')}%.{tail} "
                 "This is an invitation, not an instruction.")
     return f"Gate verdict WATCH. Business passes; price above the fair band.{tail}"
+
+
+import json
+
+from agentcy import config, runlog
+
+# step name -> (function, needs_store_or_conn)
+_STEP_ORDER = ("circle", "hell_no", "dossier", "judgment", "drafting", "verdict")
+
+
+def start(conn, *, ticker: str, mode: str, ask_owner: AskOwner, clock: Clock,
+          store=_store_default) -> GateOutcome:
+    """Open a gate_session and run C.2-C.6 to a verdict. mode in {'gate','backfill'}.
+    Re-pitch confrontation (C.1) is enforced by the CLI before calling start."""
+    started = _iso(clock.now())
+    session_id = db.append_gate_session(conn, ticker=ticker, mode=mode,
+                                        started_at=started)
+    state = {"ticker": ticker}
+    db.update_gate_session(conn, session_id, step="circle",
+                           state_json=json.dumps(state), status="active",
+                           updated_at=started)
+    return _drive(conn, session_id, ticker=ticker, mode=mode, state=state,
+                  step="circle", ask_owner=ask_owner, clock=clock, store=store)
+
+
+def resume(conn, *, session_id: int, ask_owner: AskOwner, clock: Clock,
+           store=_store_default) -> GateOutcome:
+    """Continue an active session from its persisted step (resumability)."""
+    row = _fetch_session(conn, session_id)
+    if row is None or row["status"] != "active":
+        raise ValueError(f"gate_session {session_id} is not active")
+    state = json.loads(row["state_json"])
+    return _drive(conn, session_id, ticker=row["ticker"], mode=row["mode"],
+                  state=state, step=row["step"], ask_owner=ask_owner, clock=clock,
+                  store=store)
+
+
+def abandon(conn, session_id: int, *, clock: Clock) -> None:
+    row = _fetch_session(conn, session_id)
+    if row is None:
+        return
+    db.update_gate_session(conn, session_id, step=row["step"],
+                           state_json=row["state_json"], status="abandoned",
+                           updated_at=_iso(clock.now()))
+
+
+def _drive(conn, session_id, *, ticker, mode, state, step, ask_owner, clock,
+           store) -> GateOutcome:
+    """Run the machine from `step` to verdict, persisting after every completed step."""
+    as_of = clock.now()
+    dossier = state.get("_dossier")
+    while step != "verdict":
+        if step == "circle":
+            step = step_circle(state, ask_owner)
+        elif step == "hell_no":
+            step = step_hell_no(state, ask_owner)
+        elif step == "dossier":
+            if mode == "backfill":
+                # backfill still runs the full dossier (C.6); pause propagates up
+                dossier = build_dossier(conn, ticker, as_of=as_of, store=store)
+                state["_dossier"] = dossier
+                step = "judgment"
+            else:
+                try:
+                    dossier = build_dossier(conn, ticker, as_of=as_of, store=store)
+                except DossierPaused:
+                    _persist(conn, session_id, step="dossier", state=state, clock=clock,
+                             status="active")
+                    raise
+                state["_dossier"] = dossier
+                step = "judgment"
+        elif step == "judgment":
+            step = step_judgment(state, ask_owner)
+        elif step == "drafting":
+            step = step_drafting(state, ask_owner)
+        _persist(conn, session_id, step=step, state=state, clock=clock, status="active")
+
+    dossier = state.get("_dossier")
+    verdict = _run_verdict(conn, mode=mode, state=state, dossier=dossier,
+                           ask_owner=ask_owner, clock=clock)
+    outcome = _finalize(conn, mode=mode, state=state, dossier=dossier,
+                        verdict=verdict, clock=clock)
+    _persist(conn, session_id, step="verdict", state=state, clock=clock, status="done")
+    return outcome
+
+
+def _run_verdict(conn, *, mode, state, dossier, ask_owner, clock) -> dict:
+    """Classify, then apply the two BUY_READY frictions (displacement, status
+    rebuttal) which need the owner and live DB state."""
+    if mode == "backfill" and "pending_pass" not in state:
+        # backfill has no price verdict (BUF-12); business passing => activate
+        return {"verdict": "activate_backfill", "reason_class": None, "note": None,
+                "standing_questions": (), "suggested_max_weight_pct": None,
+                "requires_status_rebuttal": False}
+    config_map = config.effective(conn)
+    verdict = classify_verdict(tmp_db_unused=None, state=state, dossier=dossier,
+                               config_map=config_map)
+    if verdict["verdict"] == "BUY_READY":
+        note = _displacement_note(conn, ask_owner, as_of=clock.now())
+        if note:
+            state["displacement_note"] = note
+        if verdict["requires_status_rebuttal"]:
+            state["status_buy_rebuttal"] = _status_rebuttal(ask_owner)
+    return verdict
+
+
+def _persist(conn, session_id, *, step, state, clock, status) -> None:
+    db.update_gate_session(conn, session_id, step=step, state_json=json.dumps(state),
+                           status=status, updated_at=_iso(clock.now()))
+
+
+def _fetch_session(conn, session_id: int):
+    return conn.execute("SELECT * FROM gate_session WHERE session_id = ?",
+                        (session_id,)).fetchone()
+
+
+def _iso(dt) -> str:
+    return dt.isoformat().replace("+00:00", "Z")
