@@ -243,3 +243,74 @@ def test_next_expected_earnings_outside_window_is_none(tmp_db):
                                         as_of=datetime(2026, 7, 8, tzinfo=timezone.utc)) is None
     assert store.next_expected_earnings(tmp_db, "NOPE",
                                         as_of=datetime(2026, 7, 8, tzinfo=timezone.utc)) is None
+
+
+def _seed_fundamentals(tmp_db, yf_series, yf_statements, *, fetched_at=T1):
+    from agentcy.fetch import store
+    store.store_statements(tmp_db, "MSFT", yf_statements(), run_id=None, fetched_at=fetched_at)
+    store.store_shares(tmp_db, "MSFT", yf_series(), fetched_at=fetched_at)
+
+
+def test_owner_fcf_ttm_healthy(tmp_db, yf_series, yf_statements):
+    from agentcy.fetch import store
+    _seed_fundamentals(tmp_db, yf_series, yf_statements)
+    st = store.owner_fcf_ttm(tmp_db, "MSFT", as_of=datetime(2026, 4, 15, tzinfo=timezone.utc))
+    assert st is not None and st.state is DataState.FRESH and st.usable()
+    oe = st.value
+    # OCF sum (36+34+32+30)e9 = 132e9 ; |CapEx| sum (13+12+11+10)e9 = 46e9 ; FCF = 86e9
+    # SBC sum (2.8+2.7+2.6+2.5)e9 = 10.6e9 ; owner_fcf = 75.4e9
+    assert oe.fcf_ttm == pytest.approx(86e9)
+    assert oe.sbc_ttm == pytest.approx(10.6e9)
+    assert oe.owner_fcf_ttm == pytest.approx(75.4e9)
+    assert len(oe.periods_used) == 4
+    # per share over the deduped last-per-date shares near as_of (7.434e9 on 2026-04-01)
+    assert oe.owner_fcf_per_share_ttm == pytest.approx(75.4e9 / 7.434e9, rel=1e-6)
+
+
+def test_owner_fcf_ttm_missing_period_is_not_computable(tmp_db, yf_series, yf_statements):
+    from agentcy.fetch import store
+    stmts = yf_statements()
+    stmts["cashflow"] = stmts["cashflow"].iloc[:, :3]        # only 3 quarters of cashflow
+    store.store_statements(tmp_db, "MSFT", stmts, run_id=None, fetched_at=T1)
+    store.store_shares(tmp_db, "MSFT", yf_series(), fetched_at=T1)
+    st = store.owner_fcf_ttm(tmp_db, "MSFT", as_of=datetime(2026, 4, 15, tzinfo=timezone.utc))
+    assert st is None                                        # <4 periods -> not computable, no partial sum (MA-11)
+
+
+def test_owner_fcf_ttm_missing_sbc_row_defaults_zero_but_stays_computable(tmp_db, yf_series, yf_statements):
+    # a genuinely SBC-free filer: SBC absent -> treated as 0 (plan note 4), owner_fcf == fcf
+    from agentcy.fetch import store
+    stmts = yf_statements()
+    stmts["cashflow"] = stmts["cashflow"].drop(index="Stock Based Compensation")
+    store.store_statements(tmp_db, "MSFT", stmts, run_id=None, fetched_at=T1)
+    store.store_shares(tmp_db, "MSFT", yf_series(), fetched_at=T1)
+    st = store.owner_fcf_ttm(tmp_db, "MSFT", as_of=datetime(2026, 4, 15, tzinfo=timezone.utc))
+    assert st is not None
+    assert st.value.sbc_ttm == 0.0 and st.value.owner_fcf_ttm == pytest.approx(86e9)
+
+
+def test_owner_fcf_ttm_stale_statements_yield_stale(tmp_db, yf_series, yf_statements):
+    from agentcy.fetch import store
+    _seed_fundamentals(tmp_db, yf_series, yf_statements)
+    # as_of far past the newest period -> statements STALE -> owner-FCF STALE, not usable (MA-11)
+    st = store.owner_fcf_ttm(tmp_db, "MSFT", as_of=datetime(2026, 12, 1, tzinfo=timezone.utc))
+    assert st is not None and st.state is DataState.STALE and not st.usable()
+
+
+def test_denominator_per_share_suspends_on_non_positive(tmp_db, yf_series, yf_statements):
+    from agentcy.fetch import store
+    stmts = yf_statements()
+    # force negative owner-FCF: gigantic capex swamps OCF across all 4 quarters
+    for col in stmts["cashflow"].columns:
+        stmts["cashflow"].loc["Capital Expenditure", col] = -9.9e11
+    store.store_statements(tmp_db, "MSFT", stmts, run_id=None, fetched_at=T1)
+    store.store_shares(tmp_db, "MSFT", yf_series(), fetched_at=T1)
+    st = store.denominator_per_share(tmp_db, "MSFT", as_of=datetime(2026, 4, 15, tzinfo=timezone.utc))
+    assert st is not None and not st.usable() and st.note is not None   # SUSPENDED, stated (MA-3)
+
+
+def test_denominator_per_share_none_when_no_shares(tmp_db, yf_statements):
+    from agentcy.fetch import store
+    store.store_statements(tmp_db, "MSFT", yf_statements(), run_id=None, fetched_at=T1)   # no shares seeded
+    assert store.denominator_per_share(tmp_db, "MSFT",
+                                       as_of=datetime(2026, 4, 15, tzinfo=timezone.utc)) is None
