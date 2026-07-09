@@ -207,3 +207,65 @@ def test_dossier_multiple_none_when_price_absent(tmp_db, fixed_clock):
     store = FakeStore(owner_earnings=_fresh(_oe()), denom=_fresh(4.0), close=None)
     dossier = build_dossier(tmp_db, "VEEV", as_of=fixed_clock.now(), store=store)
     assert dossier["current_multiple"] is None          # dossier still assembles (BUF-12 backfill safe)
+
+
+# --- P4.5 judgment step -------------------------------------------------------
+
+TEN_YEAR = ("Yes. Life-sciences regulation only accumulates; the vendor that owns "
+            "the validated record layer compounds with the industry.")
+
+STATUS_Q = "Would you still buy this if you could never tell anyone you owned it?"
+
+
+def _judgment_answers(*, conviction="high", mgmt="trusted_owner_operator",
+                      circle="core", status="yes"):
+    # order: conviction, mgmt_trust, mgmt_note, circle_fit, circle_note,
+    #        ten_year_statement, status_answer, [status_buy_note if not "yes"]
+    return [conviction, mgmt, "founder-CEO, large stake", circle,
+            "healthcare SaaS", TEN_YEAR, status, "dinner-party temptation, honestly"]
+
+
+def test_judgment_happy_no_status_flag():
+    from agentcy.gate import step_judgment
+    state = {"circle_fit_initial": "core"}
+    ask = ScriptedAsker(_judgment_answers(status="yes"))
+    assert step_judgment(state, ask) == "drafting"
+    assert state["conviction"] == "high"
+    assert state["mgmt_trust"] == "trusted_owner_operator"
+    assert state["circle_fit"] == "core"
+    assert state["ten_year_statement"] == TEN_YEAR
+    assert state["status_buy_flag"] is False
+
+
+def test_judgment_status_question_is_verbatim():
+    from agentcy.gate import step_judgment
+    state = {"circle_fit_initial": "core"}
+    ask = ScriptedAsker(_judgment_answers())
+    step_judgment(state, ask)
+    prompts = [p for p, _ in ask.log]
+    assert any(STATUS_Q in p for p in prompts)
+
+
+def test_judgment_hesitant_status_sets_flag():
+    from agentcy.gate import step_judgment
+    state = {"circle_fit_initial": "core"}
+    ask = ScriptedAsker(_judgment_answers(status="no"))
+    step_judgment(state, ask)
+    assert state["status_buy_flag"] is True
+
+
+def test_judgment_conviction_reasked_until_in_set():
+    from agentcy.gate import step_judgment
+    state = {"circle_fit_initial": "core"}
+    ask = ScriptedAsker(["huge", "high"] + _judgment_answers()[1:])
+    assert step_judgment(state, ask) == "drafting"
+    assert state["conviction"] == "high"        # 'huge' rejected, re-asked
+
+
+def test_judgment_no_default_prompts_enumerate():
+    from agentcy.gate import step_judgment
+    state = {"circle_fit_initial": "core"}
+    ask = ScriptedAsker(_judgment_answers())
+    step_judgment(state, ask)
+    conv_opts = next(opts for p, opts in ask.log if "conviction" in p.lower())
+    assert conv_opts == ("high", "medium", "low")

@@ -181,3 +181,39 @@ def _oe_json(oe: "Stamped") -> str:
         "periods_used": list(v.periods_used),
         "fetched_at": oe.fetched_at.isoformat().replace("+00:00", "Z"),
     })
+
+
+STATUS_QUESTION = "Would you still buy this if you could never tell anyone you owned it?"
+
+
+def step_judgment(state: dict, ask: AskOwner) -> str:
+    """C.5 (FR9, sacred) - the system asks; only the owner answers; no defaults,
+    no suggestions. Verbatim status question; hesitant/negative answer is the sole
+    source of status_buy_flag (F11)."""
+    state["conviction"] = _ask_enum(
+        ask, "conviction - high, medium, or low? (never system-set or system-capped)",
+        ("high", "medium", "low"))
+    state["mgmt_trust"] = _ask_enum(
+        ask, "mgmt_trust - trusted_owner_operator, trusted_professional, neutral, "
+             "or distrust?",
+        ("trusted_owner_operator", "trusted_professional", "neutral", "distrust"))
+    state["mgmt_trust_note"] = ask("mgmt_trust note (one line):", None).strip() or None
+    state["circle_fit"] = _ask_enum(
+        ask, f"circle_fit - confirm core or edge? (you said "
+             f"{state.get('circle_fit_initial', 'core')} at C.2)",
+        ("core", "edge"))
+    state["circle_fit_note"] = ask("circle_fit note - which competence domain?",
+                                   None).strip() or None
+    state["ten_year_statement"] = _ask_nonempty(
+        ask, "ten_year_statement - first person: would you hold if the market closed "
+             "for a decade, and why?")
+    # the status question, verbatim (C.5); yes = clean, anything else = flag (F11)
+    status_ans = _ask_enum(
+        ask, f"{STATUS_QUESTION} (yes / hesitant / no)",
+        ("yes", "hesitant", "no"))
+    state["status_buy_flag"] = status_ans != "yes"
+    if state["status_buy_flag"]:
+        state["status_buy_note"] = ask(
+            "You hesitated on the status question. One line on why "
+            "(this becomes the status-buy note):", None).strip() or None
+    return "drafting"
