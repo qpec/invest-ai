@@ -231,3 +231,57 @@ def test_fire_with_storm_key_shares_deadline(tmp_db, fixed_clock):
 def _mkrun(conn, clock):
     from agentcy import runlog
     return runlog.start(conn, "weekly", "2026-07-11", clock=clock).run_id
+
+
+def test_headroom_table_live(tmp_db, fixed_clock, monkeypatch, stamped):
+    from agentcy import triggers
+    from agentcy.fetch import store
+    trig, tid = _thesis_with_trigger(tmp_db, fixed_clock, {})
+    monkeypatch.setattr(store, "revenue_yoy_series",
+                        lambda c, t, *, as_of: stamped([("2026-03-31", 12.1), ("2026-06-30", 14.2)]),
+                        raising=False)
+    monkeypatch.setattr(store, "margin_series",
+                        lambda c, t, *, as_of: stamped([("2026-06-30", 25.0)]), raising=False)
+    table = triggers.headroom_table(tmp_db, tid, as_of=AS_OF)
+    by_id = {o.trigger_id: o for o in table}
+    assert by_id[trig["trigger_id"]].result == "PASS"
+    assert round(by_id[trig["trigger_id"]].headroom, 1) == 4.2
+
+
+def test_unverifiable_weeks_counts_consecutive(tmp_db, fixed_clock):
+    from agentcy import register, triggers
+    from datetime import datetime, timezone, timedelta
+    tid = register.create_thesis(tmp_db, ticker="VEEV", origin="gate", fields=_rfields(),
+        triggers=[register.TriggerSpec(type="owner_attested_event", statement="departed?",
+                    metric=None, comparator=None, threshold=None, moat_link="switching_costs",
+                    persistence="single_observation", yes_means="fire"),
+                  register.TriggerSpec(type="growth_floor", statement="s", metric="revenue_yoy",
+                    comparator="<", threshold=10.0, moat_link=None,
+                    persistence="single_observation")],
+        journal_ref=1, clock=fixed_clock)
+    register.activate(tmp_db, tid, cause="c", clock=fixed_clock)
+    trig = [t for t in db.fetch_armed_triggers(tmp_db, tid)
+            if t["type"] == "owner_attested_event"][0]
+    from agentcy import runlog
+    base = datetime(2026, 6, 20, tzinfo=timezone.utc)
+    for i in range(3):
+        rid = runlog.start(tmp_db, "weekly", f"2026-06-{20 + i * 7}", clock=fixed_clock).run_id
+        db.append_trigger_check(tmp_db, {"trigger_id": trig["trigger_id"], "run_id": rid,
+            "checked_at": db.to_iso(base + timedelta(days=7 * i)), "result": "UNVERIFIABLE",
+            "observed_value": None, "headroom": None, "evaluable_from": None})
+    at = datetime(2026, 7, 5, tzinfo=timezone.utc)
+    assert triggers.unverifiable_weeks(tmp_db, trig["trigger_id"], as_of=at) == 3
+
+
+def test_unverifiable_weeks_resets_on_pass(tmp_db, fixed_clock):
+    from agentcy import register, runlog, triggers
+    from datetime import datetime, timezone, timedelta
+    trig, tid = _thesis_with_trigger(tmp_db, fixed_clock, {})
+    base = datetime(2026, 6, 20, tzinfo=timezone.utc)
+    for i, res in enumerate(["UNVERIFIABLE", "PASS", "UNVERIFIABLE"]):
+        rid = runlog.start(tmp_db, "weekly", f"2026-06-{20 + i}", clock=fixed_clock).run_id
+        db.append_trigger_check(tmp_db, {"trigger_id": trig["trigger_id"], "run_id": rid,
+            "checked_at": db.to_iso(base + timedelta(days=7 * i)), "result": res,
+            "observed_value": None, "headroom": None, "evaluable_from": None})
+    at = datetime(2026, 7, 10, tzinfo=timezone.utc)
+    assert triggers.unverifiable_weeks(tmp_db, trig["trigger_id"], as_of=at) == 1  # only the last
