@@ -157,3 +157,40 @@ def statement_history(conn, yf_ticker: str, statement_type: str, *, as_of: datet
         newest = max(r["period_end"] for r in rows)
         note = f"{yf_ticker} {statement_type}: newest period {newest} stale at {as_of.date().isoformat()} — suspended, not passed (§7.5)"
     return Stamped(list(rows), fetched_at, state, note)
+
+
+def store_shares(conn, yf_ticker: str, series: pd.Series, *, fetched_at: str) -> int:
+    """Append raw observations (duplicates included; dedup happens at read, §7.4); returns rows."""
+    rows = [
+        {
+            "yf_ticker": yf_ticker,
+            "obs_date": pd.Timestamp(idx).date().isoformat(),
+            "shares": float(val),
+            "fetched_at": fetched_at,
+        }
+        for idx, val in series.items()
+    ]
+    return db.append_shares_rows(conn, rows)
+
+
+def shares_history(conn, yf_ticker: str, *, as_of: datetime) -> Stamped[pd.Series]:
+    """Deduped last-value-per-date at read; 90-day gap tolerance before STALE (§7.4)."""
+    raw = db.fetch_shares_raw(conn, yf_ticker)   # ordered obs_date, fetched_at, rowid ascending
+    if not raw:
+        return Stamped(pd.Series(dtype=float), as_of, DataState.STALE,
+                       f"{yf_ticker}: no shares series (§7.4)")
+    # last row per obs_date wins (ascending order => later rows overwrite in the dict)
+    by_date: dict[str, float] = {}
+    fetched: dict[str, str] = {}
+    for r in raw:
+        by_date[r["obs_date"]] = float(r["shares"])
+        fetched[r["obs_date"]] = r["fetched_at"]
+    idx = pd.to_datetime(sorted(by_date))
+    series = pd.Series([by_date[d.date().isoformat()] for d in idx], index=idx, dtype=float)
+    newest = max(date.fromisoformat(d) for d in by_date)
+    state = DataState.STALE if (as_of.date() - newest).days > SHARES_GAP_DAYS else DataState.FRESH
+    note = None
+    if state is DataState.STALE:
+        note = f"{yf_ticker}: shares last observed {newest.isoformat()} — >{SHARES_GAP_DAYS}d gap at {as_of.date().isoformat()} (§7.4)"
+    fetched_at = db.from_iso(max(fetched.values()))
+    return Stamped(series, fetched_at, state, note)

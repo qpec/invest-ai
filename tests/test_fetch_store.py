@@ -173,3 +173,36 @@ def test_statement_history_empty_archive_is_stale(tmp_db, fixed_clock):
     from agentcy.fetch import store
     st = store.statement_history(tmp_db, "NOPE", "income", as_of=fixed_clock.now())
     assert st.value == [] and st.state is DataState.STALE and not st.usable()
+
+
+def test_store_shares_appends_raw_with_duplicates(tmp_db, yf_series):
+    from agentcy.fetch import store
+    n = store.store_shares(tmp_db, "MSFT", yf_series(), fetched_at=T1)
+    assert n == 7                                            # raw, duplicates preserved (§7.4)
+
+
+def test_shares_history_dedups_last_per_date_at_read(tmp_db, yf_series):
+    from agentcy.fetch import store
+    store.store_shares(tmp_db, "MSFT", yf_series(), fetched_at=T1)
+    # as_of near the last observation 2026-06-25 -> FRESH; dedup keeps LAST value per date
+    st = store.shares_history(tmp_db, "MSFT", as_of=datetime(2026, 7, 1, tzinfo=timezone.utc))
+    s = st.value
+    assert not s.index.duplicated().any()                   # deduped
+    assert len(s) == 5                                       # 7 raw rows, 2 duplicate dates collapsed
+    assert s.loc[pd.Timestamp("2026-01-05")] == pytest.approx(7.440e9)   # LAST value on the dup date
+    assert s.loc[pd.Timestamp("2026-04-01")] == pytest.approx(7.434e9)
+    assert st.state is DataState.FRESH and st.usable()
+
+
+def test_shares_history_stale_after_90_day_gap(tmp_db, yf_series):
+    from agentcy.fetch import store
+    store.store_shares(tmp_db, "MSFT", yf_series(), fetched_at=T1)
+    # last obs 2026-06-25; 100 days later -> STALE (§7.4 gap tolerance)
+    st = store.shares_history(tmp_db, "MSFT", as_of=datetime(2026, 10, 3, tzinfo=timezone.utc))
+    assert st.state is DataState.STALE and not st.usable() and st.note is not None
+
+
+def test_shares_history_empty_is_stale(tmp_db, fixed_clock):
+    from agentcy.fetch import store
+    st = store.shares_history(tmp_db, "NOPE", as_of=fixed_clock.now())
+    assert len(st.value) == 0 and st.state is DataState.STALE
