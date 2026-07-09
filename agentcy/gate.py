@@ -485,10 +485,7 @@ def _verdict_text(v: str, verdict: dict, dossier: dict | None) -> str:
 
 import json
 
-from agentcy import config, runlog
-
-# step name -> (function, needs_store_or_conn)
-_STEP_ORDER = ("circle", "hell_no", "dossier", "judgment", "drafting", "verdict")
+from agentcy import config
 
 
 def start(conn, *, ticker: str, mode: str, ask_owner: AskOwner, clock: Clock,
