@@ -14,12 +14,20 @@ def _eur(x: float) -> str:
     return f"€{x:,.0f}"
 
 
-def _msg(n: int, date_label: str, body_lines: list[str], *, ask_id=None, reply=None) -> RenderedOutput:
+def _owner_spans(decisions) -> tuple[str, ...]:
+    """The owner-verbatim substrings carried by these decision blocks (committed questions
+    in the owner's own words); recorded in RenderedOutput.owner_spans so the register lint
+    exempts them (§8 scoping)."""
+    return tuple(d.body_owner_span for d in decisions if d.body_owner_span)
+
+
+def _msg(n: int, date_label: str, body_lines: list[str], *, ask_id=None, reply=None,
+         owner_spans: tuple[str, ...] = ()) -> RenderedOutput:
     subject = f"Weekly review — {date_label} — {n}/{_N}"
     html = "<b>" + cm.esc(subject) + "</b>\n\n" + "\n".join(cm.esc(l) for l in body_lines)
     md = "# " + subject + "\n\n" + "\n".join(body_lines)
     return RenderedOutput(telegram_html=html, markdown=md, output_class="weekly_msg",
-                          ask_id=ask_id, reply_markup_json=reply)
+                          owner_spans=owner_spans, ask_id=ask_id, reply_markup_json=reply)
 
 
 def render_weekly(ctx: WeeklyContext) -> tuple[tuple[RenderedOutput, ...], RenderedOutput]:
@@ -33,12 +41,16 @@ def render_weekly(ctx: WeeklyContext) -> tuple[tuple[RenderedOutput, ...], Rende
     m1 = _msg(1, date_label, m1_lines)
 
     # --- Msg 2/4 — decisions waiting (the only keyboard-bearing weekly message) ---
+    # d0.body carries the owner-verbatim committed question; its body_owner_span rides in
+    # owner_spans so the lint exempts it (an owner committed question saying "will outgrow
+    # the S&P!" keeps its keyboard-bearing message intact instead of being stripped, §8).
     if ctx.decisions:
         d0 = ctx.decisions[0]
         m2_lines = [d0.heading, d0.body]
         if len(ctx.decisions) > 1:
             m2_lines.append(f"(+{len(ctx.decisions) - 1} more decisions in the document.)")
-        m2 = _msg(2, date_label, m2_lines, ask_id=d0.ask_id, reply=d0.reply_markup_json)
+        m2 = _msg(2, date_label, m2_lines, ask_id=d0.ask_id, reply=d0.reply_markup_json,
+                  owner_spans=_owner_spans((d0,)))
     else:
         m2 = _msg(2, date_label, ["✓ No decisions waiting. The document has the full picture when you want it."])
 
@@ -101,4 +113,7 @@ def _document(ctx: WeeklyContext, date_label: str) -> RenderedOutput:
     L += ["## 9. Data health appendix", *ctx.data_health, ""]
     md = "\n".join(L)
     html = "\n".join(cm.esc(l) for l in L)   # doc html skin is a plain escaped mirror (sent as document)
-    return RenderedOutput(telegram_html=html, markdown=md, output_class="weekly_doc")
+    # §7 reproduces the owner-verbatim committed questions; exempt them from the lint too,
+    # so a doc carrying an owner question with a bang/benchmark token is not stripped (§8).
+    return RenderedOutput(telegram_html=html, markdown=md, output_class="weekly_doc",
+                          owner_spans=_owner_spans(ctx.prompted_questions))

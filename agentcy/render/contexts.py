@@ -119,11 +119,19 @@ class PortfolioRow:
 
 @dataclass(frozen=True)
 class DecisionBlock:
-    """Weekly msg 2 item — the only weekly message carrying decision keyboards."""
+    """Weekly msg 2 item — the only weekly message carrying decision keyboards.
+
+    body_owner_span is the exact owner-verbatim substring inside body (e.g. a committed
+    trigger question in the owner's own words). The weekly renderer records it in
+    RenderedOutput.owner_spans so the register lint exempts it — an owner committed
+    question saying "will outgrow the S&P!" keeps its keyboard-bearing message intact
+    instead of being stripped to the safe summary (mirrors AlertItemContext's *_owner
+    fields; §8 lint scoping)."""
     ask_id: str
     heading: str
     body: str
     reply_markup_json: str
+    body_owner_span: str | None = None
 
 
 @dataclass(frozen=True)

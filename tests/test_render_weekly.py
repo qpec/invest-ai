@@ -83,3 +83,41 @@ def test_no_decisions_collapses_msg2(golden):
     assert series[1].reply_markup_json is None
     golden("weekly_no_decisions.msg2.html.txt", series[1].telegram_html)
     golden("weekly_no_decisions.msg2.md.txt", series[1].markdown)
+
+
+def _owner_question_decision():
+    """A committed question in the owner's OWN words that trips two calm-register token
+    rules (no_exclamation via '!', no_benchmark_token via 'S&P'). It must survive the lint
+    verbatim — the owner's alert is never stripped (§8 lint scoping)."""
+    import json
+    km = json.dumps({"inline_keyboard": [[
+        {"text": "Yes", "callback_data": "trig:yes:Q9001"},
+        {"text": "No", "callback_data": "trig:no:Q9001"},
+        {"text": "Can't verify", "callback_data": "trig:cant:Q9001"}]]})
+    owner = "VEEV will outgrow the S&P!"
+    return DecisionBlock(
+        ask_id="Q9001", heading="Prompted check — VEEV — T5",
+        body=f'Committed question (your words): "{owner}"',
+        reply_markup_json=km, body_owner_span=owner)
+
+
+def test_owner_verbatim_committed_question_survives_lint():
+    """Regression (P5.13): an owner committed question bearing a banned token must NOT be
+    stripped by lint_or_fallback. The owner-verbatim span rides in owner_spans on Msg 2 and
+    on doc §7, so the template-authored surface is clean and the owner's words ship intact."""
+    from agentcy.render.lint import lint_or_fallback
+    d = _owner_question_decision()
+    series, doc = render_weekly(_ctx(decisions=(d,)))
+    msg2 = series[1]
+    # The owner span is exempt: the message lints clean and is NOT replaced by the fallback.
+    assert lint(msg2) == []
+    out, violations = lint_or_fallback(msg2)
+    assert violations == [] and out is msg2
+    # The owner's verbatim words survive in the shipped skins (keyboard + ask_id intact).
+    assert 'VEEV will outgrow the S&amp;P!' in msg2.telegram_html
+    assert 'VEEV will outgrow the S&P!' in msg2.markdown
+    assert msg2.ask_id == "Q9001" and msg2.reply_markup_json is not None
+    # doc §7 reproduces the same owner-verbatim question; it too must survive the lint.
+    assert lint(doc) == []
+    assert lint_or_fallback(doc)[1] == []
+    assert 'VEEV will outgrow the S&P!' in doc.markdown
