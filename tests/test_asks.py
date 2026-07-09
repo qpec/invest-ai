@@ -77,3 +77,20 @@ def test_answer_records_tg_message_id(tmp_db, fixed_clock):
     a = asks.mint(tmp_db, kind="V", prompt="p", options=["reject", "watch"], clock=fixed_clock)
     asks.answer(tmp_db, a.ask_id, choice="watch", clock=fixed_clock, tg_message_id=555)
     assert db.fetch_ask(tmp_db, a.ask_id)["tg_message_id"] == 555
+
+
+def test_reprompt_moves_open_to_reprompted_once(tmp_db, fixed_clock):
+    from agentcy import asks
+    a = asks.mint(tmp_db, kind="Q", prompt="p", options=["yes", "no"], clock=fixed_clock)
+    r = asks.reprompt(tmp_db, a.ask_id, clock=fixed_clock)
+    assert r.status == "reprompted"
+    with pytest.raises(ValueError, match="reprompt"):
+        asks.reprompt(tmp_db, a.ask_id, clock=fixed_clock)      # no second re-prompt
+
+
+def test_reprompt_rejects_answered(tmp_db, fixed_clock):
+    from agentcy import asks
+    a = asks.mint(tmp_db, kind="Q", prompt="p", options=["yes", "no"], clock=fixed_clock)
+    asks.answer(tmp_db, a.ask_id, choice="yes", clock=fixed_clock)
+    with pytest.raises(ValueError):
+        asks.reprompt(tmp_db, a.ask_id, clock=fixed_clock)
