@@ -567,3 +567,115 @@ def fetch_events_for(conn, yf_ticker: str) -> list[Row]:
     return conn.execute(
         "SELECT * FROM event WHERE yf_ticker=?"
         " ORDER BY detected_at, event_id", (yf_ticker,)).fetchall()
+
+
+# --- column-guard update helpers (the ONLY mutation path; guarded columns only) ---
+
+def _update(conn, table: str, key_col: str, key, changes: Mapping) -> None:
+    sets = ", ".join(f"{c} = ?" for c in changes)
+    cur = conn.execute(f'UPDATE "{table}" SET {sets} WHERE {key_col} = ?',
+                       (*changes.values(), key))
+    if cur.rowcount != 1:
+        raise LookupError(f"{table}.{key_col}={key!r}: no such row")
+
+
+def update_ask_state(conn, ask_id: str, *, status: str, answer_json: str | None = None,
+                     answered_at: str | None = None,
+                     tg_message_id: int | None = None) -> None:
+    """Update exactly the four guarded ask columns."""
+    changes: dict = {"status": status}
+    if answer_json is not None:
+        changes["answer_json"] = answer_json
+    if answered_at is not None:
+        changes["answered_at"] = answered_at
+    if tg_message_id is not None:
+        changes["tg_message_id"] = tg_message_id
+    _update(conn, "ask", "ask_id", ask_id, changes)
+
+
+def update_outbox_state(conn, outbox_id: int, *, status: str | None = None,
+                        attempts: int | None = None,
+                        next_attempt_at: str | None = None,
+                        tg_message_id: int | None = None) -> None:
+    """Update delivery-state columns (each non-None kwarg)."""
+    changes: dict = {}
+    if status is not None:
+        changes["status"] = status
+    if attempts is not None:
+        changes["attempts"] = attempts
+    if next_attempt_at is not None:
+        changes["next_attempt_at"] = next_attempt_at
+    if tg_message_id is not None:
+        changes["tg_message_id"] = tg_message_id
+    _update(conn, "outbox", "outbox_id", outbox_id, changes)
+
+
+def supersede_outbox_payload(conn, outbox_id: int, *, payload_html: str,
+                             document_path: str | None = None,
+                             reply_markup_json: str | None = None) -> None:
+    """Replace payload of a QUEUED row wholesale (§5.4); the DB trigger aborts if already sent."""
+    _update(conn, "outbox", "outbox_id", outbox_id,
+            {"payload_html": payload_html, "document_path": document_path,
+             "reply_markup_json": reply_markup_json})
+
+
+def update_alert_resolution(conn, alert_id: int, *, status: str, resolved_at: str,
+                            resolution_journal_ref: int) -> None:
+    """Record alert resolution (confirmed_broken/refuted/ignored)."""
+    _update(conn, "alert", "alert_id", alert_id,
+            {"status": status, "resolved_at": resolved_at,
+             "resolution_journal_ref": resolution_journal_ref})
+
+
+def update_watchlist_stage(conn, item_id: int, *, stage: str, stage_changed_at: str,
+                           thesis_ref: str | None = None) -> None:
+    """Advance watchlist stage (C.1/C.6 sweeps, Gate verdicts)."""
+    changes: dict = {"stage": stage, "stage_changed_at": stage_changed_at}
+    if thesis_ref is not None:
+        changes["thesis_ref"] = thesis_ref
+    _update(conn, "watchlist_item", "item_id", item_id, changes)
+
+
+def update_run_start(conn, run_id: int, *, started_at: str, attempt: int,
+                     late: bool) -> None:
+    """Sweep re-claim of a crashed logical key (§1.3)."""
+    _update(conn, "run_log", "run_id", run_id,
+            {"started_at": started_at, "attempt": attempt, "late": int(late)})
+
+
+def update_run_finish(conn, run_id: int, *, finished_at: str, status: str,
+                      inputs_json: str | None = None,
+                      outputs_json: str | None = None) -> None:
+    """Finish a run; finished keys exit 0 on re-fire."""
+    changes: dict = {"finished_at": finished_at, "status": status}
+    if inputs_json is not None:
+        changes["inputs_json"] = inputs_json
+    if outputs_json is not None:
+        changes["outputs_json"] = outputs_json
+    _update(conn, "run_log", "run_id", run_id, changes)
+
+
+def update_bot_state(conn, *, last_update_id: int) -> None:
+    """Persist offset — caller wraps in the SAME transaction as handle() writes (§5.2)."""
+    _update(conn, "bot_state", "id", 1, {"last_update_id": last_update_id})
+
+
+def update_gate_session(conn, session_id: int, *, step: str, state_json: str,
+                        status: str, updated_at: str) -> None:
+    """Persist resumable Gate progress."""
+    _update(conn, "gate_session", "session_id", session_id,
+            {"step": step, "state_json": state_json, "status": status,
+             "updated_at": updated_at})
+
+
+def update_study_state(conn, *, last_restudied_thesis_id: str,
+                       mental_model_index: int, updated_at: str) -> None:
+    """Advance F.3 rotation pointer."""
+    _update(conn, "study_state", "id", 1,
+            {"last_restudied_thesis_id": last_restudied_thesis_id,
+             "mental_model_index": mental_model_index, "updated_at": updated_at})
+
+
+def retire_trigger(conn, trigger_id: int, *, retired_at: str) -> None:
+    """The sole "trigger" UPDATE: set retired_at (write-once; DB trigger enforces)."""
+    _update(conn, "trigger", "trigger_id", trigger_id, {"retired_at": retired_at})
