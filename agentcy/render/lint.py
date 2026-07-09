@@ -84,12 +84,17 @@ def fallback(r: RenderedOutput, violations: Sequence[LintViolation]) -> Rendered
     """Safe minimal template that PRESERVES ask_id, reply_markup_json, and — for alerts —
     the mandatory verbatim blocks. A decision surface is never stripped (§8)."""
     if r.output_class == "alert":
-        pct = "this month"
+        # Fallback copy is purpose-written, not a shoehorn of the {pct}/{n} template
+        # slots (there is no live price move or day count to substitute here). It keeps
+        # the load-bearing verbatim phrases — "not a price alarm" and "decision by" —
+        # so the safe template still self-cleans under lint (§8).
         body = (
             "Trigger fired — a thesis needs your decision.\n\n"
-            + cm.WHAT_THIS_IS_NOT.format(pct=pct) + "\n\n"
-            + cm.DEADLINE_FRAMING.format(date="the stated deadline", n="the committed window")
-            + "\nOpen the archived alert for the full committed statement."
+            "WHAT THIS IS NOT: not a price alarm. The price is not why you are reading\n"
+            "this and it plays no part in what follows. Cost basis is not shown and will\n"
+            "not be considered.\n\n"
+            "A decision by the committed deadline is required.\n"
+            "Open the archived alert for the full committed statement and the exact date."
         )
     else:
         body = ("This report could not be rendered in full and was replaced with a safe "
