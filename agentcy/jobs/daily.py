@@ -10,13 +10,15 @@ real letter per gap day; the on-time run additionally names the gap (P6.8).
 """
 from __future__ import annotations
 
+import json as _json
 import shutil
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from agentcy import archive, asks, config as config_mod, db, deadman, journal, mirror, register
+from agentcy import archive, asks, config as config_mod, db, deadman, events, journal, mirror, register
 from agentcy.clock import Clock, SystemClock
+from agentcy.events import EventRequest
 from agentcy.journal import EntryIn
 from agentcy.fetch import store, yf
 from agentcy.fetch.yf import FetchFailed
@@ -28,6 +30,8 @@ from agentcy.tg import outbox
 RUN_TYPE = "daily"
 AMS = ZoneInfo("Europe/Amsterdam")
 DISK_FLOOR_BYTES = 2 * 1024**3
+QUIET_WINDOW = timedelta(hours=36)   # events checked since (roughly) the previous daily letter
+LAG_RETRY_DAYS = 7                   # D.3 degradation: retry daily for 7 days
 
 
 def main(*, clock: Clock | None = None, state_dir: Path | None = None) -> int:
@@ -326,11 +330,65 @@ def open_loop_lines(conn, *, as_of: datetime) -> tuple[contexts.OpenLoopLine, ..
     return tuple(head + rest)
 
 
+def _recent_events(conn, *, as_of: datetime, window: timedelta) -> list:
+    out = []
+    for t in monitored_tickers(conn):
+        if t.endswith("=X"):
+            continue
+        for e in db.fetch_events_for(conn, t):
+            if as_of - db.from_iso(e["detected_at"]) <= window:
+                out.append(e)
+    return out
+
+
+def events_line(conn, *, as_of: datetime) -> str | None:
+    """One EVENTS line: quiet outcomes since the previous letter + earnings preview within
+    21 days, always labeled 'calendar estimate' (MA-7 — a preview, never a trigger)."""
+    parts: list[str] = []
+    for e in _recent_events(conn, as_of=as_of, window=QUIET_WINDOW):
+        run = db.fetch_run(conn, "event", f"{e['yf_ticker']}:{e['detected_at']}")
+        if run is None or run["finished_at"] is None or not run["outputs_json"]:
+            continue
+        out = _json.loads(run["outputs_json"])
+        if out.get("quiet") and not out.get("data_lag"):
+            parts.append(f"{e['yf_ticker']} {e['kind']} checked; "
+                         f"{out.get('triggers_pass', '?')} triggers pass; no action needed.")
+    for t in monitored_tickers(conn):
+        if t.endswith("=X"):
+            continue
+        expected = store.next_expected_earnings(conn, t, as_of=as_of)
+        if expected:
+            days = (date.fromisoformat(expected) - as_of.date()).days
+            parts.append(f"{t} earnings expected {expected} ({days} days, calendar estimate) — "
+                         "event check will run automatically on detection.")
+    return " ".join(parts) if parts else None
+
+
+def respool_lagging_events(conn, *, as_of: datetime, state_dir: Path) -> int:
+    """Re-spool events whose check recorded data_lag=true, once per daily run, for 7 days
+    after detection — attributed to the ORIGINAL source (§1.5: retry is degradation
+    behavior, not a source). detected_at of the retry request = now, so its RunLog key
+    never collides with the original (UNIQUE(run_type, scheduled_for))."""
+    n = 0
+    for e in _recent_events(conn, as_of=as_of, window=timedelta(days=LAG_RETRY_DAYS)):
+        run = db.fetch_run(conn, "event", f"{e['yf_ticker']}:{e['detected_at']}")
+        if run is None or not run["outputs_json"]:
+            continue
+        if not _json.loads(run["outputs_json"]).get("data_lag"):
+            continue
+        # statements refreshed since detection? then the lag has cleared — no retry
+        periods = db.fetch_statement_periods(conn, e["yf_ticker"], "income")
+        if any(p["fetched_at"] > e["detected_at"] for p in periods):
+            continue
+        events.spool_write(state_dir, EventRequest(
+            yf_ticker=e["yf_ticker"], source=e["source"], kind=e["kind"],
+            note=f"retry of event {e['event_id']} (post-earnings data lag)",
+            detected_at=db.to_iso(as_of), detected_late=False))
+        n += 1
+    return n
+
+
 # ---- stubs completed by later tasks ------------------------------------------------
-def events_line(conn, *, as_of):                             # P6.7
-    return None
-def respool_lagging_events(conn, *, as_of, state_dir):       # P6.7
-    return 0
 def is_pulse_day(as_of: datetime) -> bool:                   # P6.8 tests this properly
     return as_of.astimezone(AMS).weekday() in (6, 0)         # Sun, Mon
 def build_pulse_context(conn, *, as_of, late):               # P6.8
