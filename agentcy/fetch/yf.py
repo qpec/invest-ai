@@ -184,3 +184,75 @@ def fetch_statements(yf_ticker: str, *, state_dir: Path) -> dict:
         if (_utcnow().date() - newest.date()).days > RECENT_PERIOD_DAYS:
             raise FetchFailed(f"{yf_ticker} {stype}: newest period_end {newest.date()} not recent (>{RECENT_PERIOD_DAYS}d)")
     return frames
+
+
+def _raw_shares_full(yf_ticker: str):
+    return yf.Ticker(yf_ticker).get_shares_full()
+
+
+def fetch_shares_full(yf_ticker: str, *, state_dir: Path) -> pd.Series:
+    """get_shares_full raw series — duplicates included; store dedups last-per-date at read (§7.4)."""
+    configure()
+    series = _paced_call(state_dir, lambda: _raw_shares_full(yf_ticker))
+    if series is None or len(series) == 0:
+        raise FetchFailed(f"{yf_ticker}: empty shares series (§7.3)")
+    return series
+
+
+def _raw_officers(yf_ticker: str) -> list:
+    """The ONE named quoteSummary exception (§7.2): a scoped assetProfile call —
+    never the bare `info` accessor. yfinance 1.5.1's exact scoped accessor is
+    verified at the desk when recording officers_msft.json (MA-6 one-time
+    verification, install-runbook step); any adjustment stays inside this body."""
+    profile = yf.Ticker(yf_ticker).get_asset_profile()
+    return list((profile or {}).get("companyOfficers") or [])
+
+
+def fetch_officers(yf_ticker: str, *, state_dir: Path) -> list[dict]:
+    """B.2 tripwire feed — Saturday batch only, paced like everything else; reduced to
+    {name,title} sorted by name so the fingerprint tracks people/roles, not pay
+    updates. Raises FetchFailed on emptiness; the weekly caller catches (MA-6)."""
+    configure()
+    raw = _paced_call(state_dir, lambda: _raw_officers(yf_ticker))
+    officers = [
+        {"name": str(o.get("name", "")), "title": str(o.get("title", ""))}
+        for o in (raw or [])
+        if o.get("name")
+    ]
+    if not officers:
+        raise FetchFailed(f"{yf_ticker}: empty officers profile (MA-6 — caller degrades)")
+    return sorted(officers, key=lambda o: o["name"])
+
+
+def _raw_calendar(yf_ticker: str):
+    return yf.Ticker(yf_ticker).calendar
+
+
+def fetch_calendar(yf_ticker: str, *, state_dir: Path) -> str | None:
+    """Best-effort expected earnings date (MA-7); None on absence or parse drift —
+    never an error. RateLimited still surfaces (it drives the DEGRADED banner)."""
+    configure()
+    try:
+        cal = _paced_call(state_dir, lambda: _raw_calendar(yf_ticker))
+        dates = (cal or {}).get("Earnings Date") or []
+        if not dates:
+            return None
+        d = min(dates)
+        return d.isoformat()[:10] if hasattr(d, "isoformat") else str(d)[:10]
+    except RateLimited:
+        raise
+    except Exception:
+        return None
+
+
+def _raw_fast_info(yf_ticker: str) -> dict:
+    return dict(yf.Ticker(yf_ticker).fast_info)
+
+
+def fetch_fast_info(yf_ticker: str, *, state_dir: Path) -> dict:
+    """fast_info only — the bare `info` accessor is banned (§7.2)."""
+    configure()
+    info = _paced_call(state_dir, lambda: _raw_fast_info(yf_ticker))
+    if not info:
+        raise FetchFailed(f"{yf_ticker}: empty fast_info (§7.3)")
+    return info
