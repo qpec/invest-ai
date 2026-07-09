@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from agentcy import (archive, asks, cluster, config as config_mod, db, events, mirror,
-                     register, study, triggers)
+from agentcy import (archive, asks, cluster, config as config_mod, db, events, gate,
+                     mirror, register, study, triggers)
 from agentcy.clock import Clock, SystemClock
 from agentcy.events import EventRequest
 from agentcy.fetch import store, yf
@@ -444,5 +444,39 @@ def _returns_frame(conn, positions):
     return pd.DataFrame(frames), weights
 
 
-def housekeeping(conn, *, run_id: int, clock: Clock) -> dict:   # P6.13
-    return {}
+def housekeeping(conn, *, run_id: int, clock: Clock) -> dict:
+    """Tech-arch §6 weekly sweeps. Delegates the three C.1/C.6 sweeps to the gate
+    public API (R8) and adds the belt-over-suspender raw cap-10 overflow expiry.
+    Watchlist expiries log to the RunLog outputs, never the journal (C.1: an idea
+    ignored for 90 days is not a decision). Returns tickers for the letter."""
+    now = clock.now()
+    now_iso = db.to_iso(now)
+
+    def _tickers(item_ids):
+        out = []
+        for iid in item_ids:
+            row = db.fetch_watchlist_item(conn, iid)
+            if row is not None:
+                out.append(row["ticker"])
+        return out
+
+    # 1) 90-day raw expiry (C.1)
+    expired = _tickers(gate.sweep_raw_expiry(conn, as_of=now))
+
+    # 2) raw cap 10 — expire the oldest overflow (belt over the CLI's write-time
+    #    suspender). fetch_watchlist is ordered added_at, item_id (oldest first).
+    raw = db.fetch_watchlist(conn, stage="raw")
+    for item in raw[:-gate.WATCHLIST_RAW_CAP] if len(raw) > gate.WATCHLIST_RAW_CAP else []:
+        db.update_watchlist_stage(conn, item["item_id"], stage="expired",
+                                  stage_changed_at=now_iso)
+        expired.append(item["ticker"])
+
+    # 3) 12-month BUY_READY/WATCH approval lapse (C.6). Lapsing a WATCH item disarms
+    #    its daily fair-entry check structurally: E.4 scans gate_approved_waiting only.
+    lapsed = _tickers(gate.sweep_approval_expiry(conn, as_of=now))
+
+    # 4) 30-day non-execution -> V ask (C.6 / tg-spec §3.10a), idempotent on thesis_ref.
+    v_asks = gate.sweep_nonexecution(conn, as_of=now, clock=clock)
+
+    conn.commit()
+    return {"expired": expired, "lapsed": lapsed, "v_asks": v_asks}

@@ -592,6 +592,11 @@ def fetch_watchlist(conn, *, stage: str | None = None) -> list[Row]:
     return conn.execute(sql + " ORDER BY added_at, item_id", params).fetchall()
 
 
+def fetch_watchlist_item(conn, item_id: int) -> Row | None:
+    return conn.execute(
+        "SELECT * FROM watchlist_item WHERE item_id=?", (item_id,)).fetchone()
+
+
 def fetch_bot_state(conn) -> Row:
     """Seeded singleton, never None."""
     return conn.execute("SELECT * FROM bot_state WHERE id=1").fetchone()
