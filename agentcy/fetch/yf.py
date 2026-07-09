@@ -143,3 +143,44 @@ def fetch_daily_bars(yf_ticker: str, *, state_dir: Path, period: str = "10d") ->
         raise FetchFailed(f"{yf_ticker}: no currency in history metadata")
     out["currency"] = str(currency)
     return out
+
+
+MIN_STATEMENT_ROWS = 8        # plausible-row-count gate (real statements carry dozens)
+RECENT_PERIOD_DAYS = 400      # newest period_end must be younger than this
+PINNED_ROWS = {               # MA-2 + the MA-11 dependents; SBC deliberately unpinned (plan note 4)
+    "income": ("Total Revenue", "EBITDA"),
+    "balance": ("Total Debt", "Cash And Cash Equivalents"),
+    "cashflow": ("Operating Cash Flow", "Capital Expenditure"),
+}
+
+
+def _raw_statements(yf_ticker: str) -> dict:
+    t = yf.Ticker(yf_ticker)
+    return {
+        "income": t.quarterly_income_stmt,
+        "balance": t.quarterly_balance_sheet,
+        "cashflow": t.quarterly_cashflow,
+    }
+
+
+def fetch_statements(yf_ticker: str, *, state_dir: Path) -> dict:
+    """Quarterly income/balance/cashflow; statement sanity (plausible rows, recent
+    period_end, pinned MA-2 rows) before return — a failed sanity check means the
+    archive keeps last-known-good and the caller stamps STALE (§7.3/§7.5)."""
+    configure()
+    frames = _paced_call(state_dir, lambda: _raw_statements(yf_ticker))
+    for stype in ("income", "balance", "cashflow"):
+        frame = frames.get(stype)
+        if frame is None or frame.shape[0] == 0 or frame.shape[1] == 0:
+            raise FetchFailed(
+                f"{yf_ticker} {stype}: empty statements frame — the verified (0,0) silent-failure shape (§7.3)"
+            )
+        if frame.shape[0] < MIN_STATEMENT_ROWS:
+            raise FetchFailed(f"{yf_ticker} {stype}: implausible row count {frame.shape[0]} (<{MIN_STATEMENT_ROWS})")
+        absent = [r for r in PINNED_ROWS[stype] if r not in frame.index]
+        if absent:
+            raise FetchFailed(f"{yf_ticker} {stype}: pinned rows absent: {absent} (MA-2)")
+        newest = max(pd.Timestamp(c) for c in frame.columns)
+        if (_utcnow().date() - newest.date()).days > RECENT_PERIOD_DAYS:
+            raise FetchFailed(f"{yf_ticker} {stype}: newest period_end {newest.date()} not recent (>{RECENT_PERIOD_DAYS}d)")
+    return frames

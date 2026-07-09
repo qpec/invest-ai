@@ -164,3 +164,56 @@ def test_fetch_daily_bars_missing_currency_is_failure(monkeypatch, tmp_path, no_
     _patch_history(monkeypatch, frame, None)
     with pytest.raises(yfd.FetchFailed, match="currency"):
         yfd.fetch_daily_bars("MSFT", state_dir=tmp_path)
+
+
+def _patch_statements(monkeypatch, stmts, now=FIXED_NOW):
+    from agentcy.fetch import yf as yfd
+    monkeypatch.setattr(yfd, "_raw_statements", lambda ticker: stmts)
+    monkeypatch.setattr(yfd, "_utcnow", lambda: now)
+
+
+def test_fetch_statements_healthy_passthrough(monkeypatch, tmp_path, no_sleep, yf_statements):
+    from agentcy.fetch import yf as yfd
+    stmts = yf_statements()
+    _patch_statements(monkeypatch, stmts)
+    out = yfd.fetch_statements("MSFT", state_dir=tmp_path)
+    assert set(out) == {"income", "balance", "cashflow"}
+    assert out["cashflow"].loc["Operating Cash Flow"].iloc[0] == pytest.approx(3.6e10)
+
+
+def test_fetch_statements_0x0_frame_is_failure(monkeypatch, tmp_path, no_sleep, yf_statements, yf_frame):
+    # verified failure mode: missing fundamentals arrive as (0,0) frames with NO exception (§7.3)
+    from agentcy.fetch import yf as yfd
+    stmts = yf_statements()
+    empty, _ = yf_frame("empty_frame_0x0")
+    stmts["balance"] = empty
+    _patch_statements(monkeypatch, stmts)
+    with pytest.raises(yfd.FetchFailed, match="balance"):
+        yfd.fetch_statements("MSFT", state_dir=tmp_path)
+
+
+def test_fetch_statements_missing_pinned_row_is_failure(monkeypatch, tmp_path, no_sleep, yf_statements):
+    from agentcy.fetch import yf as yfd
+    stmts = yf_statements()
+    stmts["income"] = stmts["income"].drop(index="EBITDA")
+    _patch_statements(monkeypatch, stmts)
+    with pytest.raises(yfd.FetchFailed, match="EBITDA"):
+        yfd.fetch_statements("MSFT", state_dir=tmp_path)
+
+
+def test_fetch_statements_implausible_row_count_is_failure(monkeypatch, tmp_path, no_sleep, yf_statements):
+    from agentcy.fetch import yf as yfd
+    stmts = yf_statements()
+    keep = ["Total Revenue", "EBITDA", "Net Income"]           # pinned rows present, but garbled/thin
+    stmts["income"] = stmts["income"].loc[keep]
+    _patch_statements(monkeypatch, stmts)
+    with pytest.raises(yfd.FetchFailed, match="row count"):
+        yfd.fetch_statements("MSFT", state_dir=tmp_path)
+
+
+def test_fetch_statements_stale_period_end_is_failure(monkeypatch, tmp_path, no_sleep, yf_statements):
+    from agentcy.fetch import yf as yfd
+    stmts = yf_statements()
+    _patch_statements(monkeypatch, stmts, now=datetime(2027, 9, 1, tzinfo=timezone.utc))
+    with pytest.raises(yfd.FetchFailed, match="not recent"):
+        yfd.fetch_statements("MSFT", state_dir=tmp_path)
