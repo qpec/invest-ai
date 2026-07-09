@@ -4,13 +4,17 @@ detection appends an event row and writes an atomic spool file; the path-unit-dr
 event job does the actual check (§1.5). run_one lands in P6.12."""
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 
-from agentcy import db, events, mirror
+from agentcy import asks, db, events, mirror, triggers
 from agentcy.clock import Clock
 from agentcy.events import EventRequest
 from agentcy.fetch import store, yf
 from agentcy.fetch.yf import FetchFailed
+from agentcy.jobs import runner
+from agentcy.render import alert as render_alert_mod, contexts
+from agentcy.tg import outbox
 
 RUN_TYPE = "weekly"
 
@@ -86,3 +90,95 @@ def refresh_batch(conn, *, run_id: int, clock: Clock, state_dir: Path) -> dict:
             health.append(f"{t} calendar: fetch failed (preview only, MA-7)")
     conn.commit()
     return {"data_health": health, "spooled": spooled}
+
+
+def run_trigger_tests(conn, *, run_id: int, clock: Clock) -> dict:
+    """D.2 check 2: evaluate every armed weekly-cadence trigger; each FIRE goes through
+    triggers.fire (thesis -> under_review, alert + A-ask). >1 FIRE in one run = a storm:
+    shared storm_key, one bundled message ranked by weight (B.3.5). The bundle is enqueued
+    under alert_key(min alert_id) — alerts retry until delivered."""
+    outcomes = triggers.evaluate_armed(conn, cadence="weekly", as_of=clock.now(), run_id=run_id)
+    fires = [o for o in outcomes if str(o.result) == "FIRE"]
+    fired_ids: list[int] = []
+    if fires:
+        storm_key = (f"storm:{clock.now().date().isoformat()}" if len(fires) > 1 else None)
+        for o in fires:
+            already = [a for a in db.fetch_open_alerts(conn) if a["trigger_id"] == o.trigger_id]
+            if already:                                   # crash re-run guard: never double-alert
+                continue
+            fired_ids.append(triggers.fire(conn, o, clock=clock, run_id=run_id, storm_key=storm_key))
+        if fired_ids:
+            ctx = build_alert_context(conn, fired_ids, as_of=clock.now())
+            r = render_alert_mod.render_alert(ctx)
+            runner.enqueue_rendered(conn, r, base_key=outbox.alert_key(min(fired_ids)),
+                                    kind="alert", run_id=run_id, clock=clock)
+    conn.commit()
+    counts: dict[str, int] = {}
+    for o in outcomes:
+        counts[str(o.result)] = counts.get(str(o.result), 0) + 1
+    return {"fired_alert_ids": fired_ids, "outcome_counts": counts}
+
+
+def build_alert_context(conn, alert_ids: list[int], *, as_of) -> contexts.AlertContext:
+    """G.3 card(s). Owner-quoted fields (committed statement, ten-year excerpt) go verbatim;
+    the renderer places them in owner_spans (lint-exempt, §8)."""
+    snap = db.fetch_latest_snapshot(conn)
+    weights = {p.yf_ticker: p.weight for p in
+               (mirror.advice_positions(conn, snap["snapshot_id"]) if snap else [])}
+    items = []
+    deadline = None
+    for aid in alert_ids:
+        alert = db.fetch_alert(conn, aid)
+        deadline = alert["deadline"]
+        trig = next(t for t in db.fetch_armed_triggers(conn, alert["thesis_id"])
+                    if t["trigger_id"] == alert["trigger_id"])
+        tv = db.fetch_current_thesis_version(conn, alert["thesis_id"])
+        thesis = db.fetch_thesis(conn, alert["thesis_id"])
+        check = db.fetch_latest_trigger_check(conn, trig["trigger_id"])
+        ask = next(a for a in db.fetch_open_asks(conn, kind="A") if a["alert_ref"] == aid)
+        ticker = thesis["ticker"]
+        items.append(contexts.AlertItemContext(
+            ticker=ticker, weight_pct=round(weights.get(ticker, 0.0) * 100, 1),
+            trigger_label=f"T{trig['trigger_id']} ({trig['type']})",
+            committed_statement_owner=trig["statement"],
+            committed_version=trig["introduced_version"], committed_at=tv["created_at"][:10],
+            what_happened=(f"observed {check['observed_value']}" if check and
+                           check["observed_value"] is not None else "see check record"),
+            baseline_note=None, price_move_pct=_price_move_pct(conn, ticker, as_of=as_of),
+            ten_year_excerpt_owner=tv["ten_year_statement"], ask_id=ask["ask_id"]))
+    items.sort(key=lambda i: -i.weight_pct)               # storms ranked by weight (B.3.5)
+    return contexts.AlertContext(deadline_label=f"decision by {deadline[:10]}",
+                                 items=tuple(items), generated_at=as_of)
+
+
+def _price_move_pct(conn, yf_ticker: str, *, as_of) -> str:
+    """~30d move, stated flatly and disowned by the WHAT THIS IS NOT block; 'n/a' on thin data."""
+    rows = db.fetch_v_price(conn, yf_ticker)
+    if len(rows) < 2:
+        return "n/a"
+    closes = [r["close"] for r in rows[-22:]]
+    return f"{(closes[-1] / closes[0] - 1) * 100:+.1f}%"
+
+
+def queue_prompted_questions(conn, *, run_id: int, clock: Clock, cadence: str = "weekly") -> list[str]:
+    """Mint one Q ask per armed prompted trigger of this cadence without an open Q (D.2 check 2 /
+    tg-spec §3.2). The weekly job queues weekly-cadence triggers; the event job passes
+    cadence='event' (R5)."""
+    open_q_refs = {a["trigger_ref"] for a in db.fetch_open_asks(conn, kind="Q")}
+    minted: list[str] = []
+    for trig in db.fetch_armed_triggers(conn):
+        if trig["check_method"] != "prompted" or trig["cadence"] != cadence:
+            continue
+        if trig["trigger_id"] in open_q_refs:
+            continue
+        ask = asks.mint(conn, kind="Q",
+                        prompt=(f"Prompted check — {trig['thesis_id']} — T{trig['trigger_id']}. "
+                                f"Committed question (your words): \"{trig['statement']}\" "
+                                "This is a yes/no you pre-committed to answer. No price is involved."),
+                        options=["yes", "no", "cant"], thesis_ref=trig["thesis_id"],
+                        trigger_ref=trig["trigger_id"],
+                        deadline=db.to_iso(clock.now() + timedelta(days=7)),
+                        run_id=run_id, clock=clock)
+        minted.append(ask.ask_id)
+    conn.commit()
+    return minted
