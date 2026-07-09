@@ -602,3 +602,23 @@ def read_prior_verdict(conn, ticker: str):
     re-added ticker, surfaced verbatim before the Gate re-runs. Delegates to
     register.guard_repitch; returns the journal_entry Row or None."""
     return register.guard_repitch(conn, ticker)
+
+
+WATCHLIST_RAW_CAP = 10
+
+
+class WatchlistFull(Exception):
+    """C.1 — cap 10 raw items, enforced at write; ideas must earn a Gate run or die."""
+
+
+def watchlist_add(conn, *, ticker: str, idea_source: str, one_line_why: str,
+                  clock: Clock) -> int:
+    """C.1 watchlist entry (human-triggered, FR14): cap-10-raw enforced at write."""
+    raw = db.fetch_watchlist(conn, stage="raw")
+    if len(raw) >= WATCHLIST_RAW_CAP:
+        raise WatchlistFull(
+            f"watchlist is full ({WATCHLIST_RAW_CAP} raw items). An idea must earn "
+            "a Gate run or expire before another is added (C.1).")
+    return db.append_watchlist_item(conn, ticker=ticker,
+                                    added_at=db.to_iso(clock.now()),
+                                    idea_source=idea_source, one_line_why=one_line_why)
