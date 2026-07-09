@@ -4,7 +4,7 @@ every dynamic field. `build_status_context` (R2) is the /status glue P7's daemon
 reads last RunLog state + mirror.balance + open asks and reports them, never runs checks."""
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import datetime
 
 from agentcy.render import common as cm
 from agentcy.render.contexts import (DailyContext, HeaderBlock, OpenLoopLine,
@@ -153,13 +153,11 @@ def _status_header(conn, *, as_of: datetime) -> HeaderBlock:
         n_framework=bal.n_framework, n_backfill=bal.n_backfill, n_outside=bal.n_outside)
 
 
-def _next_scheduled_line(*, as_of: datetime) -> str:
-    """Next daily letter after the last due key (runlog.due_keys is the fire calendar)."""
-    from agentcy import runlog
-    due = runlog.due_keys("daily", as_of=as_of)
-    last = date.fromisoformat(due[-1]) if due else as_of.astimezone(runlog.AMS).date()
-    nxt = last + timedelta(days=1)
-    return f"Next scheduled: daily letter {nxt.isoformat()} 07:00 CET."
+def _next_scheduled_line() -> str:
+    """Canonical /status next-scheduled sentence (telegram-interaction-spec §1.2, pinned
+    byte-exact by the status_card golden). The daily letter fires after the US close, so the
+    card names that anchor rather than a computed date."""
+    return "Next scheduled: daily letter after tonight's US close."
 
 
 def build_status_context(conn, *, as_of: datetime) -> StatusContext:
@@ -167,7 +165,7 @@ def build_status_context(conn, *, as_of: datetime) -> StatusContext:
     balance header, and any open decisions — it never runs a check or writes a run_log row."""
     from agentcy import asks, db
     loops = tuple(OpenLoopLine(ask_id=a.ask_id,
-                               label=f"{_OPEN_LOOP_LABEL.get(a.kind, 'decision open')} ({a.ask_id})",
+                               label=_OPEN_LOOP_LABEL.get(a.kind, "decision open"),
                                age_days=(as_of - a.created_at).days)
                   for a in sorted(asks.open_asks(conn), key=lambda a: a.created_at))
     last = db.fetch_last_finished_run(conn)
@@ -184,4 +182,4 @@ def build_status_context(conn, *, as_of: datetime) -> StatusContext:
         header=_status_header(conn, as_of=as_of),
         verdict_line=verdict,
         open_loops=loops,
-        next_scheduled_line=_next_scheduled_line(as_of=as_of))
+        next_scheduled_line=_next_scheduled_line())
