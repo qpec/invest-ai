@@ -88,8 +88,10 @@ def render_daily(ctx: DailyContext) -> RenderedOutput:
         lines.append(f"{ctx.open_items_count} open items; "
                      + ("; ".join(ctx.data_lines) if ctx.data_lines else "data health ✓"))
     else:  # full
-        h1, h2 = _header_block(ctx.header)
-        lines += [h1, h2, "", f"✓ {ctx.verdict_line}"]
+        if ctx.header is not None:            # header injected by the job; absent on catch-up
+            h1, h2 = _header_block(ctx.header)
+            lines += [h1, h2, ""]
+        lines.append(f"✓ {ctx.verdict_line}")
         # open-loop escalations head the actionable region (alert_ignored first, B.3.3)
         for ol in ctx.open_loops:
             lines.append(f"OPEN LOOP [{ol.ask_id}] — {ol.label} ({ol.age_days}d).")
