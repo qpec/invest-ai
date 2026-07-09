@@ -103,3 +103,43 @@ def _paced_call(state_dir: Path, fn):
                 raise RateLimited(f"rate-limited after {attempts} paced attempts (§7.2): {e}") from e
             time.sleep(RATE_LIMIT_BACKOFF[attempt])
     raise AssertionError("unreachable")
+
+
+def _raw_history(yf_ticker: str, period: str):
+    """The one Ticker.history touch. auto_adjust=False so Close AND Adj Close arrive;
+    actions=True so Dividends ride the same bar fetch (BUF-2). Currency comes from
+    history_metadata — no extra request."""
+    t = yf.Ticker(yf_ticker)
+    frame = t.history(period=period, auto_adjust=False, actions=True)
+    meta = getattr(t, "history_metadata", None) or {}
+    return frame, meta.get("currency")
+
+
+def fetch_daily_bars(yf_ticker: str, *, state_dir: Path, period: str = "10d") -> pd.DataFrame:
+    """Ticker.history bars incl. dividends; raises FetchFailed on empty/NaN/non-positive
+    closes (§7.3). FX pairs and ^SP500TR ride this same door. Returns the normalized
+    frame: DatetimeIndex, columns exactly [close, adj_close, dividend, currency]."""
+    configure()
+    frame, currency = _paced_call(state_dir, lambda: _raw_history(yf_ticker, period))
+    if frame is None or len(frame) == 0:
+        raise FetchFailed(f"{yf_ticker}: empty price frame — empty is failure (§7.3)")
+    missing = [c for c in ("Close", "Adj Close") if c not in frame.columns]
+    if missing:
+        raise FetchFailed(f"{yf_ticker}: history frame missing columns {missing}")
+    dividends = frame["Dividends"] if "Dividends" in frame.columns else pd.Series(0.0, index=frame.index)
+    out = pd.DataFrame(
+        {
+            "close": frame["Close"].astype(float),
+            "adj_close": frame["Adj Close"].astype(float),
+            "dividend": dividends.fillna(0.0).astype(float),
+        },
+        index=frame.index,
+    )
+    if out["close"].isna().any() or out["adj_close"].isna().any():
+        raise FetchFailed(f"{yf_ticker}: NaN closes — never write zeros (§7.3)")
+    if (out["close"] <= 0).any() or (out["adj_close"] <= 0).any():
+        raise FetchFailed(f"{yf_ticker}: non-positive closes (§7.3)")
+    if not currency:
+        raise FetchFailed(f"{yf_ticker}: no currency in history metadata")
+    out["currency"] = str(currency)
+    return out
