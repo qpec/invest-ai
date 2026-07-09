@@ -1,10 +1,14 @@
-"""G.1 daily letter + /status card (contract §3.16/§3.17). Pure: DailyContext/StatusContext
-in, RenderedOutput out. Two skins from one render; HTML escapes every dynamic field."""
+"""G.1 daily letter + /status card (contract §3.16/§3.17). Renderers are pure:
+DailyContext/StatusContext in, RenderedOutput out; two skins from one render; HTML escapes
+every dynamic field. `build_status_context` (R2) is the /status glue P7's daemon calls — it
+reads last RunLog state + mirror.balance + open asks and reports them, never runs checks."""
 from __future__ import annotations
 
+from datetime import date, datetime, timedelta
+
 from agentcy.render import common as cm
-from agentcy.render.contexts import (DailyContext, HeaderBlock, OpportunityLine,
-                                     RenderedOutput, StatusContext)
+from agentcy.render.contexts import (DailyContext, HeaderBlock, OpenLoopLine,
+                                     OpportunityLine, RenderedOutput, StatusContext)
 
 _MAX_OPPS = 3   # §2.0: daily caps opportunities at 3 by weight; tail line for the rest
 
@@ -119,3 +123,65 @@ def render_status(ctx: StatusContext) -> RenderedOutput:
     md = "# " + "\n".join(lines)
     ask_id = ctx.open_loops[0].ask_id if ctx.open_loops else None
     return RenderedOutput(telegram_html=html, markdown=md, output_class="status", ask_id=ask_id)
+
+
+# --- /status glue (R2): read-only, reports last RunLog state; never runs a check ---
+
+_OPEN_LOOP_LABEL = {"A": "alert decision open", "Q": "prompted question waiting",
+                    "R": "reconciliation waiting", "F": "re-affirmation waiting",
+                    "V": "verdict follow-up waiting", "N": "note invited"}
+
+
+def _status_header(conn, *, as_of: datetime) -> HeaderBlock:
+    """G.1 header from mirror.balance + latest snapshot + config band (no euro amount)."""
+    from agentcy import config, db, mirror
+    snap = db.fetch_latest_snapshot(conn)
+    age = mirror.snapshot_age(conn, as_of=as_of)
+    age_days = age.days if age else 0
+    snap_line = ("no snapshot yet" if snap is None else
+                 f"{snap['source'].replace('_', ' ')} of {snap['as_of'][:10]}"
+                 f" ({age_days} day{'s' if age_days != 1 else ''} old)")
+    bal = mirror.balance(conn, as_of=as_of)
+    return HeaderBlock(
+        date_label=cm.ams_date_label(as_of),
+        snapshot_line=snap_line,
+        prices_line="fresh (07:00 CET)",
+        cash_pct=bal.cash_pct,
+        cash_band_low=config.get_float(conn, "cash_band_low_pct"),
+        cash_band_high=config.get_float(conn, "cash_band_high_pct"),
+        cash_in_band=bal.cash_in_band,
+        n_framework=bal.n_framework, n_backfill=bal.n_backfill, n_outside=bal.n_outside)
+
+
+def _next_scheduled_line(*, as_of: datetime) -> str:
+    """Next daily letter after the last due key (runlog.due_keys is the fire calendar)."""
+    from agentcy import runlog
+    due = runlog.due_keys("daily", as_of=as_of)
+    last = date.fromisoformat(due[-1]) if due else as_of.astimezone(runlog.AMS).date()
+    nxt = last + timedelta(days=1)
+    return f"Next scheduled: daily letter {nxt.isoformat()} 07:00 CET."
+
+
+def build_status_context(conn, *, as_of: datetime) -> StatusContext:
+    """R2: the /status glue P7's daemon calls. Reports the LAST RunLog state, the current
+    balance header, and any open decisions — it never runs a check or writes a run_log row."""
+    from agentcy import asks, db
+    loops = tuple(OpenLoopLine(ask_id=a.ask_id,
+                               label=f"{_OPEN_LOOP_LABEL.get(a.kind, 'decision open')} ({a.ask_id})",
+                               age_days=(as_of - a.created_at).days)
+                  for a in sorted(asks.open_asks(conn), key=lambda a: a.created_at))
+    last = db.fetch_last_finished_run(conn)
+    degraded = last is not None and last["status"] in ("degraded", "failed")
+    if degraded:
+        verdict = "Checks suspended — market data degraded. Nothing is wrong; I just can't see."
+    elif loops:
+        verdict = (f"{len(loops)} open decision{'s' if len(loops) != 1 else ''} waiting — "
+                   "see below. No new triggers fired.")
+    else:
+        verdict = "All theses intact. No triggers fired. No open decisions."
+    return StatusContext(
+        now_label=cm.ams_datetime_label(as_of),
+        header=_status_header(conn, as_of=as_of),
+        verdict_line=verdict,
+        open_loops=loops,
+        next_scheduled_line=_next_scheduled_line(as_of=as_of))

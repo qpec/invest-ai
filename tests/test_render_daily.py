@@ -1,8 +1,9 @@
 from datetime import datetime, timezone
 
-from agentcy.render.daily import render_daily
+from agentcy.render.daily import render_daily, render_status
 from agentcy.render.lint import lint
-from agentcy.render.contexts import DailyContext, HeaderBlock, OpportunityLine, OpenLoopLine
+from agentcy.render.contexts import (DailyContext, HeaderBlock, OpportunityLine,
+                                     OpenLoopLine, StatusContext)
 
 AS_OF = datetime(2026, 7, 8, 5, 0, tzinfo=timezone.utc)
 
@@ -152,3 +153,29 @@ def test_pause_mode_letter(golden):
     assert "Pause mode active" in r.telegram_html and lint(r) == []
     golden("pause_mode_letter.html.txt", r.telegram_html)
     golden("pause_mode_letter.md.txt", r.markdown)
+
+
+# --- P5.8: /status card ---------------------------------------------------------
+
+
+def _status(open_loops=()):
+    h = HeaderBlock("Tue 8 Jul 2026", "manual export of Sun 6 Jul (2 days old)",
+                    "fresh (07:00 CET)", 8.1, 5.0, 15.0, True, 11, 1, 2)
+    return StatusContext(now_label="Tue 8 Jul 2026, 14:12 CET", header=h,
+        verdict_line="All theses intact. No triggers fired. No open decisions.",
+        open_loops=open_loops,
+        next_scheduled_line="Next scheduled: daily letter after tonight's US close.")
+
+
+def test_status_card_calm(golden):
+    r = render_status(_status())
+    assert r.output_class == "status" and r.ask_id is None
+    assert r.telegram_html.startswith("<b>Status — Tue 8 Jul 2026, 14:12 CET</b>")
+    assert lint(r) == []
+    golden("status_card.html.txt", r.telegram_html)
+    golden("status_card.md.txt", r.markdown)
+
+
+def test_status_with_open_loop_carries_ask_id():
+    r = render_status(_status(open_loops=(OpenLoopLine("A238", "CRWD alert unanswered", 3),)))
+    assert r.ask_id == "A238" and "A238" in r.telegram_html

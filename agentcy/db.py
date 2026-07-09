@@ -555,6 +555,13 @@ def fetch_run(conn, run_type: str, scheduled_for: str) -> Row | None:
         (run_type, scheduled_for)).fetchone()
 
 
+def fetch_last_finished_run(conn) -> Row | None:
+    """Most recently finished run (the /status card reports this state, never runs checks)."""
+    return conn.execute(
+        "SELECT * FROM run_log WHERE finished_at IS NOT NULL"
+        " ORDER BY finished_at DESC, run_id DESC LIMIT 1").fetchone()
+
+
 def fetch_watchlist(conn, *, stage: str | None = None) -> list[Row]:
     sql = "SELECT * FROM watchlist_item"
     params: list = []
