@@ -269,3 +269,84 @@ def test_judgment_no_default_prompts_enumerate():
     step_judgment(state, ask)
     conv_opts = next(opts for p, opts in ask.log if "conviction" in p.lower())
     assert conv_opts == ("high", "medium", "low")
+
+
+# --- P4.6 drafting step -------------------------------------------------------
+
+def _one_trigger(*, type="growth_floor", statement="rev YoY < 10% for 2q",
+                 metric="revenue_yoy", comparator="<", threshold="10",
+                 moat_link="", persistence="2_consecutive_quarters", yes_means=""):
+    # order per _ask_trigger: type, statement, metric, comparator, threshold,
+    #   moat_link, persistence, (yes_means only if type-5)
+    seq = [type, statement, metric, comparator, threshold, moat_link, persistence]
+    if type == "owner_attested_event":
+        seq.append(yes_means)
+    return seq
+
+
+def _drafting_answers(triggers, *, moat_types="switching_costs", moat_evidence="retention >115%",
+                      band_low="25", band_high="35", denom_note="P/owner-FCF"):
+    seq = [moat_types, moat_evidence, band_low, band_high, denom_note, str(len(triggers))]
+    for t in triggers:
+        seq += t
+    return seq
+
+
+def test_drafting_happy_two_triggers_one_moat_linked():
+    from agentcy.gate import step_drafting
+    state = {}
+    triggers = [
+        _one_trigger(moat_link="switching_costs"),                 # moat-linked
+        _one_trigger(type="dilution", statement="shares +3%/12m",
+                     metric="shares_yoy", threshold="3", persistence="ttm"),
+    ]
+    ask = ScriptedAsker(_drafting_answers(triggers))
+    assert step_drafting(state, ask) == "verdict"
+    assert state["moat_types"] == ["switching_costs"]
+    assert state["fair_band_low"] == 25.0
+    assert state["fair_band_high"] == 35.0
+    assert len(state["triggers"]) == 2
+    assert state["triggers"][0]["moat_link"] == "switching_costs"
+
+
+def test_drafting_rejects_count_below_2_and_above_5():
+    from agentcy.gate import step_drafting
+    state = {}
+    t = _one_trigger(moat_link="switching_costs")
+    # count answers: '1' rejected, '6' rejected, then '2' accepted
+    ask = ScriptedAsker(
+        ["switching_costs", "retention >115%", "25", "35", "P/owner-FCF",
+         "1", "6", "2"] + t + t)
+    assert step_drafting(state, ask) == "verdict"
+    assert len(state["triggers"]) == 2
+
+
+def test_drafting_requires_at_least_one_moat_link():
+    from agentcy.gate import step_drafting
+    state = {}
+    # first pass: two triggers, neither moat-linked -> rejected, owner re-drafts
+    # with a moat_link on the second attempt. Simulate by scripting a full re-ask.
+    no_link = _one_trigger(moat_link="")
+    linked = _one_trigger(moat_link="switching_costs")
+    ask = ScriptedAsker(
+        ["switching_costs", "retention >115%", "25", "35", "P/owner-FCF",
+         "2"] + no_link + no_link +                         # first draft: no moat_link
+        ["2"] + linked + no_link)                           # re-draft: one linked
+    assert step_drafting(state, ask) == "verdict"
+    assert any(t["moat_link"] for t in state["triggers"])
+
+
+def test_drafting_type5_captures_yes_means():
+    from agentcy.gate import step_drafting
+    state = {}
+    t5 = _one_trigger(type="owner_attested_event",
+                      statement="Has the founder-CEO departed?",
+                      metric="", comparator="", threshold="",
+                      moat_link="switching_costs",
+                      persistence="single_observation", yes_means="fire")
+    growth = _one_trigger(moat_link="")
+    ask = ScriptedAsker(_drafting_answers([t5, growth]))
+    step_drafting(state, ask)
+    t5row = next(t for t in state["triggers"] if t["type"] == "owner_attested_event")
+    assert t5row["yes_means"] == "fire"
+    assert t5row["check_method"] == "prompted"
