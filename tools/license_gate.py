@@ -35,6 +35,9 @@ ALLOWLIST: frozenset[str] = frozenset({
     # named permissive entries (tech-arch §2.2): Pillow via matplotlib,
     # plus the PSF-derived license family (matplotlib's own).
     "MIT-CMU", "HPND", "Python-2.0",
+    # cffi (MIT-0) + numpy (BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0):
+    # all permissive/public-domain.
+    "MIT-0", "Zlib", "CC0-1.0",  # owner decision 2026-07-09 (permissive; license wall)
 })
 
 # --- SPDX expression evaluation (fix 1) ----------------------------------------
@@ -115,8 +118,21 @@ def spdx_allowed(expr: str, allowlist: frozenset[str] | set[str]) -> bool:
 # The pair is exact: a DIFFERENT non-allowed license on the same name is NOT
 # covered (fail closed). Additions require a new journaled owner decision AND
 # a matching config append -- never a silent edit here.
+# Sentinel used as an EXCEPTIONS value for packages that ship NO license
+# metadata at all (upstream license is known-permissive but unmachine-readable).
+NO_METADATA: str = "<no-metadata>"
+
 EXCEPTIONS: dict[str, str] = {
     "certifi": "MPL-2.0",
+    # peewee ships no License / License-Expression / classifier at all; MIT
+    # upstream. Absent metadata still fails closed for every OTHER package.
+    "peewee": NO_METADATA,  # owner decision 2026-07-09 (permissive; license wall)
+}
+
+# Human-readable reason per named exception (audit trail; owner sign-off).
+EXCEPTION_REASONS: dict[str, str] = {
+    "certifi": "MPL-2.0; owner sign-off S1 2026-07-09",
+    "peewee": "MIT upstream; ships no license metadata; owner decision 2026-07-09",
 }
 
 # First-party: the wall governs third-party code, not this repo.
@@ -170,6 +186,48 @@ CLASSIFIER_MAP: dict[str, str] = {
 
 _GPL_RE = re.compile(r"\b[AL]?GPL", re.IGNORECASE)
 
+# Recognized SPDX license identifiers (for deciding whether a free-text License
+# field is *itself* a machine-readable SPDX id/expression vs. loose prose like
+# "Apache" or "Dual License"). This is the recognition set, NOT the allowlist:
+# GPL/MPL ids are recognized here so a GPL free-text expression still resolves
+# and then FAILS on the allowlist -- it must not be waved through as prose.
+_KNOWN_SPDX_IDS: frozenset[str] = frozenset(
+    {i.lower() for i in ALLOWLIST}
+    | {v.lower() for v in CLASSIFIER_MAP.values()}
+    | {"mpl-2.0", "gpl-2.0-only", "gpl-3.0-only", "lgpl-2.0-only",
+       "lgpl-3.0-only", "lgpl-3.0-or-later"}
+)
+
+
+def _is_spdx_expression(text: str) -> bool:
+    """True if *every* license atom in `text` is a recognized SPDX id.
+
+    A free-text License field like "Apache" or "Dual License" is NOT a valid
+    SPDX expression (its atoms are unknown) and must fall through to the
+    classifier resolution -- but "MIT OR GPL-2.0-only" IS, and gets evaluated
+    (then judged against the allowlist)."""
+    tokens = _TOKEN_RE.findall(text)
+    if not tokens:
+        return False
+    saw_atom = False
+    expect_atom = True
+    for t in tokens:
+        up = t.upper()
+        if t in ("(", ")"):
+            continue
+        if up in ("AND", "OR", "WITH"):
+            expect_atom = True
+            continue
+        # a license atom
+        if not expect_atom:
+            # two atoms with no operator between them -> not a valid expression
+            return False
+        if t.lower() not in _KNOWN_SPDX_IDS:
+            return False
+        saw_atom = True
+        expect_atom = False
+    return saw_atom
+
 
 def _norm(name: str) -> str:
     """PEP 503 name normalization (case + -_. equivalence)."""
@@ -195,19 +253,43 @@ class AuditRow:
     verdict: str
 
 
+# Sentinel SPDX atom that is deliberately NOT in the allowlist nor recognized:
+# injected for any `License ::` classifier we cannot map, so an unknown-license
+# classifier fails the AND-combined classifier expression (fail closed).
+_UNMAPPED_CLASSIFIER: str = "UNKNOWN-CLASSIFIER-LICENSE"
+
+
 def resolve_expression(d: DistInfo) -> tuple[str | None, str]:
-    """(SPDX expression to evaluate, metadata source) -- or (None, 'missing')."""
+    """(SPDX expression to evaluate, metadata source) -- or (None, 'missing').
+
+    Resolution order (owner decision 2026-07-09 (permissive; license wall)):
+      (a) a present License-Expression is authoritative -- evaluate it;
+      (b) elif the free-text License field is *itself* a valid SPDX id/expression
+          (or a known friendly variant via LICENSE_TEXT_MAP) -- evaluate that;
+      (c) elif OSI `License ::` classifiers are present -- AND-combine every one
+          (unmapped classifiers become an unknown atom so they fail closed);
+      (d) else no machine-readable license -> (None, 'missing') -> fail closed.
+
+    A free-text License that is NOT valid SPDX (e.g. "Apache", "Dual License")
+    is NOT taken verbatim while classifiers exist -- it falls through to (c)."""
+    # (a) License-Expression is authoritative.
     if d.license_expression and d.license_expression.strip():
         return d.license_expression.strip(), "License-Expression"
+    # (b) free-text License, but only if it is machine-readable SPDX.
     text = (d.license_text or "").strip()
     if text and "\n" not in text and len(text) <= 100:
         mapped = LICENSE_TEXT_MAP.get(text.lower())
         if mapped:
             return mapped, "License"
-        return text, "License(raw)"  # may itself be SPDX ('MIT OR GPL-2.0-only')
-    ids = [CLASSIFIER_MAP[c] for c in d.classifiers if c in CLASSIFIER_MAP]
-    if ids:
+        if _is_spdx_expression(text):  # e.g. 'MIT OR GPL-2.0-only'
+            return text, "License(raw)"
+        # else: loose prose ("Apache", "Dual License") -> defer to classifiers.
+    # (c) OSI classifiers: every `License ::` classifier must map to allowed.
+    license_classifiers = [c for c in d.classifiers if c.startswith("License ::")]
+    if license_classifiers:
+        ids = [CLASSIFIER_MAP.get(c, _UNMAPPED_CLASSIFIER) for c in license_classifiers]
         return " AND ".join(dict.fromkeys(ids)), "Classifier"
+    # (d) nothing machine-readable.
     return None, "missing"
 
 
@@ -227,7 +309,15 @@ def audit(dists: Iterable[DistInfo]) -> list[AuditRow]:
             continue
         expr, source = resolve_expression(d)
         if expr is None:
-            rows.append(AuditRow(d.name, d.version, "(no license metadata)", source, "VIOLATION"))
+            # Absent metadata fails closed -- UNLESS the package is a named
+            # exception registered for exactly the no-metadata case (peewee).
+            # owner decision 2026-07-09 (permissive; license wall)
+            if EXCEPTIONS.get(_norm(d.name)) == NO_METADATA:
+                rows.append(AuditRow(d.name, d.version, "(no license metadata)",
+                                     source, "EXCEPTION (journaled S1)"))
+            else:
+                rows.append(AuditRow(d.name, d.version, "(no license metadata)",
+                                     source, "VIOLATION"))
             continue
         if _allowed(expr):
             verdict = "OK"
