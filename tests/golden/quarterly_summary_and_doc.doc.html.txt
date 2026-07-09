@@ -1,0 +1,35 @@
+# Quarterly honesty report — Q2 2026
+
+## 1. The honest question
+Portfolio (EUR) vs S&amp;P 500 TR (EUR): since inception +14.2% vs +11.8%; trailing 12m +9.1% vs +10.4%; this quarter +2.1% vs +1.9% (do not extrapolate 13 weeks).
+Caveat: Flows approximated from owner-confirmed deposits.
+Caveat: Unpriced weight 1.2%.
+Caveat: quantstats figures are indicative.
+
+## 2. The honest answer
+Since inception the process is ahead of the index; the trailing year is behind, and one quarter proves nothing.
+The 10-year answer is the real one.
+
+## 3. Drawdown context
+Mar trough coincided with the DDOG on-sale line you saw.
+
+## 4. Process review
+Followed process: 82% · override hit-rate 1/3 · no-action ratio 88%.
+Followed &amp; good: JE-0042 DDOG buy — thesis intact.
+Deviated &amp; bad: JE-0051 sold on a price scare.
+Alert-ignored ledger: A210 — CRWD, resolved late.
+
+## 5. Framework audit
+2 passed, 1 watch, 3 rejected
+DDOG T1 loosened; headroom 4.2 pts.
+cash_band_high 15% (unchanged).
+
+## 6. Records appendix (for the accountant, not for decisions — the one place cost basis is printed)
+```
+Ticker  Cost basis (EUR)  Realized gain (EUR)  Trade-date FX
+DDOG    30,000            0                    USD@0.92     
+```
+
+## 7. Verdict
+Process intact; keep judging process, not price.
+If trailing-36m ever shows the index persistently ahead of a clean process, the honest conclusion changes to indexing — that is what this report exists to detect.
