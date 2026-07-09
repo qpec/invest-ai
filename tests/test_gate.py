@@ -764,3 +764,84 @@ def test_mark_activated_moves_waiting_to_activated(tmp_db, fixed_clock):
                                        thesis_id="TH-VEEV-001", clock=fixed_clock)
     gate.mark_activated(tmp_db, "VEEV", clock=fixed_clock)
     assert db.fetch_watchlist(tmp_db)[0]["stage"] == "activated"
+
+
+# --- P4.15 weekly sweeps ------------------------------------------------------
+
+from datetime import timedelta
+
+
+def _days_ago(base, n):
+    return (base - timedelta(days=n)).isoformat().replace("+00:00", "Z")
+
+
+def test_sweep_raw_expiry_expires_over_90_days(tmp_db, fixed_clock):
+    from agentcy import gate
+    now = fixed_clock.now()
+    fresh = db.append_watchlist_item(tmp_db, ticker="FRESH", added_at=_days_ago(now, 10),
+                                     idea_source="reading", one_line_why="w")
+    stale = db.append_watchlist_item(tmp_db, ticker="STALE", added_at=_days_ago(now, 91),
+                                     idea_source="reading", one_line_why="w")
+    expired = gate.sweep_raw_expiry(tmp_db, as_of=now)
+    assert expired == [stale]
+    stages = {r["ticker"]: r["stage"] for r in db.fetch_watchlist(tmp_db)}
+    assert stages["STALE"] == "expired"
+    assert stages["FRESH"] == "raw"
+
+
+def test_sweep_approval_expiry_lapses_over_12_months(tmp_db, fixed_clock):
+    from agentcy import gate
+    now = fixed_clock.now()
+    _seed_thesis(tmp_db, thesis_id="TH-OLD-001", ticker="OLD")
+    item = db.append_watchlist_item(tmp_db, ticker="OLD", added_at=_days_ago(now, 400),
+                                    idea_source="scout_screen", one_line_why="w")
+    db.update_watchlist_stage(tmp_db, item, stage="gate_approved_waiting",
+                              stage_changed_at=_days_ago(now, 366),
+                              thesis_ref="TH-OLD-001")
+    lapsed = gate.sweep_approval_expiry(tmp_db, as_of=now)
+    assert lapsed == [item]
+    assert db.fetch_watchlist(tmp_db)[0]["stage"] == "lapsed"   # WATCH check disarmed by stage
+
+
+def test_sweep_approval_expiry_leaves_fresh_approval(tmp_db, fixed_clock):
+    from agentcy import gate
+    now = fixed_clock.now()
+    _seed_thesis(tmp_db, thesis_id="TH-NEW-001", ticker="NEW")
+    item = db.append_watchlist_item(tmp_db, ticker="NEW", added_at=_days_ago(now, 100),
+                                    idea_source="scout_screen", one_line_why="w")
+    db.update_watchlist_stage(tmp_db, item, stage="buy_ready_waiting",
+                              stage_changed_at=_days_ago(now, 100),
+                              thesis_ref="TH-NEW-001")
+    assert gate.sweep_approval_expiry(tmp_db, as_of=now) == []
+    assert db.fetch_watchlist(tmp_db)[0]["stage"] == "buy_ready_waiting"
+
+
+def test_sweep_nonexecution_mints_v_ask_at_30_days(tmp_db, fixed_clock):
+    from agentcy import gate, asks
+    now = fixed_clock.now()
+    _seed_thesis(tmp_db, thesis_id="TH-WAIT-001", ticker="WAIT")
+    item = db.append_watchlist_item(tmp_db, ticker="WAIT", added_at=_days_ago(now, 40),
+                                    idea_source="scout_screen", one_line_why="w")
+    db.update_watchlist_stage(tmp_db, item, stage="buy_ready_waiting",
+                              stage_changed_at=_days_ago(now, 31),
+                              thesis_ref="TH-WAIT-001")
+    minted = gate.sweep_nonexecution(tmp_db, as_of=now, clock=fixed_clock)
+    assert len(minted) == 1
+    v_asks = asks.open_asks(tmp_db, kind="V")
+    assert len(v_asks) == 1
+    assert v_asks[0].thesis_ref == "TH-WAIT-001"
+
+
+def test_sweep_nonexecution_idempotent_no_duplicate_ask(tmp_db, fixed_clock):
+    from agentcy import gate, asks
+    now = fixed_clock.now()
+    _seed_thesis(tmp_db, thesis_id="TH-WAIT-001", ticker="WAIT")
+    item = db.append_watchlist_item(tmp_db, ticker="WAIT", added_at=_days_ago(now, 40),
+                                    idea_source="scout_screen", one_line_why="w")
+    db.update_watchlist_stage(tmp_db, item, stage="buy_ready_waiting",
+                              stage_changed_at=_days_ago(now, 31),
+                              thesis_ref="TH-WAIT-001")
+    gate.sweep_nonexecution(tmp_db, as_of=now, clock=fixed_clock)
+    second = gate.sweep_nonexecution(tmp_db, as_of=now, clock=fixed_clock)
+    assert second == []                                 # no second V-ask for the same item
+    assert len(asks.open_asks(tmp_db, kind="V")) == 1

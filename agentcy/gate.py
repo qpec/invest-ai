@@ -664,3 +664,75 @@ def mark_activated(conn, ticker: str, *, clock: Clock) -> None:
         db.update_watchlist_stage(conn, r["item_id"], stage="activated",
                                   stage_changed_at=db.to_iso(clock.now()),
                                   thesis_ref=r["thesis_ref"])
+
+
+# --- weekly sweeps (C.1 / C.6, called by the weekly job P6) -------------------
+
+from agentcy import asks
+
+RAW_EXPIRY_DAYS = 90
+APPROVAL_EXPIRY_DAYS = 365
+NONEXECUTION_DAYS = 30
+
+
+def _age_days(iso_ts: str, as_of) -> float:
+    return (as_of - db.from_iso(iso_ts)).total_seconds() / 86400.0
+
+
+def sweep_raw_expiry(conn, *, as_of) -> list[int]:
+    """C.1 - raw items older than 90 days -> 'expired' (RunLog, not journaled: an
+    idea ignored for 90 days is not a decision). Returns expired item_ids."""
+    out = []
+    for r in db.fetch_watchlist(conn, stage="raw"):
+        if _age_days(r["added_at"], as_of) >= RAW_EXPIRY_DAYS:
+            db.update_watchlist_stage(conn, r["item_id"], stage="expired",
+                                      stage_changed_at=db.to_iso(as_of))
+            out.append(r["item_id"])
+    return out
+
+
+def sweep_approval_expiry(conn, *, as_of) -> list[int]:
+    """C.6 - BUY_READY/WATCH approvals lapse after 12 months (a stale thesis is not
+    a thesis). Lapsing a gate_approved_waiting item disarms its daily fair-entry
+    check by moving it off the armed stage. Returns lapsed item_ids."""
+    out = []
+    for stage in ("gate_approved_waiting", "buy_ready_waiting"):
+        for r in db.fetch_watchlist(conn, stage=stage):
+            if _age_days(r["stage_changed_at"], as_of) >= APPROVAL_EXPIRY_DAYS:
+                db.update_watchlist_stage(conn, r["item_id"], stage="lapsed",
+                                          stage_changed_at=db.to_iso(as_of),
+                                          thesis_ref=r["thesis_ref"])
+                out.append(r["item_id"])
+    return out
+
+
+def sweep_nonexecution(conn, *, as_of, clock: Clock) -> list[str]:
+    """C.6 - a buy_ready_waiting item >=30 days old with no matching position mints
+    a V-ask (journal advice_rejected / move to WATCH). Idempotent: skips items that
+    already have an open V-ask. Returns minted ask_ids."""
+    held = _held_tickers(conn)
+    open_v = {a.thesis_ref for a in asks.open_asks(conn, kind="V")}
+    minted = []
+    for r in db.fetch_watchlist(conn, stage="buy_ready_waiting"):
+        if r["ticker"] in held:
+            continue
+        if _age_days(r["stage_changed_at"], as_of) < NONEXECUTION_DAYS:
+            continue
+        if r["thesis_ref"] in open_v:
+            continue
+        ask = asks.mint(
+            conn, kind="V",
+            prompt=(f"{r['ticker']}: BUY_READY verdict is >=30 days old with no "
+                    "matching position. Journal it as advice_rejected, or move it "
+                    "to WATCH (fair-entry check arms)?"),
+            options=("reject", "watch"), expects_freetext=False,
+            thesis_ref=r["thesis_ref"], clock=clock)
+        minted.append(ask.ask_id)
+    return minted
+
+
+def _held_tickers(conn) -> set[str]:
+    snap = db.fetch_latest_snapshot(conn)
+    if snap is None:
+        return set()
+    return {p.symbol for p in mirror.advice_positions(conn, snap["snapshot_id"])}
