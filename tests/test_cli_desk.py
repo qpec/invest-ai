@@ -200,3 +200,35 @@ def test_snapshot_enter_reads_stdin_paste(tmp_db, fixed_clock, monkeypatch, caps
     monkeypatch.setattr(cli, "_mirror", lambda: fake)
     assert cli.main(["snapshot", "enter"]) == 0
     assert "everything reconciles" in capsys.readouterr().out.lower()
+
+
+# --- P8.7 config set + absence start/end (journaled through the one door, D.6/§9) ---
+
+def test_config_set_journals_via_config_module(tmp_db, fixed_clock, monkeypatch):
+    from agentcy import cli, config
+    monkeypatch.setattr(cli, "_open", lambda: tmp_db)
+    monkeypatch.setattr(cli, "_clock", lambda: fixed_clock)
+    assert cli.main(["config", "set", "cash_band_low_pct", "6", "--reason", "trim cash floor"]) == 0
+    assert config.get(tmp_db, "cash_band_low_pct") == "6"
+
+
+def test_absence_start_open_ended_then_end(tmp_db, fixed_clock, monkeypatch):
+    from agentcy import cli, clock as clockmod, db
+    monkeypatch.setattr(cli, "_open", lambda: tmp_db)
+    monkeypatch.setattr(cli, "_clock", lambda: fixed_clock)
+    assert cli.main(["absence", "start"]) == 0
+    assert clockmod.is_paused(tmp_db, fixed_clock.now()) is True
+    events = db.fetch_absence_events(tmp_db)
+    assert events[-1]["kind"] == "on" and events[-1]["planned_end"] is None
+    # end
+    assert cli.main(["absence", "end"]) == 0
+    assert db.fetch_absence_events(tmp_db)[-1]["kind"] == "off"
+
+
+def test_absence_start_with_until(tmp_db, fixed_clock, monkeypatch):
+    from agentcy import cli, db
+    monkeypatch.setattr(cli, "_open", lambda: tmp_db)
+    monkeypatch.setattr(cli, "_clock", lambda: fixed_clock)
+    assert cli.main(["absence", "start", "--until", "2026-07-20"]) == 0
+    ev = db.fetch_absence_events(tmp_db)[-1]
+    assert ev["kind"] == "on" and ev["planned_end"].startswith("2026-07-20")

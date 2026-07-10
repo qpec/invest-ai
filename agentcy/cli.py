@@ -289,6 +289,38 @@ def _cmd_snapshot(args) -> int:
     return 0
 
 
+def _cmd_config(args) -> int:
+    """agentcy config set <key> <value> --reason (§9): journaled operational config.
+    config.set is one transaction (journal-entry-first, then config append) inside the
+    config module — the handler never touches the journal directly."""
+    from agentcy import config
+    conn = _open()
+    config.set(conn, args.key, args.value, reason=args.reason, actor="owner", clock=_clock())
+    print(f"config {args.key} = {args.value} (journaled)")
+    return 0
+
+
+def _cmd_absence(args) -> int:
+    """agentcy absence start [--until]/end (D.6). Pause/resume flow through the shared
+    absence writer (R3) so the desk and the bot write the on/off stream identically:
+    journal-FK first, then the FK-referencing absence_event row. Windows are derived at
+    read by clock.py; nothing here mutates history."""
+    from agentcy import absence
+    conn = _open()
+    clock = _clock()
+    if args.absence_cmd == "start":
+        planned_end = f"{args.until}T00:00:00Z" if args.until else None
+        absence.pause(conn, planned_end=planned_end,
+                      reason="Pause on (D.6): counters freeze; alerts still deliver.",
+                      clock=clock)
+        print("Absence started. Deadlines and skip counters freeze; alerts still deliver.")
+    else:
+        absence.resume(conn, reason="Pause off (D.6): counters live again.", clock=clock)
+        print("Absence ended. Frozen counters are live again.")
+    conn.commit()
+    return 0
+
+
 def _archive_dir():
     """§8: the archive lives at <state_dir>/archive — derived, never hardcoded."""
     from agentcy import db
@@ -303,6 +335,8 @@ _HANDLERS["scout"] = _cmd_scout
 _HANDLERS["gate"] = _cmd_gate
 _HANDLERS["watchlist"] = _cmd_watchlist
 _HANDLERS["snapshot"] = _cmd_snapshot
+_HANDLERS["config"] = _cmd_config
+_HANDLERS["absence"] = _cmd_absence
 
 
 def main(argv: Sequence[str] | None = None) -> int:
