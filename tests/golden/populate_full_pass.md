@@ -1,0 +1,1 @@
+Populator: universe cached - 2 names cached, 1 skipped (delisted or data-thin). First full pass complete.
