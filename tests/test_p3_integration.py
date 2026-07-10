@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from agentcy import asks, db, journal, register, runlog, triggers
+from agentcy import asks, db, register, runlog, triggers
 from agentcy.fetch import store
 
 AS_OF = datetime(2026, 7, 8, 5, 0, tzinfo=timezone.utc)
@@ -48,23 +48,29 @@ def test_fire_alert_ask_answer_resolve(tmp_db, fixed_clock, monkeypatch, stamped
     assert db.fetch_current_thesis_status(tmp_db, tid)["status"] == "under_review"
     [a_ask] = db.fetch_asks_for(tmp_db, kind="A", trigger_ref=fired[0].trigger_id)
 
-    # 3) owner refutes -> journal trigger_resolution[refuted], thesis back to intact, resolve alert
+    # 3) owner refutes -> drive the PRODUCTION resolution entry point only (asks.answer accepts
+    #    the decision, asks.apply_consequence is the shared B.3 dispatcher BOTH the daemon and
+    #    the CLI delegate to). No hand-stitched journal/register/alert calls here: the dispatcher
+    #    itself must journal trigger_resolution[refuted], return the thesis to intact, and resolve
+    #    the alert. If that wiring regresses, THIS test fails.
     out = asks.answer(tmp_db, a_ask["ask_id"], choice="refute", text="one-off billing timing",
                       clock=fixed_clock)
     assert out.consequence == "alert.refute"
-    eid = journal.append(tmp_db, journal.EntryIn(decision_type="trigger_resolution",
-                         decision_subtype="refuted", ticker="CRWD", thesis_ref=f"{tid}@1",
-                         reasoning_at_the_moment="billing timing; moat intact",
-                         ask_ref=a_ask["ask_id"], actor="owner"), clock=fixed_clock)
-    register.transition(tmp_db, tid, "intact", cause="refuted", cause_ref=a_ask["ask_id"],
-                        clock=fixed_clock)
-    db.update_alert_resolution(tmp_db, alert_id, status="refuted",
-                               resolved_at=db.to_iso(fixed_clock.now()),
-                               resolution_journal_ref=eid)
+    asks.apply_consequence(tmp_db, out, clock=fixed_clock,
+                           evidence="billing timing; moat intact", run_id=run_id)
 
+    # thesis back to intact, alert resolved as refuted, no open alerts — all from the dispatcher:
     assert db.fetch_current_thesis_status(tmp_db, tid)["status"] == "intact"
-    assert db.fetch_alert(tmp_db, alert_id)["status"] == "refuted"
+    resolved = db.fetch_alert(tmp_db, alert_id)
+    assert resolved["status"] == "refuted"
     assert db.fetch_open_alerts(tmp_db) == []
+
+    # global invariant 2: the owner decision produced a JournalEntry (written by the dispatcher,
+    # carrying the verbatim evidence), and it is the alert's resolution reference.
+    je = db.fetch_journal_entry(tmp_db, resolved["resolution_journal_ref"])
+    assert je["decision_type"] == "trigger_resolution" and je["decision_subtype"] == "refuted"
+    assert je["ask_ref"] == a_ask["ask_id"]
+    assert "billing timing; moat intact" in je["reasoning_at_the_moment"]
 
 
 def test_studycontext_reexport_is_performance_free():

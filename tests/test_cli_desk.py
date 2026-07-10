@@ -180,26 +180,34 @@ def test_snapshot_import_reads_csv_and_prints_deltas(tmp_path, tmp_db, fixed_clo
     csv = tmp_path / "export.csv"
     csv.write_text("symbol,qty\nMSFT,40\n", encoding="utf-8")
     Delta = types.SimpleNamespace  # stand-in for mirror.Delta shape
+    deltas = [Delta(kind="appeared", symbol="MSFT", detail="12 sh")]
+    minted = []
     fake = types.SimpleNamespace(
         parse_etoro_csv=lambda text: ("SNAP", text),
-        ingest_snapshot=lambda conn, snap, *, clock: (7, [Delta(kind="appeared", symbol="MSFT", detail="12 sh")]),
+        ingest_snapshot=lambda conn, snap, *, clock: (7, deltas),
+        mint_reconciliation_asks=lambda conn, sid, ds, *, clock: minted.append((sid, ds)),
     )
     monkeypatch.setattr(cli, "_mirror", lambda: fake)
     assert cli.main(["snapshot", "import", str(csv)]) == 0
     out = capsys.readouterr().out
     assert "snapshot 7" in out and "appeared" in out and "MSFT" in out
+    # FIX.2: the desk mints R-asks from the same producer as the bot (E.1/§3.4).
+    assert minted == [(7, deltas)]
 
 
 def test_snapshot_enter_reads_stdin_paste(tmp_db, fixed_clock, monkeypatch, capsys):
     cli = _wire(monkeypatch, tmp_db, fixed_clock)
     monkeypatch.setattr("sys.stdin", types.SimpleNamespace(read=lambda: "MSFT 40\n"))
+    minted = []
     fake = types.SimpleNamespace(
         parse_manual_text=lambda text: ("SNAP", text),
         ingest_snapshot=lambda conn, snap, *, clock: (8, []),
+        mint_reconciliation_asks=lambda conn, sid, ds, *, clock: minted.append((sid, ds)),
     )
     monkeypatch.setattr(cli, "_mirror", lambda: fake)
     assert cli.main(["snapshot", "enter"]) == 0
     assert "everything reconciles" in capsys.readouterr().out.lower()
+    assert minted == [(8, [])]  # producer still called on a clean snapshot (no deltas)
 
 
 # --- P8.7 config set + absence start/end (journaled through the one door, D.6/§9) ---
@@ -253,7 +261,8 @@ def test_ask_list_and_answer(tmp_db, fixed_clock, monkeypatch, capsys):
     fake = types.SimpleNamespace(
         open_asks=lambda conn, kind=None: [ask_obj],
         get=lambda conn, aid: ask_obj,
-        answer=lambda conn, aid, *, choice=None, text=None, clock, tg_message_id=None: outcome)
+        answer=lambda conn, aid, *, choice=None, text=None, clock, tg_message_id=None: outcome,
+        apply_consequence=lambda conn, oc, *, clock, evidence=None, run_id=None: None)
     monkeypatch.setattr(cli, "_asks", lambda: fake)
     assert cli.main(["ask", "list"]) == 0
     assert "A238" in capsys.readouterr().out

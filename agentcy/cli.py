@@ -268,17 +268,21 @@ def _cmd_watchlist(args) -> int:
 
 def _cmd_snapshot(args) -> int:
     """agentcy snapshot import <csv> / enter (E.1). Parse via the P3 adapter, ingest,
-    then surface the reconciliation deltas. The handler stops at surfacing — it does NOT
-    mint R asks (the §3.9 ingest_snapshot contract puts 'caller mints one R ask per Delta'
-    on the bot/asks layer); at the desk the deltas point the owner to `ask`/bot follow-up."""
+    then mint one reconciliation R-ask per delta (the §3.9 ingest_snapshot contract:
+    'caller mints one R ask per Delta') so the D.5 reconciliation loop has a desk producer
+    identical to the bot's. The snapshot is accepted append-only regardless — the deltas
+    are open loops (`ask list`/bot answerable), they do not block ingest."""
     conn = _open()
     m = _mirror()
+    clock = _clock()
     if args.snap_cmd == "import":
         snap = m.parse_etoro_csv(Path(args.csv).read_text(encoding="utf-8"))
     else:  # enter: paste on stdin
         print("Paste positions, then EOF (Ctrl-D):", file=sys.stderr)
         snap = m.parse_manual_text(sys.stdin.read())
-    snapshot_id, deltas = m.ingest_snapshot(conn, snap, clock=_clock())
+    snapshot_id, deltas = m.ingest_snapshot(conn, snap, clock=clock)
+    m.mint_reconciliation_asks(conn, snapshot_id, deltas, clock=clock)
+    conn.commit()
     if not deltas:
         print(f"snapshot {snapshot_id} accepted — everything reconciles.")
         return 0
@@ -447,11 +451,20 @@ def _cmd_ask(args) -> int:
         choice = _prompt("choice", choices=tuple(ask.options))
     elif ask.expects_freetext:
         text = _prompt("answer")
-    outcome = ak.answer(conn, args.ask_id, choice=choice, text=text, clock=_clock())
-    conn.commit()
+    # An A-ask refute requires written evidence at the desk too (B.3.2); collect it and
+    # bind it to the resolution so the dispatcher journals it verbatim.
+    evidence = None
+    if choice == "refute" and ask.kind == "A":
+        evidence = _prompt("evidence")
+        text = evidence
+    clock = _clock()
+    outcome = ak.answer(conn, args.ask_id, choice=choice, text=text, clock=clock)
     if outcome.already_recorded:
         print("already recorded")
-    print(outcome.consequence)
+    # Domain consequence (B.3, §3.10a): journal + transition + resolve + advise (invariant 2).
+    note = ak.apply_consequence(conn, outcome, clock=clock, evidence=evidence)
+    conn.commit()
+    print(note or outcome.consequence)
     return 0
 
 

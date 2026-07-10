@@ -386,6 +386,14 @@ def fetch_snapshot(conn, snapshot_id: int) -> Row | None:
         "SELECT * FROM snapshot WHERE snapshot_id=?", (snapshot_id,)).fetchone()
 
 
+def fetch_recent_snapshots(conn, limit: int) -> list[Row]:
+    """The newest `limit` snapshots, newest first (E.1 reconciliation reads the last two to
+    recover the cash delta for an MA-12 external-flow confirmation)."""
+    return conn.execute(
+        "SELECT * FROM snapshot ORDER BY as_of DESC, snapshot_id DESC LIMIT ?",
+        (limit,)).fetchall()
+
+
 def fetch_snapshots_between(conn, start: str, end: str) -> list[Row]:
     """Snapshot rows with start <= as_of <= end, oldest first (quarterly return series)."""
     return conn.execute(
@@ -721,9 +729,12 @@ def update_watchlist_stage(conn, item_id: int, *, stage: str, stage_changed_at: 
 
 def update_run_start(conn, run_id: int, *, started_at: str, attempt: int,
                      late: bool) -> None:
-    """Sweep re-claim of a crashed logical key (§1.3)."""
+    """Sweep re-claim of a crashed logical key (§1.3): a fresh attempt, so clear any FAILED
+    finish stamp (a never-finished key already carries NULL — this is a no-op there). The
+    re-run's update_run_finish restamps finished_at/status on success (FIX.3)."""
     _update(conn, "run_log", "run_id", run_id,
-            {"started_at": started_at, "attempt": attempt, "late": int(late)})
+            {"started_at": started_at, "attempt": attempt, "late": int(late),
+             "finished_at": None, "status": None})
 
 
 def update_run_finish(conn, run_id: int, *, finished_at: str, status: str,
