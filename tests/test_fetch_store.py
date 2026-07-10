@@ -314,3 +314,33 @@ def test_denominator_per_share_none_when_no_shares(tmp_db, yf_statements):
     store.store_statements(tmp_db, "MSFT", yf_statements(), run_id=None, fetched_at=T1)   # no shares seeded
     assert store.denominator_per_share(tmp_db, "MSFT",
                                        as_of=datetime(2026, 4, 15, tzinfo=timezone.utc)) is None
+
+
+def test_shares_yoy_window_is_trailing_12m_not_whole_archive(tmp_db):
+    """B.2 type-4 is 'trailing-12m growth'. A multi-year append-only archive must NOT
+    measure against the EARLIEST observation (that silently stretches the window over
+    years and inflates the dilution figure). The baseline is the observation ~365 days
+    before the latest — nearest on/before (latest_date - 365d)."""
+    from agentcy.fetch import store
+    # Big cumulative dilution over 3 years, but only +1.36% in the trailing 12 months.
+    idx = pd.to_datetime(["2023-06-01", "2024-06-25", "2025-06-25", "2026-06-25"])
+    series = pd.Series([7.00e9, 7.20e9, 7.34e9, 7.44e9], index=idx, dtype=float)
+    store.store_shares(tmp_db, "MSFT", series, fetched_at=T1)
+    as_of = datetime(2026, 7, 1, tzinfo=timezone.utc)
+
+    st = store.shares_yoy(tmp_db, "MSFT", as_of=as_of)
+    # trailing-12m: (7.44 - 7.34) / 7.34 = 1.362% — NOT the whole-archive 6.29% off 7.00e9.
+    assert st.usable()
+    assert st.value == pytest.approx(100.0 * (7.44e9 - 7.34e9) / 7.34e9, rel=1e-9)
+    assert st.value < 3.0                                     # a 3%/12m dilution trigger would PASS
+
+
+def test_shares_yoy_stale_when_no_year_ago_observation(tmp_db):
+    """No observation ~1y before the latest -> can't measure trailing-12m -> STALE (suspends,
+    never computes off a too-short archive)."""
+    from agentcy.fetch import store
+    idx = pd.to_datetime(["2026-01-05", "2026-06-25"])        # <1y of history
+    series = pd.Series([7.40e9, 7.44e9], index=idx, dtype=float)
+    store.store_shares(tmp_db, "MSFT", series, fetched_at=T1)
+    st = store.shares_yoy(tmp_db, "MSFT", as_of=datetime(2026, 7, 1, tzinfo=timezone.utc))
+    assert not st.usable() and st.state is DataState.STALE and st.note is not None

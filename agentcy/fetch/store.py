@@ -363,14 +363,28 @@ def balance_safety_series(conn, yf_ticker, *, as_of):
 
 
 def shares_yoy(conn, yf_ticker, *, as_of):
-    """Trailing-12m share-count growth %."""
+    """Trailing-12m share-count growth % (B.2 type 4). The baseline is the observation ~365
+    days before the latest — nearest on/before (latest_date - 365d) — NOT the earliest row in
+    the append-only archive (that stretches the '12-month' window over years as history
+    accumulates, silently inflating the dilution figure). No ~1y-ago observation -> STALE."""
     sh = shares_history(conn, yf_ticker, as_of=as_of)
     if sh is None or not sh.usable():
         return sh
-    series = sh.value                                      # pd.Series indexed by date, deduped
-    if len(series) < 2:
+    series = sh.value                                      # pd.Series indexed by date, deduped ascending
+    # anchor on the latest observation at/before as_of (the series is not as_of-filtered, so a
+    # post-as_of print would otherwise leak into "the latest").
+    at_or_before = series[series.index <= pd.Timestamp(as_of.date())]
+    if len(at_or_before) < 2:
         return _restamp(sh, None)
-    latest, year_ago = float(series.iloc[-1]), float(series.iloc[0])
+    latest_ts = at_or_before.index[-1]
+    latest = float(at_or_before.iloc[-1])
+    window_start = latest_ts - pd.Timedelta(days=365)
+    baseline_window = at_or_before[at_or_before.index <= window_start]   # nearest on/before -365d
+    if len(baseline_window) == 0:
+        note = (f"{yf_ticker}: no shares observation ~1y before {latest_ts.date().isoformat()} "
+                f"— trailing-12m dilution not measurable (B.2 type 4)")
+        return Stamped(value=None, fetched_at=sh.fetched_at, state=DataState.STALE, note=note)
+    year_ago = float(baseline_window.iloc[-1])
     return _restamp(sh, 100.0 * (latest - year_ago) / year_ago if year_ago else None)
 
 
