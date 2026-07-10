@@ -1,0 +1,9 @@
+[Unit]
+Description=stock-agentcy event spool watcher (fires the drain when a request lands)
+
+[Path]
+DirectoryNotEmpty=/var/lib/stock-agentcy/spool/events
+Unit=agentcy-event.service
+
+[Install]
+WantedBy=multi-user.target
