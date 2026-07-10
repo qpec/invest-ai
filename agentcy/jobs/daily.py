@@ -1,6 +1,6 @@
 """Daily job (D.1). Fired by agentcy-daily.timer at 07:00 Europe/Amsterdam, 7 days/week (S0).
 
-Never opens the benchmark store, never reads avg_open_price, never imports quantstats
+Never opens the benchmark store, never reads cost basis, never imports quantstats
 (invariants 4/7). Reads positions via mirror.advice_positions only.
 
 Catch-up honesty (§1.3): the sweep runs newest-first; every swept key — on-time or late —
