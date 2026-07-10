@@ -47,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     scout = sub.add_parser("scout", help="The Scout (H) — human-run only")
     ssub = scout.add_subparsers(dest="scout_cmd", required=True)
     srun = ssub.add_parser("run")
-    srun.add_argument("recipe", choices=["qv"])
+    srun.add_argument("recipe", choices=["qv", "grade"])
     srun.set_defaults(handler="scout")
 
     wl = sub.add_parser("watchlist", help="C.1 watchlist")
@@ -204,10 +204,19 @@ def _cmd_render(args) -> int:
 
 
 def _cmd_scout(args) -> int:
-    """agentcy scout run qv (R6): call the real P4 API scout.run_qv and print the
-    ScreenResult for human reading. H.2 forbids storing the result — no DB write here."""
+    """agentcy scout run {qv|grade} (R6, design §4/§6). Prints the ScreenResult for human
+    reading; H forbids storing it — no DB write here."""
     scout = _scout()
     conn = _open()
+    if args.recipe == "grade":
+        from agentcy.render.scout import ScoutGradedContext, render_scout_graded
+        from agentcy.render import common as cm
+        as_of = _clock().now()
+        result = scout.run_graded(conn, universe_path=None, market_data={}, as_of=as_of)
+        ctx = ScoutGradedContext(as_of_label=cm.ams_date_label(as_of),
+                                 graded=result.graded, evidence_note=result.evidence_note)
+        print(render_scout_graded(ctx).markdown)
+        return 0
     result = scout.run_qv(conn, universe_path=None)
     print(f"[{result.recipe}] {len(result.candidates)} candidate(s):")
     for c in result.candidates:

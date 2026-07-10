@@ -100,3 +100,24 @@ def run_qv(conn, *, universe_path=None) -> ScreenResult:
         for _, r in df.iterrows())
     return ScreenResult(recipe="qv", candidates=candidates,
                         evidence_note=HONEST_EVIDENCE_NOTE)
+
+
+@dataclass(frozen=True)
+class GradedScreenResult:
+    """Stage-1 graded screen output (design §4). Human-read only; never persisted (§6)."""
+    recipe: str
+    graded: tuple
+    evidence_note: str
+
+
+def run_graded(conn, *, universe_path=None, market_data, as_of) -> GradedScreenResult:
+    """H/design §4 Stage-1: load the pinned universe, grade every name deterministically from
+    cached fundamentals, return for human reading. NEVER persists monitoring state (§6)."""
+    from agentcy import scout_grade
+    pin = config.get(conn, "universe_pin_sha")
+    if universe_path is None:
+        universe_path = Path(db.state_dir()) / "universe" / "equities.bz2"
+    universe = load_universe(universe_path, expect_sha=pin)
+    graded = scout_grade.grade_universe(conn, universe, market_data=market_data, as_of=as_of)
+    return GradedScreenResult(recipe="grade", graded=tuple(graded),
+                              evidence_note=HONEST_EVIDENCE_NOTE)
