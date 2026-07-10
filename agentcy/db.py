@@ -380,6 +380,31 @@ def fetch_latest_snapshot(conn) -> Row | None:
     ).fetchone()
 
 
+def fetch_snapshot(conn, snapshot_id: int) -> Row | None:
+    """One snapshot row by id (cash_balance_eur lives here, not on positions)."""
+    return conn.execute(
+        "SELECT * FROM snapshot WHERE snapshot_id=?", (snapshot_id,)).fetchone()
+
+
+def fetch_snapshots_between(conn, start: str, end: str) -> list[Row]:
+    """Snapshot rows with start <= as_of <= end, oldest first (quarterly return series)."""
+    return conn.execute(
+        "SELECT * FROM snapshot WHERE as_of >= ? AND as_of <= ? "
+        "ORDER BY as_of ASC, snapshot_id ASC", (start, end)).fetchall()
+
+
+def fetch_first_snapshot_as_of(conn) -> str | None:
+    """Earliest snapshot as_of (quarterly since-inception series start); None if empty."""
+    return conn.execute("SELECT MIN(as_of) AS a FROM snapshot").fetchone()["a"]
+
+
+def fetch_external_flows_for_snapshot(conn, snapshot_id: int) -> list[Row]:
+    """MA-12 external flows attributed to the period ending at this snapshot."""
+    return conn.execute(
+        "SELECT * FROM external_flow WHERE snapshot_id=? ORDER BY flow_id ASC",
+        (snapshot_id,)).fetchall()
+
+
 def fetch_positions_advice(conn, snapshot_id: int) -> list[Row]:
     """SELECT from positions_advice view ONLY (invariant 4)."""
     return conn.execute(
@@ -537,6 +562,16 @@ def fetch_open_asks(conn, *, kind: str | None = None) -> list[Row]:
     return conn.execute(sql + " ORDER BY created_at, ask_id", params).fetchall()
 
 
+def fetch_unanswered_asks(conn, *, kind: str | None = None) -> list[Row]:
+    """Counted-unanswered asks (past effective deadline); the daily letter escalates these."""
+    sql = "SELECT * FROM ask WHERE status='unanswered'"
+    params: list = []
+    if kind is not None:
+        sql += " AND kind=?"
+        params.append(kind)
+    return conn.execute(sql + " ORDER BY created_at, ask_id", params).fetchall()
+
+
 def fetch_outbox_queued(conn) -> list[Row]:
     """status='queued' ordered FIFO by created_at (drain applies alerts-first)."""
     return conn.execute(
@@ -555,6 +590,17 @@ def fetch_run(conn, run_type: str, scheduled_for: str) -> Row | None:
         (run_type, scheduled_for)).fetchone()
 
 
+def fetch_ontime_finished_keys(conn, run_type: str) -> set[str]:
+    """scheduled_for of every run of run_type that finished ON TIME (late=0). The daily
+    gap line names due days NOT in this set — days no letter was ever sent for (§1.3).
+    Newest-first sweep means late keys are not yet started when the on-time letter is built,
+    so 'was a letter sent on schedule?' is the only reliable gap signal at that moment."""
+    rows = conn.execute(
+        "SELECT scheduled_for FROM run_log"
+        " WHERE run_type=? AND late=0 AND finished_at IS NOT NULL", (run_type,)).fetchall()
+    return {r["scheduled_for"] for r in rows}
+
+
 def fetch_last_finished_run(conn) -> Row | None:
     """Most recently finished run (the /status card reports this state, never runs checks)."""
     return conn.execute(
@@ -569,6 +615,11 @@ def fetch_watchlist(conn, *, stage: str | None = None) -> list[Row]:
         sql += " WHERE stage=?"
         params.append(stage)
     return conn.execute(sql + " ORDER BY added_at, item_id", params).fetchall()
+
+
+def fetch_watchlist_item(conn, item_id: int) -> Row | None:
+    return conn.execute(
+        "SELECT * FROM watchlist_item WHERE item_id=?", (item_id,)).fetchone()
 
 
 def fetch_bot_state(conn) -> Row:
@@ -739,6 +790,18 @@ def append_alert(conn, row: Mapping) -> int:
         "VALUES (:thesis_id, :trigger_id, :run_id, :storm_key, :created_at, :deadline)",
         {"storm_key": None, **row})
     return cur.lastrowid
+
+
+def append_outbox(conn, *, dedupe_key: str, kind: str, created_at: str, payload_html: str,
+                  run_id: int | None = None, artifact_ref: int | None = None,
+                  ask_ref: str | None = None, document_path: str | None = None,
+                  reply_markup_json: str | None = None) -> int:
+    """Insert a fresh queued outbox row (status/attempts fall to schema DEFAULTs); returns outbox_id."""
+    return _insert(conn, "outbox", {
+        "dedupe_key": dedupe_key, "kind": kind, "created_at": created_at,
+        "run_id": run_id, "artifact_ref": artifact_ref, "ask_ref": ask_ref,
+        "payload_html": payload_html, "document_path": document_path,
+        "reply_markup_json": reply_markup_json})
 
 
 def fetch_theses(conn) -> list:
