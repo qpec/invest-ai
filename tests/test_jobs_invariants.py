@@ -2,7 +2,7 @@
 import ast
 import pathlib
 
-JOBS = pathlib.Path("agentcy/jobs")
+JOBS = pathlib.Path(__file__).resolve().parents[1] / "agentcy" / "jobs"
 QUARANTINED_FROM = {"daily.py", "weekly.py", "event.py"}
 
 
