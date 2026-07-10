@@ -2,22 +2,22 @@
 
 Core tier
 ```
-Ticker  Grade  Comp  V     Q     D     M   
-VEEV    B      78    58.0  92.0  84.0  80.0
-MSFT    B      71    40.0  88.0  90.0  70.0
+Ticker  Grade  Comp  V     Q     G     D     M   
+VEEV    B      78    58.0  92.0  70.0  84.0  80.0
+MSFT    B      71    40.0  88.0  60.0  90.0  71.0
 ```
 
 Adjacent tier
 ```
-Ticker  Grade  Comp  V     Q     D     M   
-SWX     C      60    55.0  60.0  65.0  60.0
+Ticker  Grade  Comp  V     Q     G     D     M   
+SWX     C      60    55.0  60.0  55.0  65.0  60.0
 ```
   suppressed - LEVR: leverage veto: net debt/EBITDA above the §2 floor
 
 Outside tier
 ```
-Ticker  Grade  Comp  V     Q     D     M   
-DIST    A      83    90.0  74.0  82.0  88.0
+Ticker  Grade  Comp  V     Q     G     D     M   
+DIST    A      83    90.0  74.0  65.0  82.0  83.0
 ```
   not graded - THIN: insufficient data: <2 usable periods
 
