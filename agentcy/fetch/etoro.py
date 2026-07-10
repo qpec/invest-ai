@@ -34,6 +34,13 @@ class EtoroRetryAfter(EtoroError):
         self.retry_after = retry_after
 
 
+def build_client(api_key, user_key) -> "EtoroClient":
+    """Shared constructor for the eToro Read-API client (the one factory the weekly-auto
+    and CLI `_etoro_client` seams delegate to, so the two do not drift). Those module-level
+    `_etoro_client` functions stay as the tests' monkeypatch points."""
+    return EtoroClient(api_key=api_key, user_key=user_key)
+
+
 class EtoroClient:
     def __init__(self, *, api_key: str, user_key: str, timeout: float = 20.0,
                  base_url: str = _DEFAULT_HOST) -> None:

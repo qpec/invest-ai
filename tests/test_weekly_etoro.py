@@ -120,6 +120,39 @@ def test_disabled_path_is_a_no_op(tmp_db, monkeypatch):
     assert db.fetch_outbox_queued(conn) == []
 
 
+def test_second_same_date_failure_after_sent_does_not_raise(tmp_db, monkeypatch):
+    """Crashed-run re-sweep guarantee: a SECOND same-date eToro failure must NOT raise
+    even after the first failure notice was already marked 'sent'/'collapsed'. A raw
+    per-date dedupe_key would make outbox.enqueue raise ValueError on the already-sent
+    key, escaping etoro_refresh -> crashing the weekly run. qualified_key promotes the
+    key to an attempt-qualified revision so the re-enqueue never raises."""
+    from agentcy.fetch import etoro
+    from agentcy.jobs import weekly
+    conn = tmp_db
+    _set_keys(monkeypatch)
+    _stub_client_and_identity_fx(monkeypatch)
+    monkeypatch.setattr(
+        weekly.etoro, "fetch_etoro_snapshot",
+        lambda *a, **k: (_ for _ in ()).throw(etoro.EtoroError("api down")))
+
+    # First failing call enqueues the notice under the raw base key.
+    weekly.etoro_refresh(conn, run_id=_weekly_run_id(conn), clock=SAT, state_dir=None)
+    base = f"etoro-fail:{SAT.now().date().isoformat()}"
+    row = db.fetch_outbox_by_key(conn, base)
+    assert row is not None
+    # Mark the notice 'sent' (the daemon delivered it) — the state a re-sweep hits.
+    db.update_outbox_state(conn, row["outbox_id"], status="sent")
+
+    # Second same-date failing call must NOT raise (weekly path stays alive).
+    weekly.etoro_refresh(conn, run_id=_weekly_run_id(conn), clock=SAT, state_dir=None)
+
+    # A fresh attempt-qualified revision row exists and is queued.
+    rev = db.fetch_outbox_by_key(conn, f"{base}#a2")
+    assert rev is not None
+    assert rev["status"] == "queued"
+    assert rev["kind"] == "notice"
+
+
 def test_run_one_invokes_etoro_refresh_first(seeded_portfolio, tmp_path, monkeypatch):
     """run_one must call etoro_refresh before refresh_batch (D.2 D.2 top-of-loop)."""
     from agentcy.jobs import weekly

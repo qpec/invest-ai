@@ -51,7 +51,7 @@ def _mint_and_spool(conn, req: EventRequest, *, run_id: int, state_dir: Path) ->
 def _etoro_client(api_key, user_key):
     """Seam: build the eToro Read-API client. Tests monkeypatch this to a FakeClient so
     the weekly-auto pull is network-free (mirrors the cli.py pattern)."""
-    return etoro.EtoroClient(api_key=api_key, user_key=user_key)
+    return etoro.build_client(api_key, user_key)
 
 
 def etoro_refresh(conn, *, run_id, clock, state_dir):
@@ -72,7 +72,11 @@ def etoro_refresh(conn, *, run_id, clock, state_dir):
     except (etoro.EtoroError, FetchFailed) as e:
         last = db.fetch_latest_snapshot(conn)
         since = last["as_of"] if last else "never"
-        outbox.enqueue(conn, dedupe_key=f"etoro-fail:{clock.now().date().isoformat()}",
+        # qualified_key promotes an already-sent/collapsed per-date key to an
+        # attempt-qualified revision so a same-day re-sweep re-enqueue never raises
+        # ValueError out of this except block and crashes the weekly run (§5.4).
+        base = f"etoro-fail:{clock.now().date().isoformat()}"
+        outbox.enqueue(conn, dedupe_key=runner.qualified_key(conn, base),
                        kind="notice",
                        payload_html=(f"eToro fetch failed: {e} — holdings unchanged since {since}. "
                                      "The weekly review proceeds on the last snapshot."),
