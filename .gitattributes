@@ -1,2 +1,6 @@
 # Golden files are byte-exact output specs — never text-normalized (contracts §4).
 tests/golden/** -text
+
+# Deploy artifacts run on the Linux target: systemd parses unit files and the
+# kernel reads shebangs; CRLF would break both. Pin LF regardless of dev OS.
+deploy/** text eol=lf
