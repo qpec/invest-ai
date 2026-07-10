@@ -60,3 +60,38 @@ def test_manual_snapshot_writes_zero_detail_rows(tmp_db):
     snapshot_id, deltas = mirror.ingest_snapshot(tmp_db, snap, clock=SystemClock())
     assert db.fetch_position_details(tmp_db, snapshot_id) == []
     assert [d.kind for d in deltas] == []
+
+
+def _leveraged_client():
+    """A FakeClient with ONE leveraged (2x) SPY stock lot — trips the Hell-No tripwire."""
+    class FakeClient:
+        def get_positions(self):
+            return [
+                {"symbol": "SPY", "type": "Stocks", "units": 3.0, "invested": 600.0,
+                 "open_rate": 200.0, "open_date": "2024-06-01", "mv_native": 720.0,
+                 "pnl_native": 120.0, "leverage": 2.0, "currency": "USD"},
+            ]
+        def get_balances(self):
+            return {"cash": 100.0, "currency": "USD"}
+    return FakeClient()
+
+
+def test_leveraged_etoro_snapshot_fires_hellno_tripwire_end_to_end(tmp_db):
+    """Charter-critical: a leveraged eToro pull flows fetch -> ingest -> Hell-No leverage
+    tripwire NOTICE, end-to-end and network-free (FakeClient + injected fx)."""
+    clock = SystemClock()
+    snap = etoro.fetch_etoro_snapshot(_leveraged_client(), fx=_FX, as_of="2026-07-10")
+
+    # 1) ingest reconciles the leveraged position into a leverage_violation Delta.
+    snapshot_id, deltas = mirror.ingest_snapshot(tmp_db, snap, clock=clock)
+    lev = [d for d in deltas if d.kind == "leverage_violation" and d.symbol == "SPY"]
+    assert len(lev) == 1
+    assert lev[0].new_value == 2.0
+
+    # 2) minting enqueues the Hell-No leverage tripwire notice with the exact dedupe_key.
+    mirror.mint_reconciliation_asks(tmp_db, snapshot_id, deltas, clock=clock)
+    row = db.fetch_outbox_by_key(tmp_db, f"leverage:{snapshot_id}:SPY")
+    assert row is not None
+    assert row["kind"] == "notice"
+    assert "Hell-No leverage tripwire" in row["payload_html"]
+    assert "SPY" in row["payload_html"]
