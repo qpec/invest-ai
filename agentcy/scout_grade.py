@@ -8,11 +8,13 @@ thin/stale data -> "insufficient data", never a silent 0.
 from __future__ import annotations
 
 import json
+import math
 import statistics
 from dataclasses import dataclass
 from datetime import datetime
 
 import pandas as pd
+from scipy.stats import percentileofscore
 
 from agentcy.fetch import store
 
@@ -281,3 +283,33 @@ def veto_check(*, net_debt_to_ebitda, ebitda, net_debt, owner_fcf_positive_any,
         return Veto(False, DILUTION_PENALTY,
                     f"dilution penalty: shares +{shares_yoy_pct:.1f}%/yr")
     return Veto(False, 0, "")
+
+
+# --- Sector-percentile scoring (design §1 scoring convention) --------------------------
+# ROIC>15% is one of only two fixed reference lines in the whole model (design §1); it is
+# inherited from v1 (scout.QV_ROIC_MIN, there a percentage). Here ROIC is scored as a
+# RATIO floor, so QV_ROIC_MIN is the fraction 0.15 (== 15%) — RF4.
+QV_ROIC_MIN = 0.15
+
+
+def sector_percentile(value: float, cohort, *, higher_better: bool) -> float:
+    """Cross-sectional percentile of `value` within its sector cohort (design §1). None/NaN
+    cohort members dropped; a singleton (or all-missing) cohort scores 50.0 (neutral).
+    lower-better metrics (net debt, SBC, CV) invert to keep 'high score = good'."""
+    clean = [float(x) for x in cohort
+             if x is not None and not (isinstance(x, float) and math.isnan(x))]
+    if len(clean) <= 1:
+        return 50.0
+    p = float(percentileofscore(clean, float(value), kind="mean"))
+    return p if higher_better else 100.0 - p
+
+
+def roic_leg_score(roic_pct: float, cohort) -> float:
+    """The Q-pillar ROIC leg (design §1 Pillar Q, RF4): the sector percentile of ROIC BLENDED
+    with the absolute >15% reference line. A ROIC below 15% discounts the leg by
+    ``min(1, ROIC/15%)`` — so a great sector rank on a sub-floor ROIC cannot masquerade as a
+    capital-productivity moat. ``roic_pct`` and the cohort are ROIC as PERCENTAGES; the floor
+    is QV_ROIC_MIN (0.15 == 15%). At/above 15% the factor is 1.0 (leg == raw percentile)."""
+    pct = sector_percentile(roic_pct, cohort, higher_better=True)
+    floor_factor = max(0.0, min(1.0, roic_pct / (100.0 * QV_ROIC_MIN)))
+    return round(pct * floor_factor, 6)
