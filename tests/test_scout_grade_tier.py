@@ -1,75 +1,113 @@
 """Stage-1 tiering (design §3): Core / Adjacent / Outside from FinanceDatabase
 sector+industry. Tier is a priority LANE, orthogonal to grade — never blended.
 
-RF10 — the Core/Adjacent keyword lists are cross-checked against the ACTUAL
-FinanceDatabase (yfinance) sector/industry taxonomy and aligned to the design's
-exact Core categories (cloud/SaaS infra, healthcare tech, insurance tech, AI
-tooling). Mis-mapped entries such as "Insurance Brokers" (a distribution
-industry, not insurtech) are NOT treated as Core.
+RF10 — the Core/Adjacent industry lists are cross-checked against the ACTUAL
+FinanceDatabase `industry` categoricals (a flat GICS-style set of 68 values), NOT an
+invented yfinance-style sub-split taxonomy. Ground truth is a checked-in sample of the
+real values extracted from the pinned `compression/equities.bz2` that
+`scout.py:load_universe` reads (design §5): `tests/fixtures/financedatabase_categoricals.json`.
+The fidelity test loads that sample and asserts every Core/Adjacent industry is a real
+FinanceDatabase value — so a keyword that matches no real industry (leaving the Core lane
+unreachable, the original RF10 failure) fails the suite.
 """
+import json
+from pathlib import Path
+
 from agentcy import scout_grade as sg
 
-
-def test_core_tier_from_industry():
-    assert sg.tier_of(sector="Technology", industry="Software - Infrastructure") == "Core"
-    assert sg.tier_of(sector="Healthcare", industry="Health Information Services") == "Core"
+_FIXTURE = Path(__file__).parent / "fixtures" / "financedatabase_categoricals.json"
 
 
-def test_adjacent_tier():
-    assert sg.tier_of(sector="Technology", industry="Information Technology Services") == "Adjacent"
-    assert sg.tier_of(sector="Healthcare", industry="Medical Devices") == "Adjacent"
+def _real_categoricals():
+    data = json.loads(_FIXTURE.read_text(encoding="utf-8"))
+    return set(data["sectors"]), set(data["industries"])
+
+
+# --- behaviour: real GICS-style industry values ---------------------------------------
+
+def test_core_tier_from_real_industry():
+    # 'Software' and 'Health Care Technology' are the actual FinanceDatabase industries the
+    # owner's cloud/SaaS/AI + healthtech edge files under (MSFT/CRM/NOW/SNOW -> 'Software').
+    assert sg.tier_of(sector="Information Technology", industry="Software") == "Core"
+    assert sg.tier_of(sector="Health Care", industry="Health Care Technology") == "Core"
+
+
+def test_adjacent_tier_from_real_industry():
+    assert sg.tier_of(sector="Information Technology", industry="IT Services") == "Adjacent"
+    assert (
+        sg.tier_of(sector="Health Care", industry="Health Care Equipment & Supplies")
+        == "Adjacent"
+    )
+    assert (
+        sg.tier_of(
+            sector="Information Technology",
+            industry="Semiconductors & Semiconductor Equipment",
+        )
+        == "Adjacent"
+    )
 
 
 def test_outside_tier_default():
-    assert sg.tier_of(sector="Energy", industry="Oil & Gas E&P") == "Outside"
+    assert sg.tier_of(sector="Energy", industry="Oil, Gas & Consumable Fuels") == "Outside"
     assert sg.tier_of(sector=None, industry=None) == "Outside"
 
 
-def test_tier_is_case_insensitive_on_keywords():
-    assert sg.tier_of(sector="technology", industry="SOFTWARE - APPLICATION") == "Adjacent"
+def test_tier_is_case_insensitive():
+    assert sg.tier_of(sector="information technology", industry="SOFTWARE") == "Core"
+    assert sg.tier_of(sector="health care", industry="  it services  ") == "Adjacent"
 
 
-# --- RF10: real-taxonomy fidelity ------------------------------------------------------
-
-def test_insurance_brokers_is_not_core():
-    # RF10 — "Insurance Brokers" is a real FinanceDatabase industry, but it is DISTRIBUTION,
-    # not insurance TECH. It must not be mis-mapped into the Core (insurtech) lane.
-    assert sg.tier_of(sector="Financial Services", industry="Insurance Brokers") != "Core"
+def test_insurance_industry_is_not_core():
+    # RF10 — the bare 'Insurance' industry is underwriting/distribution (the "Insurance
+    # Brokers" trap), NOT insurance TECH. Insurtech surfaces via 'Software'. Never Core.
+    assert sg.tier_of(sector="Financials", industry="Insurance") != "Core"
 
 
-def test_core_keywords_are_real_taxonomy_values():
-    # RF10 — every Core keyword must be a substring of an actual FinanceDatabase/yfinance
-    # industry value (no invented taxonomy leaking a false Core promotion). "cloud" /
-    # "ai tooling" style vanity keywords that match NO real industry are disallowed.
-    real_industries = {
-        "software - infrastructure", "software - application",
-        "information technology services", "semiconductors",
-        "semiconductor equipment & materials", "communication equipment",
-        "computer hardware", "consumer electronics", "electronic components",
-        "scientific & technical instruments", "solar",
-        "health information services", "medical devices",
-        "medical instruments & supplies", "diagnostics & research",
-        "drug manufacturers - general", "drug manufacturers - specialty & generic",
-        "biotechnology", "medical care facilities", "healthcare plans",
-        "pharmaceutical retailers", "medical distribution",
-        "insurance - property & casualty", "insurance - life",
-        "insurance - diversified", "insurance - specialty",
-        "insurance - reinsurance", "insurance brokers", "credit services",
-        "capital markets", "asset management", "banks - regional",
-        "banks - diversified", "financial data & stock exchanges",
-        "oil & gas e&p",
-    }
-    for kw in sg._CORE_INDUSTRY_KEYWORDS + sg._ADJACENT_INDUSTRY_KEYWORDS:
-        assert any(kw in ind for ind in real_industries), (
-            f"keyword {kw!r} matches no real FinanceDatabase industry value")
+def test_health_care_providers_is_not_core():
+    # Care-delivery / managed-care (UNH/VEEV-style filings) is Outside, not the healthtech
+    # Core lane — only 'Health Care Technology' is Core on the real taxonomy.
+    assert (
+        sg.tier_of(sector="Health Care", industry="Health Care Providers & Services")
+        == "Outside"
+    )
 
 
-def test_core_checked_before_adjacent():
-    # "Software - Infrastructure" contains the bare Adjacent keyword "software"; Core must
-    # win (checked first) so an infra name is never demoted to Adjacent.
-    assert sg.tier_of(sector="Technology", industry="Software - Infrastructure") == "Core"
+# --- RF10 fidelity: every mapped industry is a REAL FinanceDatabase categorical ---------
+
+def test_core_and_adjacent_industries_are_real_taxonomy_values():
+    # The fidelity cross-check: load the checked-in sample of ACTUAL FinanceDatabase
+    # industry values and assert every Core/Adjacent industry the code maps is one of them.
+    # A vanity/mis-mapped value (e.g. 'software - infrastructure', 'medical devices') that
+    # exists nowhere in the real taxonomy — the original RF10 failure that left Core
+    # unreachable — fails here. Matching is exact (case-folded), as `tier_of` does.
+    _sectors, real_industries = _real_categoricals()
+    real_lower = {i.lower() for i in real_industries}
+    for ind in sg._CORE_INDUSTRIES | sg._ADJACENT_INDUSTRIES:
+        assert ind in real_lower, (
+            f"mapped industry {ind!r} is not a real FinanceDatabase `industry` value "
+            f"(RF10: the Core/Adjacent lanes must map to actual taxonomy rows)"
+        )
 
 
-def test_semiconductors_taxonomy_spelling_is_adjacent():
-    # The real taxonomy value is plural "Semiconductors" (not "Semiconductor").
-    assert sg.tier_of(sector="Technology", industry="Semiconductors") == "Adjacent"
+def test_every_real_core_industry_reaches_core_lane():
+    # Prove the Core lane is REACHABLE for real universe rows: every real industry the code
+    # classes as Core must, fed verbatim (with its real casing), return "Core". Guards the
+    # exact RF10 regression — Core silently unreachable for every stock in the universe.
+    _sectors, real_industries = _real_categoricals()
+    core_real = {i for i in real_industries if i.lower() in sg._CORE_INDUSTRIES}
+    assert core_real, "no real FinanceDatabase industry maps to Core — Core lane unreachable"
+    assert {"Software", "Health Care Technology"} <= core_real
+    for ind in core_real:
+        assert sg.tier_of(sector="Information Technology", industry=ind) == "Core"
+
+
+def test_every_real_adjacent_industry_reaches_adjacent_lane():
+    _sectors, real_industries = _real_categoricals()
+    adj_real = {i for i in real_industries if i.lower() in sg._ADJACENT_INDUSTRIES}
+    assert adj_real, "no real FinanceDatabase industry maps to Adjacent"
+    for ind in adj_real:
+        assert sg.tier_of(sector="Information Technology", industry=ind) == "Adjacent"
+
+
+def test_core_and_adjacent_are_disjoint():
+    assert not (sg._CORE_INDUSTRIES & sg._ADJACENT_INDUSTRIES)
