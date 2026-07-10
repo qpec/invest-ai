@@ -150,6 +150,36 @@ def _scout():
     return scout
 
 
+def _gate():
+    """Seam: the P4 Gate (C.1-C.6) + watchlist writes; tests inject fakes here."""
+    from agentcy import gate
+    return gate
+
+
+IDEA_SOURCES = ("own_research", "scout_screen", "reading", "referral")
+
+
+def _ask_owner_from_input():
+    """FR9 owner-field seam: return an AskOwner (prompt, options=None) -> str that
+    reads through input(). conviction/mgmt_trust/circle_fit/ten_year_statement enter
+    ONLY here — never a flag, never stdin-JSON. gate.py owns the re-ask/validation
+    loops (_ask_enum/_ask_nonempty), so this seam just surfaces the choices and reads
+    one line. Tests monkeypatch builtins.input."""
+    def ask(prompt: str, options=None) -> str:
+        suffix = f" [{'/'.join(options)}]" if options else ""
+        return input(f"{prompt}{suffix} ")
+    return ask
+
+
+def _prompt(label: str, *, choices: tuple[str, ...] | None = None) -> str:
+    """Interactive input; re-asks until a listed choice is given when choices is set."""
+    while True:
+        val = input(f"{label}: ").strip()
+        if choices is None or val in choices:
+            return val
+        print(f"  choose one of: {', '.join(choices)}")
+
+
 def _cmd_bot(args) -> int:
     """agentcy-bot.service: hand off to the long-poll daemon. run() never returns
     under systemd (§5.2/§5.3); returns None on a clean stop in tests."""
@@ -180,6 +210,55 @@ def _cmd_scout(args) -> int:
     return 0
 
 
+def _cmd_gate(args) -> int:
+    """agentcy gate start/resume (R6). start opens a session and drives C.2-C.6 to a
+    verdict; resume continues the single active session. FR9 owner fields flow through
+    the injected ask_owner (input()-driven) — never a flag."""
+    gate = _gate()
+    conn = _open()
+    clock = _clock()
+    ao = _ask_owner_from_input()
+    if args.gate_cmd == "start":
+        mode = "backfill" if args.backfill else "gate"
+        gate.start(conn, ticker=args.ticker, mode=mode, ask_owner=ao, clock=clock)
+        return 0
+    from agentcy import db
+    row = db.fetch_active_gate_session(conn)
+    if row is None:
+        print("agentcy: no active gate session to resume", file=sys.stderr)
+        return 1
+    gate.resume(conn, session_id=row["session_id"], ask_owner=ao, clock=clock)
+    return 0
+
+
+def _cmd_watchlist(args) -> int:
+    """agentcy watchlist add/list (C.1). add collects one_line_why + idea_source
+    interactively (tg-spec §1.8 keeps the watchlist off the bot; §10 puts it at the
+    desk) and calls P4's gate.watchlist_add; the cap-10 WatchlistFull surfaces as
+    exit 1, never a stack trace. list is a read/--json OUTPUT surface."""
+    conn = _open()
+    if args.wl_cmd == "list":
+        from agentcy import db
+        rows = [dict(r) for r in db.fetch_watchlist(conn)]
+        if args.json:
+            import json
+            print(json.dumps(rows))
+        else:
+            for r in rows:
+                print(f"{r['ticker']:8} {r['stage']:22} {r['one_line_why']}")
+        return 0
+    gate = _gate()
+    why = _prompt("one-line why (the thesis-to-be in a sentence)")
+    src = _prompt(f"idea source {IDEA_SOURCES}", choices=IDEA_SOURCES)
+    try:
+        gate.watchlist_add(conn, ticker=args.ticker, one_line_why=why,
+                           idea_source=src, clock=_clock())
+    except gate.WatchlistFull as exc:
+        print(f"agentcy: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def _archive_dir():
     """§8: the archive lives at <state_dir>/archive — derived, never hardcoded."""
     from agentcy import db
@@ -191,6 +270,8 @@ _HANDLERS["run"] = _cmd_run
 _HANDLERS["bot"] = _cmd_bot
 _HANDLERS["render"] = _cmd_render
 _HANDLERS["scout"] = _cmd_scout
+_HANDLERS["gate"] = _cmd_gate
+_HANDLERS["watchlist"] = _cmd_watchlist
 
 
 def main(argv: Sequence[str] | None = None) -> int:
