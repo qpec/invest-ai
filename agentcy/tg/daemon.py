@@ -18,6 +18,47 @@ HELP_TEXT = (
     "I only ever ask you things you pre-committed to answer."
 )
 
+START_TEXT = (
+    "stock-agentcy is online, locked to this chat.\n\n"
+    "I monitor the theses behind your holdings and tell you when the reason\n"
+    "you bought something no longer holds. I advise; I never trade.\n\n"
+    "Commands: /status  /pause  /resume  /event  /snapshot  /help"
+)
+
+PAUSE_TEXT = (
+    "Pause mode. Deadlines and skip counters freeze. Alerts still arrive;\n"
+    "weekly reviews still run. Daily letters: your choice below.\n\nHow long?"
+)
+_PAUSE_KEYBOARD = {"inline_keyboard": [
+    [{"text": "Until I resume (open-ended)", "callback_data": "pause:set:open"}],
+    [{"text": "1 week", "callback_data": "pause:set:7d"}],
+    [{"text": "2 weeks", "callback_data": "pause:set:14d"}],
+    [{"text": "Custom end date…", "callback_data": "pause:set:custom"}],
+]}
+
+SNAPSHOT_TEXT = (
+    "Add a portfolio snapshot. Send a file or paste positions — I'll\n"
+    "reconcile it against what I last saw and ask about anything I can't explain."
+)
+_SNAPSHOT_KEYBOARD = {"inline_keyboard": [
+    [{"text": "Upload export file (CSV)", "callback_data": "snap:mode:file"}],
+    [{"text": "Paste positions as text", "callback_data": "snap:mode:text"}],
+    [{"text": "Cancel", "callback_data": "snap:cancel"}],
+]}
+
+
+def _command_menu() -> list[dict]:
+    """The seven-command surface handed to set_my_commands at start (§1, R10)."""
+    return [
+        {"command": "start", "description": "orientation"},
+        {"command": "status", "description": "the calm state now"},
+        {"command": "pause", "description": "declare an absence window"},
+        {"command": "resume", "description": "end an absence window"},
+        {"command": "event", "description": "owner-injected event check"},
+        {"command": "snapshot", "description": "ingest a portfolio export"},
+        {"command": "help", "description": "quick reference"},
+    ]
+
 
 def _acting_chat_id(update: dict) -> int | None:
     if "message" in update:
@@ -59,9 +100,49 @@ def _handle_message(conn, message: dict, *, client, clock, owner_chat_id) -> Non
 
 def _handle_command(conn, message, text, *, client, clock, owner_chat_id) -> None:
     cmd = text.split()[0].lstrip("/").split("@")[0].lower()
-    if cmd == "help":
+    if cmd == "start":
+        client.send_message(owner_chat_id, esc(START_TEXT))
+    elif cmd == "status":
+        client.send_message(owner_chat_id, _status_card(conn, clock=clock))
+    elif cmd == "pause":
+        client.send_message(owner_chat_id, esc(PAUSE_TEXT), reply_markup=_PAUSE_KEYBOARD)
+    elif cmd == "resume":
+        client.send_message(owner_chat_id, _resume_summary(conn, clock=clock))
+    elif cmd == "event":
+        client.send_message(
+            owner_chat_id,
+            esc("Which holding had an event? (earnings, filing, management change)"),
+            reply_markup=_event_picker(conn))
+    elif cmd == "snapshot":
+        client.send_message(owner_chat_id, esc(SNAPSHOT_TEXT), reply_markup=_SNAPSHOT_KEYBOARD)
+    else:  # help + any unknown slash command land on the quick reference (§1)
         client.send_message(owner_chat_id, esc(HELP_TEXT))
-    # remaining commands land in P7.11.
+
+
+def _status_card(conn, *, clock) -> str:
+    """Render the G.1 status card from last RunLog state — NEVER runs checks (§1.2, R2)."""
+    from agentcy.render.daily import build_status_context, render_status
+    ctx = build_status_context(conn, as_of=clock.now())
+    return render_status(ctx).telegram_html
+
+
+def _resume_summary(conn, *, clock) -> str:
+    """End the absence window via the shared domain writer (R3); report the flip."""
+    from agentcy import absence
+    absence.resume(conn, reason="owner /resume", clock=clock)
+    return esc("Resumed. Frozen deadlines and skip counters are live again.")
+
+
+def _event_picker(conn) -> dict:
+    """Ticker keyboard for /event: held positions (live thesis id when known) + a new-position row."""
+    from agentcy import mirror, register
+    buttons = []
+    for p in mirror.advice_positions(conn)[:8]:
+        tid = register.live_thesis_for(conn, p.symbol) or p.symbol
+        buttons.append([{"text": p.symbol, "callback_data": f"evt:pick:{tid}"}])
+    buttons.append([{"text": "It's a ticker not shown / new position",
+                     "callback_data": "evt:pick:new"}])
+    return {"inline_keyboard": buttons}
 
 
 def _callback_choice(action: str, parts: list[str]) -> str | None:
