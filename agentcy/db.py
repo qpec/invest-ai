@@ -167,6 +167,16 @@ def append_price_rows(conn, rows: Sequence[Mapping]) -> int:
     return len(rows)
 
 
+_UNIVERSE_FETCH_COLS = frozenset({"yf_ticker", "attempted_at", "outcome", "run_id"})
+
+def append_universe_fetch(conn, *, yf_ticker: str, outcome: str, attempted_at: str,
+                          run_id: int | None) -> int:
+    """Append one populator fetch-attempt row (design 4); returns rowid. Append-only."""
+    return _insert(conn, "universe_fetch", _checked(
+        {"yf_ticker": yf_ticker, "attempted_at": attempted_at, "outcome": outcome,
+         "run_id": run_id}, _UNIVERSE_FETCH_COLS, "universe_fetch"))
+
+
 def append_fundamentals_period(conn, *, yf_ticker: str, statement_type: str,
                                period_end: str, payload_json: str, fingerprint: str,
                                fetched_at: str, run_id: int | None) -> bool:
@@ -473,6 +483,29 @@ def fetch_earnings_calendar(conn, yf_ticker: str) -> Row | None:
     return conn.execute(
         "SELECT * FROM earnings_calendar WHERE yf_ticker=?"
         " ORDER BY fetched_at DESC, rowid DESC LIMIT 1", (yf_ticker,)).fetchone()
+
+
+def fetch_universe_fetch_latest(conn) -> dict[str, Row]:
+    """Latest attempt row per ticker from v_universe_fetch (cursor + milestone feed)."""
+    return {r["yf_ticker"]: r for r in conn.execute(
+        "SELECT * FROM v_universe_fetch").fetchall()}
+
+
+def fetch_universe_fetch_failure_counts(conn) -> dict[str, int]:
+    """Per ticker: count of 'failed'/'no_data' attempts SINCE the last 'ok' (design 6
+    dead-list feed). A ticker that never recorded an 'ok' counts all its failures."""
+    counts: dict[str, int] = {}
+    rows = conn.execute(
+        "SELECT yf_ticker, attempted_at, outcome FROM universe_fetch"
+        " ORDER BY yf_ticker, attempted_at, rowid").fetchall()
+    for r in rows:
+        t = r["yf_ticker"]
+        if r["outcome"] == "ok":
+            counts[t] = 0
+        elif r["outcome"] in ("failed", "no_data"):
+            counts[t] = counts.get(t, 0) + 1
+        # 'rate_limited' is transient upstream throttling, NOT a dead-list failure (design 6)
+    return counts
 
 
 def fetch_thesis(conn, thesis_id: str) -> Row | None:
