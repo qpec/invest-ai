@@ -56,8 +56,15 @@ class EtoroClient:
         except urllib.error.HTTPError as e:
             data = _loads(e.read())
             if e.code == 429:
-                raise EtoroRetryAfter(float(data.get("retryAfter", 1))) from e
+                try:
+                    ra = float(data.get("retryAfter", 1))
+                except (TypeError, ValueError):
+                    ra = 1.0
+                raise EtoroRetryAfter(ra) from e
             raise EtoroError(f"HTTP {e.code}: {data.get('message', e.reason)}") from e
+        except (urllib.error.URLError, TimeoutError) as e:  # DNS, refused, socket timeout
+            reason = getattr(e, "reason", e)
+            raise EtoroError(f"transport error: {reason}") from e
 
     # -- READ methods only ---------------------------------------------------
     # Endpoint path strings are placeholders; exact eToro paths get reconciled

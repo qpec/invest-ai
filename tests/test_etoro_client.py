@@ -102,6 +102,30 @@ def test_non_429_http_error_raises_etoro_error(client, monkeypatch):
     assert "500" in str(ei.value)
 
 
+def test_url_error_wrapped_as_etoro_error(client, monkeypatch):
+    # Transport failure (e.g. DNS): URLError must be wrapped, not propagated raw,
+    # so the weekly job's `except EtoroError` fallback catches it.
+    def fake_urlopen(req, timeout=None, context=None):
+        raise urllib.error.URLError("Name or service not known")
+
+    monkeypatch.setattr(etoro.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(EtoroError) as ei:
+        client.get_positions()
+    assert not isinstance(ei.value, urllib.error.URLError)
+    assert "transport error" in str(ei.value)
+
+
+def test_timeout_error_wrapped_as_etoro_error(client, monkeypatch):
+    # Socket timeout raises the builtin TimeoutError; also wrapped as EtoroError.
+    def fake_urlopen(req, timeout=None, context=None):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(etoro.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(EtoroError) as ei:
+        client.get_positions()
+    assert "transport error" in str(ei.value)
+
+
 def test_unknown_json_fields_are_ignored(client, monkeypatch):
     def fake_urlopen(req, timeout=None, context=None):
         return _FakeResp(json.dumps({"cash": 100, "some_future_field": 1}).encode())
