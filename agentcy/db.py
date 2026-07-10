@@ -393,6 +393,11 @@ def fetch_snapshots_between(conn, start: str, end: str) -> list[Row]:
         "ORDER BY as_of ASC, snapshot_id ASC", (start, end)).fetchall()
 
 
+def fetch_first_snapshot_as_of(conn) -> str | None:
+    """Earliest snapshot as_of (quarterly since-inception series start); None if empty."""
+    return conn.execute("SELECT MIN(as_of) AS a FROM snapshot").fetchone()["a"]
+
+
 def fetch_external_flows_for_snapshot(conn, snapshot_id: int) -> list[Row]:
     """MA-12 external flows attributed to the period ending at this snapshot."""
     return conn.execute(
