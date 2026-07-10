@@ -36,9 +36,11 @@ def test_management_metrics_shrinking_shares(tmp_db, yf_statements):
     assert m is not None
     # share-count trailing-12m growth is negative (buying back)
     assert m["shares_yoy_pct"] < 0
-    # accrual/cash divergence = (net_income_ttm - owner_fcf_ttm), normalized by revenue TTM.
-    #   NI_ttm = 25+24+23+22 = 94e9 ; owner_fcf = 75.4e9 ; revenue = 252e9 ; >0 = accruals
-    assert round(m["accrual_divergence_pct"], 3) == round(100.0 * (94e9 - 75.4e9) / 252e9, 3)
+    # Stage-1.5 change 3: Sloan accruals = (net_income_ttm - Operating Cash Flow TTM),
+    # normalized by revenue TTM (capex-independent earnings quality).
+    #   NI_ttm = 25+24+23+22 = 94e9 ; OCF_ttm = 36+34+32+30 = 132e9 ; revenue = 252e9
+    #   accrual% = 100 * (94 - 132) / 252 = negative (cash exceeds reported profit = clean)
+    assert round(m["accrual_divergence_pct"], 3) == round(100.0 * (94e9 - 132e9) / 252e9, 3)
     # per-share owner-FCF growth is present (>= 2 share observations)
     assert m["per_share_ofcf_growth_pct"] is not None
     # shrinking shares on a constant owner-FCF base => per-share growth is POSITIVE
