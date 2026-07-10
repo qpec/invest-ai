@@ -39,6 +39,9 @@ def test_drain_quiet_outcome_archives_report_and_no_alert(seeded_portfolio, tmp_
     assert run is not None and run["status"] == "ok"
     assert len(db.fetch_reports(conn, type="event")) == 1     # quiet -> event report archived
     assert db.fetch_open_alerts(conn) == []                   # no alert on a quiet outcome
+    # the quiet outputs must carry the keys daily.events_line() consumes to fold the line in (P6.7):
+    out = json.loads(run["outputs_json"])
+    assert out.get("quiet") is True and out.get("triggers_pass") == "1/1"
 
 
 def test_drain_fire_takes_alert_path_not_event_report(seeded_portfolio, tmp_path, monkeypatch):

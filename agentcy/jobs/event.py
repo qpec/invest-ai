@@ -81,7 +81,10 @@ def check_one(conn, req: EventRequest, handle: RunHandle, *, clock: Clock, state
         runner.enqueue_rendered(conn, r, base_key=outbox.event_key(req.yf_ticker, req.detected_at, "report"),
                                 kind="event", run_id=run_id, clock=clock, artifact_ref=report_id)
     conn.commit()
-    return "ok", {"fired": [], "prompted": prompted, "report_id": report_id, "data_lag": data_lag}
+    # keys below are the fold-in contract daily.events_line() reads (P6.7): quiet gate +
+    # the "N/M" triggers_pass string it renders into the next letter.
+    return "ok", {"fired": [], "prompted": prompted, "report_id": report_id, "data_lag": data_lag,
+                  "quiet": True, "triggers_pass": f"{ctx.triggers_pass}/{ctx.triggers_total}"}
 
 
 def run_one(conn, handle: RunHandle, *, clock: Clock, state_dir: Path) -> tuple[str, dict]:
