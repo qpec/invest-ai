@@ -7,6 +7,8 @@ thin/stale data -> "insufficient data", never a silent 0.
 """
 from __future__ import annotations
 
+import json
+import statistics
 from datetime import datetime
 
 from agentcy.fetch import store
@@ -26,4 +28,78 @@ def value_metrics(conn, yf_ticker: str, *, market_cap: float, total_debt: float,
         "owner_fcf_ttm": owner_fcf,
         "owner_fcf_yield": (owner_fcf / ev) if ev > 0 else None,
         "p_owner_fcf": (market_cap / owner_fcf) if owner_fcf > 0 else None,
+    }
+
+
+def _latest_payloads(conn, yf_ticker: str, stype: str, as_of: datetime) -> dict:
+    """period_end -> decoded payload dict (latest fingerprint per period) from the archive.
+    Returns {} when the archive is empty or STALE (thin/stale data handled by the caller —
+    integrity-suspend, never a silent 0; design §2 data-integrity rule)."""
+    hist = store.statement_history(conn, yf_ticker, stype, as_of=as_of)
+    if not hist.usable():
+        return {}
+    return {r["period_end"]: json.loads(r["payload_json"]) for r in hist.value}
+
+
+def _roic_pct(inc_pay: dict, bal_pay: dict) -> float | None:
+    """Latest-period ROIC on the Greenblatt denominator (design §1 Pillar Q).
+
+    RF7 — the numerator is EBIT DIRECTLY (Greenblatt Magic Formula), NOT an invented
+    NOPAT/effective-tax-rate clamp. Denominator = net working capital + net fixed assets
+    = Working Capital + (Total Assets - Current Assets - Cash And Cash Equivalents).
+    None if any pinned row is absent or the denominator is non-positive (design §2)."""
+    if not inc_pay or not bal_pay:
+        return None
+    pe = max(inc_pay)
+    inc, bal = inc_pay[pe], bal_pay.get(pe, {})
+    ebit = inc.get("EBIT")
+    wc = bal.get("Working Capital")
+    ta = bal.get("Total Assets")
+    ca = bal.get("Current Assets")
+    cash = bal.get("Cash And Cash Equivalents")
+    if None in (ebit, wc, ta, ca, cash):
+        return None
+    denom = wc + (ta - ca - cash)          # net working capital + net fixed assets
+    if denom <= 0:
+        return None
+    return 100.0 * ebit / denom
+
+
+def _gross_margin_series(inc_pay: dict) -> list[float]:
+    """Per-period gross margin ratios (Gross Profit / Total Revenue), oldest -> newest;
+    periods with an absent/zero pinned row are dropped (never a silent zero)."""
+    out = []
+    for pe in sorted(inc_pay):
+        gp = inc_pay[pe].get("Gross Profit")
+        rev = inc_pay[pe].get("Total Revenue")
+        if gp is None or not rev:
+            continue
+        out.append(gp / rev)
+    return out
+
+
+def quality_metrics(conn, yf_ticker: str, *, as_of: datetime) -> dict | None:
+    """Pillar Q raw metrics (design §1 Pillar Q).
+
+    - roic_pct: Greenblatt ROIC, EBIT numerator (RF7).
+    - gross_margin_level_pct / gross_margin_cv: the two raw ingredients of ONE Q leg
+      (RF8 — level percentile minus a bounded CV penalty is combined at scoring time);
+      CV is the coefficient of variation of the gross-margin series (>=0, lower = steadier).
+    - owner_fcf_margin_pct: (FCF - SBC) / revenue TTM (BUF-5).
+
+    None when statements or owner-FCF are not computable at all (integrity-suspend)."""
+    inc = _latest_payloads(conn, yf_ticker, "income", as_of)
+    bal = _latest_payloads(conn, yf_ticker, "balance", as_of)
+    roic = _roic_pct(inc, bal)
+    gm = _gross_margin_series(inc)
+    oe = store.owner_fcf_ttm(conn, yf_ticker, as_of=as_of)
+    if roic is None or not gm or oe is None:
+        return None
+    mean_gm = sum(gm) / len(gm)
+    cv = (statistics.pstdev(gm) / mean_gm) if len(gm) > 1 and mean_gm else 0.0
+    return {
+        "roic_pct": roic,
+        "gross_margin_level_pct": 100.0 * mean_gm,
+        "gross_margin_cv": cv,
+        "owner_fcf_margin_pct": 100.0 * oe.value.owner_fcf_margin_ttm,
     }
