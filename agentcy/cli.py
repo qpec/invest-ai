@@ -447,11 +447,20 @@ def _cmd_ask(args) -> int:
         choice = _prompt("choice", choices=tuple(ask.options))
     elif ask.expects_freetext:
         text = _prompt("answer")
-    outcome = ak.answer(conn, args.ask_id, choice=choice, text=text, clock=_clock())
-    conn.commit()
+    # An A-ask refute requires written evidence at the desk too (B.3.2); collect it and
+    # bind it to the resolution so the dispatcher journals it verbatim.
+    evidence = None
+    if choice == "refute" and ask.kind == "A":
+        evidence = _prompt("evidence")
+        text = evidence
+    clock = _clock()
+    outcome = ak.answer(conn, args.ask_id, choice=choice, text=text, clock=clock)
     if outcome.already_recorded:
         print("already recorded")
-    print(outcome.consequence)
+    # Domain consequence (B.3, §3.10a): journal + transition + resolve + advise (invariant 2).
+    note = ak.apply_consequence(conn, outcome, clock=clock, evidence=evidence)
+    conn.commit()
+    print(note or outcome.consequence)
     return 0
 
 

@@ -253,7 +253,8 @@ def test_ask_list_and_answer(tmp_db, fixed_clock, monkeypatch, capsys):
     fake = types.SimpleNamespace(
         open_asks=lambda conn, kind=None: [ask_obj],
         get=lambda conn, aid: ask_obj,
-        answer=lambda conn, aid, *, choice=None, text=None, clock, tg_message_id=None: outcome)
+        answer=lambda conn, aid, *, choice=None, text=None, clock, tg_message_id=None: outcome,
+        apply_consequence=lambda conn, oc, *, clock, evidence=None, run_id=None: None)
     monkeypatch.setattr(cli, "_asks", lambda: fake)
     assert cli.main(["ask", "list"]) == 0
     assert "A238" in capsys.readouterr().out
