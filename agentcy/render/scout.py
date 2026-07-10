@@ -50,6 +50,12 @@ def _segments(ctx: ScoutGradedContext):
         segs.append(("text", f"{tier} tier"))
         if ranked:
             segs.append(("table", _body_rows(ranked)))
+            # A graded row can still carry a note — the -15 dilution penalty reason
+            # (design §2: penalty flagged, not a veto). The composite already reflects
+            # it; surface the reason so the hit is never silent.
+            for g in ranked:
+                if g.note:
+                    segs.append(("text", f"  flagged - {g.symbol}: {g.note}"))
         else:
             segs.append(("text", "  (no gradable names)"))
         # suppressed names are named with their reason — never silently dropped
