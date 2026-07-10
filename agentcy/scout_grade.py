@@ -313,3 +313,34 @@ def roic_leg_score(roic_pct: float, cohort) -> float:
     pct = sector_percentile(roic_pct, cohort, higher_better=True)
     floor_factor = max(0.0, min(1.0, roic_pct / (100.0 * QV_ROIC_MIN)))
     return round(pct * floor_factor, 6)
+
+
+# --- Pillar aggregation -> composite -> grade (design §1 composite table) ---------------
+# Composite weights (design §1): wonderful business (Q) at a fair price (V) dominant; the
+# avoid-ruin (D) and trust-management (M) guardrails co-equal. The entire tunable surface.
+W_V, W_Q, W_D, W_M = 0.30, 0.30, 0.20, 0.20
+
+_GRADE_BANDS = ((80.0, "A"), (65.0, "B"), (50.0, "C"), (35.0, "D"))
+
+
+def pillar_score(legs) -> float | None:
+    """Equal-weighted mean of a pillar's present metric percentiles; None when all missing
+    (integrity-suspend, never a silent 0)."""
+    present = [x for x in legs if x is not None]
+    if not present:
+        return None
+    return sum(present) / len(present)
+
+
+def composite(*, v: float, q: float, d: float, m: float, penalty: int) -> float:
+    """Design §1 composite, penalty applied, floored at 0 (and capped at 100)."""
+    raw = W_V * v + W_Q * q + W_D * d + W_M * m + penalty
+    return max(0.0, min(100.0, round(raw, 4)))
+
+
+def grade_letter(comp: float) -> str:
+    """A/B/C/D/F per the design §1 grade table."""
+    for lo, letter in _GRADE_BANDS:
+        if comp >= lo:
+            return letter
+    return "F"
