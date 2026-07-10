@@ -144,6 +144,16 @@ def ingest_snapshot(conn, snap: SnapshotIn, *, clock: Clock) -> tuple[int, list[
         "quantity": p.quantity, "avg_open_price": p.avg_open_price,
         "native_currency": p.native_currency, "mv_native": p.mv_native, "mv_eur": p.mv_eur,
         "weight": p.mv_eur / total_mv, "leverage": p.leverage} for p in snap.positions])
+    # api_pull carries rich per-position detail (Task 5/6); CSV/manual snapshots have none,
+    # so the guard keeps those paths untouched. Record-keeping only (invariant 4).
+    if snap.details:
+        db.append_position_details(conn, snapshot_id, [{
+            "symbol": d.symbol, "opened_at": d.opened_at,
+            "invested_native": d.invested_native, "invested_eur": d.invested_eur,
+            "unrealized_pnl_native": d.unrealized_pnl_native,
+            "unrealized_pnl_pct": d.unrealized_pnl_pct, "current_rate": d.current_rate,
+            "direction": d.direction, "lot_count": d.lot_count, "raw_json": d.raw_json}
+            for d in snap.details])
     deltas: list[Delta] = []
     now_by_sym = {p.symbol: p for p in snap.positions}
     # leverage tripwire — every snapshot, regardless of previous state (E.1 continuous Hell-No)
