@@ -1,7 +1,7 @@
 """Weekly job (D.2). Saturday 08:00 Europe/Amsterdam. The authoritative D.3 earnings
 detector (statement fingerprints) and the B.2 officer-diff tripwire both live here:
 detection appends an event row and writes an atomic spool file; the path-unit-driven
-event job does the actual check (§1.5). run_one lands in P6.12."""
+event job does the actual check (§1.5)."""
 from __future__ import annotations
 
 import dataclasses
@@ -312,10 +312,13 @@ def main(*, clock: Clock | None = None, state_dir: Path | None = None) -> int:
 
 
 def run_one(conn, handle, *, clock: Clock, state_dir: Path) -> tuple[str, dict]:
+    """D.2 top-level: refresh -> triggers/prompted -> context (incl. the F.3 Study digest,
+    whose rotation pointer advances in build_weekly_context's study_block) -> assemble/deliver
+    -> housekeeping sweeps. Never opens the benchmark store / imports quantstats (invariants 4/7)."""
     batch = refresh_batch(conn, run_id=handle.run_id, clock=clock, state_dir=state_dir)
     fired = run_trigger_tests(conn, run_id=handle.run_id, clock=clock)
     qs = queue_prompted_questions(conn, run_id=handle.run_id, clock=clock)
-    sweeps = housekeeping(conn, run_id=handle.run_id, clock=clock)         # P6.13; stub {} below
+    sweeps = housekeeping(conn, run_id=handle.run_id, clock=clock)
     ctx = build_weekly_context(conn, as_of=clock.now(), clock=clock, run_id=handle.run_id,
                                refresh_notes=batch["data_health"])
     series, doc = render_weekly_mod.render_weekly(ctx)
