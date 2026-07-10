@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 from typing import Sequence
 
 
@@ -156,6 +157,12 @@ def _gate():
     return gate
 
 
+def _mirror():
+    """Seam: the P3 Portfolio Mirror (E.1 snapshot ingest); tests inject fakes here."""
+    from agentcy import mirror
+    return mirror
+
+
 IDEA_SOURCES = ("own_research", "scout_screen", "reading", "referral")
 
 
@@ -259,6 +266,29 @@ def _cmd_watchlist(args) -> int:
     return 0
 
 
+def _cmd_snapshot(args) -> int:
+    """agentcy snapshot import <csv> / enter (E.1). Parse via the P3 adapter, ingest,
+    then surface the reconciliation deltas. The handler stops at surfacing — it does NOT
+    mint R asks (the §3.9 ingest_snapshot contract puts 'caller mints one R ask per Delta'
+    on the bot/asks layer); at the desk the deltas point the owner to `ask`/bot follow-up."""
+    conn = _open()
+    m = _mirror()
+    if args.snap_cmd == "import":
+        snap = m.parse_etoro_csv(Path(args.csv).read_text(encoding="utf-8"))
+    else:  # enter: paste on stdin
+        print("Paste positions, then EOF (Ctrl-D):", file=sys.stderr)
+        snap = m.parse_manual_text(sys.stdin.read())
+    snapshot_id, deltas = m.ingest_snapshot(conn, snap, clock=_clock())
+    if not deltas:
+        print(f"snapshot {snapshot_id} accepted — everything reconciles.")
+        return 0
+    print(f"snapshot {snapshot_id} accepted — {len(deltas)} unreconciled delta(s):")
+    for d in deltas:
+        print(f"  [{d.kind}] {d.symbol or ''} — {d.detail}")
+    print("Open loops recorded; answer them via `agentcy ask list` or the bot.")
+    return 0
+
+
 def _archive_dir():
     """§8: the archive lives at <state_dir>/archive — derived, never hardcoded."""
     from agentcy import db
@@ -272,6 +302,7 @@ _HANDLERS["render"] = _cmd_render
 _HANDLERS["scout"] = _cmd_scout
 _HANDLERS["gate"] = _cmd_gate
 _HANDLERS["watchlist"] = _cmd_watchlist
+_HANDLERS["snapshot"] = _cmd_snapshot
 
 
 def main(argv: Sequence[str] | None = None) -> int:

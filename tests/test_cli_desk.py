@@ -171,3 +171,32 @@ def test_watchlist_list_plain(tmp_db, fixed_clock, monkeypatch, capsys):
     assert cli.main(["watchlist", "list"]) == 0
     out = capsys.readouterr().out
     assert "NET" in out and "raw" in out
+
+
+# --- P8.6 snapshot import/enter (E.1 ingestion with reconciliation printout) ------
+
+def test_snapshot_import_reads_csv_and_prints_deltas(tmp_path, tmp_db, fixed_clock, monkeypatch, capsys):
+    cli = _wire(monkeypatch, tmp_db, fixed_clock)
+    csv = tmp_path / "export.csv"
+    csv.write_text("symbol,qty\nMSFT,40\n", encoding="utf-8")
+    Delta = types.SimpleNamespace  # stand-in for mirror.Delta shape
+    fake = types.SimpleNamespace(
+        parse_etoro_csv=lambda text: ("SNAP", text),
+        ingest_snapshot=lambda conn, snap, *, clock: (7, [Delta(kind="appeared", symbol="MSFT", detail="12 sh")]),
+    )
+    monkeypatch.setattr(cli, "_mirror", lambda: fake)
+    assert cli.main(["snapshot", "import", str(csv)]) == 0
+    out = capsys.readouterr().out
+    assert "snapshot 7" in out and "appeared" in out and "MSFT" in out
+
+
+def test_snapshot_enter_reads_stdin_paste(tmp_db, fixed_clock, monkeypatch, capsys):
+    cli = _wire(monkeypatch, tmp_db, fixed_clock)
+    monkeypatch.setattr("sys.stdin", types.SimpleNamespace(read=lambda: "MSFT 40\n"))
+    fake = types.SimpleNamespace(
+        parse_manual_text=lambda text: ("SNAP", text),
+        ingest_snapshot=lambda conn, snap, *, clock: (8, []),
+    )
+    monkeypatch.setattr(cli, "_mirror", lambda: fake)
+    assert cli.main(["snapshot", "enter"]) == 0
+    assert "everything reconciles" in capsys.readouterr().out.lower()
