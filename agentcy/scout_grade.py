@@ -347,38 +347,49 @@ def grade_letter(comp: float) -> str:
 
 
 # --- Circle-of-competence tiering (design §3) — orthogonal to grade, never blended ------
-# Tier is a priority LANE assigned purely from the FinanceDatabase (yfinance) sector/
-# industry categoricals — deterministic, no LLM. Core = the owner's edge (design §3:
-# cloud/SaaS infra, healthcare & insurance tech, AI tooling); Adjacent = one hop out
-# (broader software, IT services, med-devices, fintech, data/analytics); Outside = the rest.
+# Tier is a priority LANE assigned purely from the FinanceDatabase sector/industry
+# categoricals — deterministic, no LLM. Core = the owner's edge (design §3: cloud/SaaS
+# infra, healthcare & insurance tech, AI tooling); Adjacent = one hop out (broader IT
+# services, med-devices, semis, fintech data/analytics, interactive media); Outside = rest.
 #
-# RF10 — every keyword below is a case-folded SUBSTRING of an ACTUAL FinanceDatabase
-# industry value; no invented taxonomy ("cloud"/"ai tooling" vanity strings match no real
-# industry and are omitted). "Insurance Brokers" is a real industry but it is DISTRIBUTION,
-# not insurtech, so it is deliberately NOT Core — the insurance-tech edge surfaces through
-# the software industries (an insurtech files under Software - Infrastructure/Application).
-_CORE_INDUSTRY_KEYWORDS = (
-    "software - infrastructure",    # cloud/SaaS infrastructure — the owner's edge
-    "health information services",  # healthcare tech
-)
-_ADJACENT_INDUSTRY_KEYWORDS = (
-    "software - application",            # broader SaaS
-    "software",                          # any remaining software industry (checked after Core)
-    "information technology services",   # IT services
-    "medical devices",                   # med-devices
-    "medical instruments & supplies",    # med-devices (real taxonomy sibling)
-    "semiconductors",                    # data/compute plumbing (real value is plural)
-    "financial data & stock exchanges",  # fintech data/analytics
-)
+# RF10 — these are EXACT-match against the ACTUAL FinanceDatabase `industry` categoricals,
+# not invented sub-splits. Ground truth is the pinned `compression/equities.bz2` that
+# `scout.py:load_universe` reads (design §5): a flat GICS-style set of 68 industries — e.g.
+# 'Software', 'Health Care Technology', 'IT Services', 'Semiconductors & Semiconductor
+# Equipment' — with sectors like 'Information Technology' (NOT 'Technology'). The taxonomy
+# has NO 'Software - Infrastructure'/'- Application' split and NO 'Health Information
+# Services'/'Medical Devices'/'Financial Data & Stock Exchanges' — the previous keyword
+# lists matched none of these and left the Core lane unreachable (the RF10 failure).
+# A checked-in sample of the real categoricals guards this in tests/test_scout_grade_tier.py
+# (tests/fixtures/financedatabase_categoricals.json).
+#
+# Core software lane: the flat 'Software' industry is the owner's cloud/SaaS/AI-tooling
+# edge (MSFT/CRM/NOW/SNOW all file here) — the taxonomy cannot split infra from
+# application, so the whole industry is Core. 'Health Care Technology' is healthtech
+# proper. Insurtech has NO distinct industry: it surfaces via 'Software' (or 'Insurance'
+# + name filtering), so the bare 'Insurance' industry — underwriting/distribution, the
+# "Insurance Brokers" trap RF10 names — is deliberately NOT Core.
+_CORE_INDUSTRIES = frozenset({
+    "software",                 # cloud/SaaS infrastructure + application + AI tooling
+    "health care technology",   # healthcare tech proper
+})
+_ADJACENT_INDUSTRIES = frozenset({
+    "it services",                              # IT services — one hop out
+    "semiconductors & semiconductor equipment",  # data/compute plumbing
+    "health care equipment & supplies",         # med-devices / instruments
+    "life sciences tools & services",           # health-tech-adjacent tooling
+    "interactive media & services",             # platform/software-adjacent
+    "capital markets",                          # fintech data/analytics & exchanges
+})
 
 
 def tier_of(*, sector, industry) -> str:
-    """Core / Adjacent / Outside (design §3). Industry-keyword first, Core before Adjacent
-    (most specific wins so an infra name is never demoted), then Outside default.
-    Case-insensitive; None fields -> Outside. Tier is orthogonal to grade — never blended."""
-    ind = (industry or "").lower()
-    if any(k in ind for k in _CORE_INDUSTRY_KEYWORDS):
+    """Core / Adjacent / Outside (design §3). Exact-match on the FinanceDatabase `industry`
+    categorical: Core (owner's edge) before Adjacent (one hop out), then Outside default.
+    Case-insensitive; None/unknown industry -> Outside. Orthogonal to grade — never blended."""
+    ind = (industry or "").strip().lower()
+    if ind in _CORE_INDUSTRIES:
         return "Core"
-    if any(k in ind for k in _ADJACENT_INDUSTRY_KEYWORDS):
+    if ind in _ADJACENT_INDUSTRIES:
         return "Adjacent"
     return "Outside"
