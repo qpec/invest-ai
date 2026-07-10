@@ -411,7 +411,7 @@ def _cmd_journal(args) -> int:
         return 0
     for row in due:
         eid = row["entry_id"]
-        print(f"JE-{eid}  {row['decision_type']}  {row.get('ticker') or ''}".rstrip())
+        print(f"JE-{eid}  {row['decision_type']}  {row['ticker'] or ''}".rstrip())
         grade = _prompt("  outcome_grade", choices=("good", "neutral", "bad", "too_early"))
         note = _prompt("  note (optional)") or None
         jr.grade(conn, eid, outcome_grade=grade, note=note, clock=clock)
