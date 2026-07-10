@@ -14,14 +14,15 @@ from agentcy import scout_grade as sg
 
 
 def _ctx():
+    # GradedName field order (Stage-1.5): symbol, sector, tier, v, q, g, d, m, composite, grade, note
     graded = (
-        sg.GradedName("VEEV", "Technology", "Core", 58.0, 92.0, 84.0, 80.0, 78.0, "B", ""),
-        sg.GradedName("MSFT", "Technology", "Core", 40.0, 88.0, 90.0, 70.0, 71.0, "B", ""),
-        sg.GradedName("DIST", "Industrials", "Outside", 90.0, 74.0, 82.0, 88.0, 83.0, "A", ""),
-        sg.GradedName("SWX", "Technology", "Adjacent", 55.0, 60.0, 65.0, 60.0, 60.0, "C", ""),
-        sg.GradedName("LEVR", "Technology", "Adjacent", None, None, None, None, None,
+        sg.GradedName("VEEV", "Technology", "Core", 58.0, 92.0, 70.0, 84.0, 80.0, 78.0, "B", ""),
+        sg.GradedName("MSFT", "Technology", "Core", 40.0, 88.0, 60.0, 90.0, 71.0, 71.0, "B", ""),
+        sg.GradedName("DIST", "Industrials", "Outside", 90.0, 74.0, 65.0, 82.0, 83.0, 83.0, "A", ""),
+        sg.GradedName("SWX", "Technology", "Adjacent", 55.0, 60.0, 55.0, 65.0, 60.0, 60.0, "C", ""),
+        sg.GradedName("LEVR", "Technology", "Adjacent", None, None, None, None, None, None,
                       "VETOED", "leverage veto: net debt/EBITDA above the §2 floor"),
-        sg.GradedName("THIN", "Technology", "Outside", None, None, None, None, None,
+        sg.GradedName("THIN", "Technology", "Outside", None, None, None, None, None, None,
                       "INSUFFICIENT", "insufficient data: <2 usable periods"),
     )
     return ScoutGradedContext(as_of_label="Fri 10 Jul 2026", graded=graded,
@@ -82,7 +83,7 @@ def test_dilution_penalty_note_is_flagged_on_a_graded_row():
     composite. The renderer already holds the reason (g.note) — it must surface it as a
     'flagged - {symbol}: {note}' line, in BOTH skins, for any ranked row with a non-empty note."""
     graded = (
-        sg.GradedName("DILUT", "Technology", "Core", 60.0, 55.0, 70.0, 30.0, 62.0,
+        sg.GradedName("DILUT", "Technology", "Core", 60.0, 55.0, 65.0, 70.0, 30.0, 62.0,
                       "C", "dilution penalty: shares +14.0%/yr"),
     )
     ctx = ScoutGradedContext(as_of_label="Fri 10 Jul 2026", graded=graded,
@@ -96,7 +97,7 @@ def test_dilution_penalty_note_is_flagged_on_a_graded_row():
     # a clean graded row (empty note) emits no 'flagged' line
     clean = ScoutGradedContext(
         as_of_label="Fri 10 Jul 2026",
-        graded=(sg.GradedName("CLEAN", "Technology", "Core", 60.0, 55.0, 70.0, 55.0, 62.0, "C", ""),),
+        graded=(sg.GradedName("CLEAN", "Technology", "Core", 60.0, 55.0, 65.0, 70.0, 55.0, 62.0, "C", ""),),
         evidence_note=sg.HONEST_EVIDENCE_NOTE)
     assert "flagged" not in render_scout_graded(clean).markdown
     # still lint-clean (calm register: no bang / benchmark / imperative tokens)

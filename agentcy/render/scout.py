@@ -13,7 +13,7 @@ from agentcy.render import common as cm
 from agentcy.render.contexts import RenderedOutput
 
 _TIER_ORDER = ("Core", "Adjacent", "Outside")
-_HEADER = ("Ticker", "Grade", "Comp", "V", "Q", "D", "M")
+_HEADER = ("Ticker", "Grade", "Comp", "V", "Q", "G", "D", "M")
 
 
 @dataclass(frozen=True)
@@ -36,7 +36,8 @@ def _ranked(rows):
 def _body_rows(ranked):
     """The table body for one tier — one row list, shared by both skins (RF9)."""
     return [(g.symbol, g.grade, f"{g.composite:.0f}",
-             _fmt_pillar(g.v), _fmt_pillar(g.q), _fmt_pillar(g.d), _fmt_pillar(g.m))
+             _fmt_pillar(g.v), _fmt_pillar(g.q), _fmt_pillar(g.g),
+             _fmt_pillar(g.d), _fmt_pillar(g.m))
             for g in ranked]
 
 

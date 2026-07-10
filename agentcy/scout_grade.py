@@ -1,9 +1,9 @@
-"""Scout v2 Stage-1 — deterministic four-pillar graded screening (design §1-§4, §8 item 1).
+"""Scout v2 Stage-1 — deterministic five-pillar graded screening (design §1-§4, §8 item 1).
 
 Pure math over the append-only fundamentals archive (fetch/store.py) + FinanceDatabase
 categoricals. No LLM, no new dependency, no live network. Every metric traces to a
-design-doc pillar (V/Q/D/M); veto runs before grading and SUPPRESSES vetoed names;
-thin/stale data -> "insufficient data", never a silent 0.
+design-doc pillar (V/Q/G/D/M — Stage-1.5 change 3 added Growth); veto runs before grading
+and SUPPRESSES vetoed names; thin/stale data -> "insufficient data", never a silent 0.
 """
 from __future__ import annotations
 
@@ -366,7 +366,7 @@ class Veto:
 
 
 def veto_check(*, net_debt_to_ebitda, ebitda, net_debt, owner_fcf_positive_any,
-               shares_yoy_pct) -> Veto:
+               shares_yoy_pct, roic_pct=None, revenue_growth_pct=None) -> Veto:
     """Design §2 veto/penalty layer — runs BEFORE grading. Leverage & cash-destruction
     SUPPRESS (a vetoed name is removed from the shortlist, never sorted to the bottom
     where it could still surface); dilution is a -15 penalty, flagged, not a veto.
@@ -377,6 +377,10 @@ def veto_check(*, net_debt_to_ebitda, ebitda, net_debt, owner_fcf_positive_any,
     (True iff owner-FCF was positive in at least one available period, i.e.
     ``not durability_metrics()["owner_fcf_negative_all_periods"]``) — NOT the sign of the
     TTM sum. The cash-destruction veto fires only when owner-FCF is negative every period.
+
+    ``roic_pct``/``revenue_growth_pct`` are accepted-but-unused here (Stage-1.5 change 3):
+    grade_universe already passes the REAL values so Task 6 only edits this body to add the
+    high-ROIC + high-growth carve-out that spares the cash-destruction branch.
     """
     # Leverage veto (§2): net debt/EBITDA > 4, OR EBITDA <= 0 while still carrying net debt.
     if (net_debt_to_ebitda is not None and net_debt_to_ebitda > NET_DEBT_EBITDA_VETO) or \
@@ -435,9 +439,10 @@ def growth_leg_score(pct: float, cohort, *, roic_pct: float) -> float:
 
 
 # --- Pillar aggregation -> composite -> grade (design §1 composite table) ---------------
-# Composite weights (design §1): wonderful business (Q) at a fair price (V) dominant; the
-# avoid-ruin (D) and trust-management (M) guardrails co-equal. The entire tunable surface.
-W_V, W_Q, W_D, W_M = 0.30, 0.30, 0.20, 0.20
+# Composite weights (design change 3, Stage-1.5): wonderful business (Q) at a fair price (V)
+# co-dominant, profitable Growth (G) a first-class pillar, the avoid-ruin (D) and
+# trust-management (M) guardrails co-equal. Sums to 1.0. The entire tunable surface.
+W_V, W_Q, W_G, W_D, W_M = 0.25, 0.25, 0.20, 0.15, 0.15
 
 _GRADE_BANDS = ((80.0, "A"), (65.0, "B"), (50.0, "C"), (35.0, "D"))
 
@@ -451,9 +456,9 @@ def pillar_score(legs) -> float | None:
     return sum(present) / len(present)
 
 
-def composite(*, v: float, q: float, d: float, m: float, penalty: int) -> float:
-    """Design §1 composite, penalty applied, floored at 0 (and capped at 100)."""
-    raw = W_V * v + W_Q * q + W_D * d + W_M * m + penalty
+def composite(*, v: float, q: float, g: float, d: float, m: float, penalty: int) -> float:
+    """Stage-1.5 composite (design change 3), penalty applied, floored at 0 and capped at 100."""
+    raw = W_V * v + W_Q * q + W_G * g + W_D * d + W_M * m + penalty
     return max(0.0, min(100.0, round(raw, 4)))
 
 
@@ -523,12 +528,14 @@ def tier_of(*, sector, industry) -> str:
 
 @dataclass(frozen=True)
 class GradedName:
-    """One Stage-1 graded row (design §4). grade in {A,B,C,D,F,VETOED,INSUFFICIENT}."""
+    """One Stage-1 graded row (design §4). grade in {A,B,C,D,F,VETOED,INSUFFICIENT}.
+    Field order matches the V/Q/G/D/M column order (Stage-1.5: g added between q and d)."""
     symbol: str
     sector: str | None
     tier: str
     v: float | None
     q: float | None
+    g: float | None
     d: float | None
     m: float | None
     composite: float | None
@@ -557,16 +564,18 @@ def _required_metric_gap(bundle) -> str | None:
 
 
 def _raw_bundle(conn, symbol, md, as_of):
-    """All four pillars' raw metric dicts for one ticker; None -> insufficient (a pillar is
-    not computable at all: thin/stale archive or missing pinned rows, design §2)."""
+    """All pillars' raw metric dicts for one ticker; None -> insufficient (a pillar is not
+    computable at all: thin/stale archive or missing pinned rows, design §2). G returns a dict
+    with None legs when thin (never suspends the name — it degrades to neutral 50 at scoring)."""
     val = value_metrics(conn, symbol, market_cap=md["market_cap"],
                         total_debt=md["total_debt"], cash=md["cash"], as_of=as_of)
     qual = quality_metrics(conn, symbol, as_of=as_of)
     dur = durability_metrics(conn, symbol, as_of=as_of)
     mgmt = management_metrics(conn, symbol, as_of=as_of)
-    if None in (val, qual, dur, mgmt):
+    grow = growth_metrics(conn, symbol, as_of=as_of)
+    if None in (val, qual, dur, mgmt, grow):
         return None
-    return {"v": val, "q": qual, "d": dur, "m": mgmt}
+    return {"v": val, "q": qual, "g": grow, "d": dur, "m": mgmt}
 
 
 def _dig(d, path):
@@ -598,13 +607,13 @@ def grade_universe(conn, universe, *, market_data, as_of) -> list[GradedName]:
         md = market_data.get(sym)
         bundle = _raw_bundle(conn, sym, md, as_of) if md else None
         if bundle is None:
-            results[sym] = GradedName(sym, sector, tier, None, None, None, None, None,
+            results[sym] = GradedName(sym, sector, tier, None, None, None, None, None, None,
                                       "INSUFFICIENT", _insufficient)
             continue
         # RF5 — a None REQUIRED metric is an integrity-suspend, emitted BEFORE any percentile.
         gap = _required_metric_gap(bundle)
         if gap is not None:
-            results[sym] = GradedName(sym, sector, tier, None, None, None, None, None,
+            results[sym] = GradedName(sym, sector, tier, None, None, None, None, None, None,
                                       "INSUFFICIENT", f"{_insufficient}: {gap}")
             continue
         d = bundle["d"]
@@ -615,9 +624,11 @@ def grade_universe(conn, universe, *, market_data, as_of) -> list[GradedName]:
             ebitda=d["ebitda"],
             net_debt=d["net_debt"],
             owner_fcf_positive_any=not d["owner_fcf_negative_all_periods"],
-            shares_yoy_pct=bundle["m"]["shares_yoy_pct"])
+            shares_yoy_pct=bundle["m"]["shares_yoy_pct"],
+            roic_pct=bundle["q"]["roic_pct"],
+            revenue_growth_pct=bundle["g"]["revenue_growth_pct"])
         if veto.vetoed:
-            results[sym] = GradedName(sym, sector, tier, None, None, None, None, None,
+            results[sym] = GradedName(sym, sector, tier, None, None, None, None, None, None,
                                       "VETOED", veto.reason)
             continue
         raw[sym] = {"bundle": bundle, "penalty": veto.penalty, "reason": veto.reason}
@@ -645,6 +656,24 @@ def grade_universe(conn, universe, *, market_data, as_of) -> list[GradedName]:
             sector_percentile(b["q"]["owner_fcf_margin_pct"],
                               cohort(sym, ("q", "owner_fcf_margin_pct")), higher_better=True),
         ])
+        # Growth pillar G (Stage-1.5 change 3): each PRESENT leg is ROIC-gated (profitable
+        # growth only); if BOTH legs are None (thin data) G degrades to neutral 50 — the name
+        # still grades on V/Q/D/M, never punished for missing growth history.
+        roic_pct = b["q"]["roic_pct"]
+        g_legs = []
+        if b["g"]["revenue_growth_pct"] is not None:
+            g_legs.append(growth_leg_score(
+                b["g"]["revenue_growth_pct"],
+                [c for c in cohort(sym, ("g", "revenue_growth_pct")) if c is not None],
+                roic_pct=roic_pct))
+        if b["g"]["per_share_ofcf_growth_pct"] is not None:
+            g_legs.append(growth_leg_score(
+                b["g"]["per_share_ofcf_growth_pct"],
+                [c for c in cohort(sym, ("g", "per_share_ofcf_growth_pct")) if c is not None],
+                roic_pct=roic_pct))
+        g = pillar_score(g_legs)
+        if g is None:
+            g = NEUTRAL_G                                   # thin growth data -> neutral, not punished
         d = pillar_score([
             sector_percentile(b["d"]["net_debt_to_ebitda"],
                               cohort(sym, ("d", "net_debt_to_ebitda")), higher_better=False),
@@ -652,18 +681,17 @@ def grade_universe(conn, universe, *, market_data, as_of) -> list[GradedName]:
             sector_percentile(b["d"]["sbc_to_revenue_pct"],
                               cohort(sym, ("d", "sbc_to_revenue_pct")), higher_better=False),
         ])
-        # Stage-1.5 change 3: per-share owner-FCF growth MOVED to the Growth pillar G
-        # (growth_metrics); M carries dilution + Sloan accrual only. Task 5 wires the G-pillar
-        # leg (normalized per-share growth + revenue growth, ROIC-gated) into the composite.
+        # Stage-1.5 change 3: per-share owner-FCF growth MOVED to the Growth pillar G above;
+        # M carries dilution + Sloan accrual only (no double-count).
         m_legs = [sector_percentile(b["m"]["accrual_divergence_pct"],
                                     cohort(sym, ("m", "accrual_divergence_pct")), higher_better=False)]
         if b["m"]["shares_yoy_pct"] is not None:
             m_legs.append(sector_percentile(b["m"]["shares_yoy_pct"],
                                             cohort(sym, ("m", "shares_yoy_pct")), higher_better=False))
         m = pillar_score(m_legs)
-        comp = composite(v=v, q=q, d=d, m=m, penalty=entry["penalty"])
+        comp = composite(v=v, q=q, g=g, d=d, m=m, penalty=entry["penalty"])
         results[sym] = GradedName(sym, meta[sym]["sector"], meta[sym]["tier"],
-                                  round(v, 1), round(q, 1), round(d, 1), round(m, 1),
+                                  round(v, 1), round(q, 1), round(g, 1), round(d, 1), round(m, 1),
                                   comp, grade_letter(comp), entry["reason"])
     # stable order: universe order
     return [results[r["symbol"]] for r in rows]
