@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import statistics
+from dataclasses import dataclass
 from datetime import datetime
 
 import pandas as pd
@@ -237,3 +238,46 @@ def _per_share_ofcf_growth(conn, yf_ticker, oe, as_of) -> tuple[float | None, st
     label = (f"per-share owner-FCF growth, {oldest_d}->{newest_d} annualized "
              f"— 3yr CAGR not computable from archive")
     return growth, label
+
+
+# --- Veto / penalty layer (design §2) -------------------------------------------------
+# Absolute reference lines inherited from v1 / design §2 (the ONLY fixed numbers here).
+NET_DEBT_EBITDA_VETO = 4.0        # net debt/EBITDA above this = leverage wreck (§2)
+DILUTION_PENALTY_PCT = 5.0        # share count growing faster than this = serial dilution
+DILUTION_PENALTY = -15           # subtracted from the composite, flagged (not a veto)
+
+
+@dataclass(frozen=True)
+class Veto:
+    """Design §2 outcome. ``vetoed`` -> grade SUPPRESSED (cap, never rank); ``penalty`` ->
+    subtracted from the composite; ``reason`` is the printed explanation ("" when clean)."""
+    vetoed: bool
+    penalty: int
+    reason: str
+
+
+def veto_check(*, net_debt_to_ebitda, ebitda, net_debt, owner_fcf_positive_any,
+               shares_yoy_pct) -> Veto:
+    """Design §2 veto/penalty layer — runs BEFORE grading. Leverage & cash-destruction
+    SUPPRESS (a vetoed name is removed from the shortlist, never sorted to the bottom
+    where it could still surface); dilution is a -15 penalty, flagged, not a veto.
+
+    RF2 — ``ebitda`` and ``net_debt`` are the REAL raw figures from ``durability_metrics``
+    (never fabricated placeholders); the EBITDA<=0-with-net-debt branch reads them directly.
+    RF3 — ``owner_fcf_positive_any`` must be fed the PER-PERIOD cash-destruction signal
+    (True iff owner-FCF was positive in at least one available period, i.e.
+    ``not durability_metrics()["owner_fcf_negative_all_periods"]``) — NOT the sign of the
+    TTM sum. The cash-destruction veto fires only when owner-FCF is negative every period.
+    """
+    # Leverage veto (§2): net debt/EBITDA > 4, OR EBITDA <= 0 while still carrying net debt.
+    if (net_debt_to_ebitda is not None and net_debt_to_ebitda > NET_DEBT_EBITDA_VETO) or \
+       (ebitda is not None and ebitda <= 0 and net_debt is not None and net_debt > 0):
+        return Veto(True, 0, "leverage veto: net debt/EBITDA above the §2 floor")
+    # Cash-destruction veto (§2, RF3): owner-FCF negative across ALL available periods.
+    if not owner_fcf_positive_any:
+        return Veto(True, 0, "cash-destruction veto: owner-FCF negative every period")
+    # Dilution penalty (§2): serial issuance > 5%/yr — a -15 hit, flagged, not a veto.
+    if shares_yoy_pct is not None and shares_yoy_pct > DILUTION_PENALTY_PCT:
+        return Veto(False, DILUTION_PENALTY,
+                    f"dilution penalty: shares +{shares_yoy_pct:.1f}%/yr")
+    return Veto(False, 0, "")
