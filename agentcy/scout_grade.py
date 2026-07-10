@@ -20,6 +20,62 @@ from agentcy.fetch import store
 from agentcy.scout import HONEST_EVIDENCE_NOTE  # re-export (design §9: printed every run)
 
 
+@dataclass(frozen=True)
+class NormalizedOwnerEarnings:
+    """Stage-1.5 discovery-only owner earnings (design change 1): maintenance-CapEx proxy is
+    min(|CapEx|, D&A) so high-return GROWTH CapEx is not treated as a cost. Distinct from
+    store.OwnerEarnings (the conservative figure that guards held positions, left unchanged)."""
+    owner_fcf_ttm: float
+    owner_fcf_per_share_ttm: float
+    owner_fcf_margin_ttm: float
+    periods_used: tuple[str, ...]
+
+
+def normalized_owner_fcf_ttm(conn, yf_ticker: str, *, as_of: datetime
+                             ) -> NormalizedOwnerEarnings | None:
+    """Scout discovery-only normalized owner earnings: sum over the newest 4 quarters of
+    (OCF - min(|CapEx|, D&A) - SBC). D&A is the cashflow 'Depreciation And Amortization'
+    pinned row; ABSENT (missing/NaN) for a period -> maintenance proxy = |CapEx| so that
+    period's normalized value equals the conservative (OCF - |CapEx|) - SBC (a safe
+    degradation, never an error - plan note 1/3). ANY period missing OCF or CapEx, or fewer
+    than 4 quarters, or no share count at/before as_of -> None (matches
+    store.owner_fcf_ttm's not-computable contract). store.owner_fcf_ttm is NOT modified."""
+    cf = store.statement_history(conn, yf_ticker, "cashflow", as_of=as_of)
+    inc = store.statement_history(conn, yf_ticker, "income", as_of=as_of)
+    cf_pay = store._period_payloads(cf.value)
+    inc_pay = store._period_payloads(inc.value)
+    periods = sorted(cf_pay, reverse=True)[:4]               # newest 4 quarters
+    if len(periods) < 4:
+        return None
+    normalized = revenue = 0.0
+    for p in periods:
+        cell = cf_pay[p]
+        ocf = cell.get("Operating Cash Flow")
+        capex = cell.get("Capital Expenditure")
+        if ocf is None or capex is None:
+            return None
+        capex_abs = abs(float(capex))
+        da = cell.get("Depreciation And Amortization")       # absent/NaN -> fall back to |CapEx|
+        maint = min(capex_abs, float(da)) if da is not None else capex_abs
+        sbc = float(cell.get("Stock Based Compensation") or 0.0)
+        normalized += float(ocf) - maint - sbc
+        rev = inc_pay.get(p, {}).get("Total Revenue")
+        revenue += float(rev) if rev is not None else 0.0
+
+    shares = store.shares_history(conn, yf_ticker, as_of=as_of)
+    if len(shares.value) == 0:
+        return None
+    at_or_before = shares.value[shares.value.index <= pd.Timestamp(as_of.date())]
+    if len(at_or_before) == 0:
+        return None
+    share_count = float(at_or_before.iloc[-1])
+    if share_count <= 0:
+        return None
+    per_share = normalized / share_count
+    margin = (normalized / revenue) if revenue > 0 else 0.0
+    return NormalizedOwnerEarnings(normalized, per_share, margin, tuple(sorted(periods)))
+
+
 def value_metrics(conn, yf_ticker: str, *, market_cap: float, total_debt: float,
                   cash: float, as_of: datetime) -> dict | None:
     """Pillar V raw metrics (design §1 Pillar V, BUF-1/BUF-5): owner-FCF yield on EV and
