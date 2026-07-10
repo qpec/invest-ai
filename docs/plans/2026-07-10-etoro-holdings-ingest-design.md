@@ -148,3 +148,20 @@ historical backfill of past snapshots, and demo-account support.
   `positions_advice` untouched).
 - "Never executes": **kept** (client has no trade methods; Read scope only).
 - Secrets: env-only, `chmod 600`, git-ignored.
+
+## Implementation notes (2026-07-10)
+
+- **FX two tiers.** `default_fx` is built directly on the canonical `store.fx_rate_eur`
+  (no bespoke FX path); the weekly/production `production_fx` wraps it and **self-primes**
+  `{CUR}EUR=X` on a cache-miss, so a first run or a newly held currency needs no manual
+  pre-seed.
+- **Fail-loud fallback never crashes the letter.** On any eToro/FX failure `etoro_refresh`
+  enqueues a `notice` and returns, leaving the last good snapshot in place. Its dedupe key
+  routes through `runner.qualified_key`, so a same-day re-sweep promotes an already-sent
+  per-date key to an attempt-qualified revision instead of raising `ValueError` out of the
+  except block (§5.4).
+- **Secrets are OPTIONAL.** The env template ships both eToro keys **blank**; the weekly
+  guard requires BOTH truthy, so an unconfigured box stays in manual-snapshot mode and the
+  manual `agentcy snapshot etoro` path still works.
+- **Zero new runtime dependencies** — the whole feature stays within the four-package
+  budget (stdlib `urllib`/`ssl` client), and the license gate remains clean.
