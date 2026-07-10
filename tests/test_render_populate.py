@@ -91,3 +91,40 @@ def test_milestone_refire_after_delivery_never_raises(tmp_db):
     tmp_db.commit()
     # no new queued notice appeared (the sent row is untouched).
     assert [r for r in db.fetch_outbox_queued(tmp_db) if r["kind"] == "notice"] == []
+
+
+def test_delivered_milestone_skips_full_universe_walk(tmp_db, monkeypatch):
+    """Quality fix: once a milestone key is SENT (a terminal, ValueError-raising state), the
+    nightly re-fire must NOT re-run the expensive full-universe coverage detector just to throw
+    the result away. A single indexed dedupe_key lookup short-circuits the whole branch."""
+    ranked = ["MSFT", "VEEV"]
+    _cache(tmp_db, "MSFT")
+    _cache(tmp_db, "VEEV")
+    # every ranked name attempted at least once -> the full-pass transition also holds.
+    for sym in ranked:
+        db.append_universe_fetch(tmp_db, yf_ticker=sym, outcome="ok",
+                                 attempted_at="2026-07-07T00:00:00Z", run_id=None)
+    # first night: both milestones fire, then get marked SENT (delivered).
+    rp.maybe_emit_milestones(tmp_db, ranked, starter_size=2, run_id=None,
+                             as_of=AS_OF, clock=CLOCK)
+    tmp_db.commit()
+    for key in ("populate:milestone:starter", "populate:milestone:full_pass"):
+        row = db.fetch_outbox_by_key(tmp_db, key)
+        assert row is not None and row["status"] == "queued"
+        db.update_outbox_state(tmp_db, row["outbox_id"], status="sent", tg_message_id=1)
+    tmp_db.commit()
+
+    # both keys are now terminal; any recompute would be discarded. Make the detectors and the
+    # per-name count blow up if the guard ever lets them run again.
+    def _boom(*a, **k):  # pragma: no cover - only reached on regression
+        raise AssertionError("full-universe detector re-ran on a delivered milestone")
+
+    monkeypatch.setattr(rp, "_starter_complete", _boom)
+    monkeypatch.setattr(rp, "_full_pass_complete", _boom)
+    monkeypatch.setattr(rp, "_cached_count", _boom)
+
+    # a later night: the cheap dedupe_key lookup must skip both branches without touching them.
+    rp.maybe_emit_milestones(tmp_db, ranked, starter_size=2, run_id=None,
+                             as_of=AS_OF, clock=CLOCK)
+    tmp_db.commit()
+    assert [r for r in db.fetch_outbox_queued(tmp_db) if r["kind"] == "notice"] == []
