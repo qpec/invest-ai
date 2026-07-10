@@ -56,10 +56,14 @@ def render_weekly(ctx: WeeklyContext) -> tuple[tuple[RenderedOutput, ...], Rende
 
     # --- Msg 3/4 — balance & concentration snapshot ---
     b = ctx.balance
+    # n_eff is None when return history is too thin to cluster (mirror.balance, stale); state it
+    # honestly ("n/a") rather than crash the letter — suspended is not green (B.3.4 spirit).
+    n_eff_txt = f"N_eff {b.n_eff:g} vs floor 4.0 {'✓' if b.n_eff_ok else '×'}" \
+        if b.n_eff is not None else "N_eff n/a (return history too thin)"
     m3_lines = [
         f"Cash {b.cash_pct:g}% ({'✓' if b.cash_in_band else '×'}) · "
         f"position count {'✓' if b.position_count_in_band else '×'} · "
-        f"N_eff {b.n_eff:g} vs floor 4.0 {'✓' if b.n_eff_ok else '×'}",
+        f"{n_eff_txt}",
     ]
     for br in (b.soft_cap_breaches + b.hard_cap_breaches + b.cluster_weight_breaches):
         m3_lines.append(f"Band breach: {br}.")
