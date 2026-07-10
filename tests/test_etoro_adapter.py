@@ -249,3 +249,58 @@ def test_fetch_etoro_snapshot_captures_optional_detail_fields():
     (d,) = snap.details
     assert d.current_rate == 120.0
     assert d.direction == "buy"
+
+
+def test_fetch_etoro_snapshot_converts_per_symbol_currency():
+    # Two symbols in different native currencies: USD must be crossed (×0.9),
+    # EUR must pass through untouched. Guards against per-symbol FX crosswiring.
+    class FakeClient:
+        def get_positions(self):
+            return [
+                {"symbol": "AAPL", "type": "Stocks", "units": 1.0, "invested": 100.0,
+                 "open_rate": 100.0, "open_date": "2024-01-01", "mv_native": 200.0,
+                 "pnl_native": 100.0, "leverage": 1.0, "currency": "USD"},
+                {"symbol": "ASML", "type": "Stocks", "units": 1.0, "invested": 100.0,
+                 "open_rate": 100.0, "open_date": "2024-01-01", "mv_native": 300.0,
+                 "pnl_native": 200.0, "leverage": 1.0, "currency": "EUR"},
+            ]
+        def get_balances(self):
+            return {"cash": 0.0, "currency": "EUR"}
+    snap = etoro.fetch_etoro_snapshot(FakeClient(), fx=_FX, as_of="2026-07-10")
+    by_symbol = {p.symbol: p for p in snap.positions}
+    assert by_symbol["AAPL"].native_currency == "USD"
+    assert by_symbol["AAPL"].mv_eur == 180.0  # 200 × 0.9
+    assert by_symbol["ASML"].native_currency == "EUR"
+    assert by_symbol["ASML"].mv_eur == 300.0  # EUR: unchanged
+
+
+def test_fetch_etoro_snapshot_zero_invested_none_branches():
+    # A closed-to-zero remnant: units and invested both 0 reaches the adapter.
+    # Covers BOTH None branches through fetch_etoro_snapshot (not aggregate_lots
+    # directly): avg_open_price None (units==0) and unrealized_pnl_pct None
+    # (invested_native==0).
+    class FakeClient:
+        def get_positions(self):
+            return [{"symbol": "AAPL", "type": "Stocks", "units": 0.0, "invested": 0.0,
+                     "open_rate": 0.0, "open_date": "2024-01-01", "mv_native": 0.0,
+                     "pnl_native": 0.0, "leverage": 1.0, "currency": "USD"}]
+        def get_balances(self):
+            return {"cash": 0.0, "currency": "EUR"}
+    snap = etoro.fetch_etoro_snapshot(FakeClient(), fx=_FX, as_of="2026-07-10")
+    (p,) = snap.positions
+    assert p.avg_open_price is None
+    (d,) = snap.details
+    assert d.unrealized_pnl_pct is None
+
+
+def test_fetch_etoro_snapshot_missing_symbol_raises():
+    class FakeClient:
+        def get_positions(self):
+            return [{"type": "Stocks", "units": 1.0, "invested": 100.0,
+                     "open_rate": 100.0, "open_date": "2024-01-01", "mv_native": 120.0,
+                     "pnl_native": 20.0, "leverage": 1.0, "currency": "USD"}]  # no symbol
+        def get_balances(self):
+            return {"cash": 0.0, "currency": "EUR"}
+    with pytest.raises(etoro.EtoroError) as exc:
+        etoro.fetch_etoro_snapshot(FakeClient(), fx=_FX, as_of="2026-07-10")
+    assert "position missing symbol" in str(exc.value)

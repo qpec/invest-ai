@@ -178,6 +178,10 @@ def fetch_etoro_snapshot(
     for pos in raw_positions:
         if _is_cash(pos):
             continue
+        # The shape guard only guarantees dicts, not a `symbol` key; raise a typed
+        # error (not a bare KeyError) consistent with the rest of the shape-guarding.
+        if not pos.get("symbol"):
+            raise EtoroError(f"position missing symbol: {pos!r}")
         groups.setdefault(pos["symbol"], []).append(pos)
 
     position_ins: list[mirror.PositionIn] = []
@@ -189,6 +193,9 @@ def fetch_etoro_snapshot(
         mv_eur = fx(agg["mv_native"], native_ccy)
         invested_native = agg["invested_native"]
         invested_eur = fx(invested_native, native_ccy)
+        # group-level fields (currency, type, direction, current_rate) taken from the
+        # first lot — all lots of a symbol are assumed to share these; revisit if
+        # hedged/mixed-direction positions appear.
         first = lots[0]
         position_ins.append(mirror.PositionIn(
             symbol=symbol, yf_ticker=mirror._yf_for(symbol, itype), instrument_type=itype,
@@ -201,7 +208,7 @@ def fetch_etoro_snapshot(
             unrealized_pnl_pct=(agg["pnl_native"] / invested_native * 100)
             if invested_native else None,
             current_rate=first.get("current_rate"), direction=first.get("direction"),
-            lot_count=agg["lot_count"], raw_json=json.dumps(lots)))
+            lot_count=agg["lot_count"], raw_json=json.dumps(lots, default=str)))
 
     # weight = fraction of invested MV (mirror the CSV/manual adapters); ingest recomputes
     # this authoritatively, so consistency matters more than being the source of truth.
