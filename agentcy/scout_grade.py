@@ -103,3 +103,63 @@ def quality_metrics(conn, yf_ticker: str, *, as_of: datetime) -> dict | None:
         "gross_margin_cv": cv,
         "owner_fcf_margin_pct": 100.0 * oe.value.owner_fcf_margin_ttm,
     }
+
+
+def _owner_fcf_negative_all_periods(cf_pay: dict) -> bool:
+    """RF3 — owner-FCF < 0 in EVERY available period (per-period cash-destruction, NOT the
+    sign of the TTM sum). Per-period owner-FCF = (OCF - |CapEx|) - SBC, matching the pinned
+    construction in store.owner_fcf_ttm (SBC-free filer -> 0, plan note 4). Periods missing a
+    required pinned row are dropped (never a silent zero); an empty result is not "all
+    negative" -> False."""
+    vals = []
+    for pe in sorted(cf_pay):
+        cell = cf_pay[pe]
+        ocf = cell.get("Operating Cash Flow")
+        capex = cell.get("Capital Expenditure")
+        if ocf is None or capex is None:
+            continue
+        sbc = float(cell.get("Stock Based Compensation") or 0.0)
+        vals.append((float(ocf) - abs(float(capex))) - sbc)
+    return bool(vals) and all(v < 0 for v in vals)
+
+
+def durability_metrics(conn, yf_ticker: str, *, as_of: datetime) -> dict | None:
+    """Pillar D raw metrics (design §1 Pillar D). net debt uses the LATEST balance period;
+    EBITDA + revenue + SBC are TTM (sum of available quarters, up to 4). None when a pinned
+    input is absent.
+
+    RF2 — ALSO returns the raw TTM ``ebitda`` and raw ``net_debt`` (= total_debt - cash) so
+    Task 9's veto_check feeds REAL values, never a fabricated placeholder.
+    RF3 — ALSO returns ``owner_fcf_negative_all_periods`` (per-period cash-destruction from
+    the archive), which Task 9's cash-destruction veto uses instead of the TTM sum sign."""
+    inc = _latest_payloads(conn, yf_ticker, "income", as_of)
+    bal = _latest_payloads(conn, yf_ticker, "balance", as_of)
+    cf = _latest_payloads(conn, yf_ticker, "cashflow", as_of)
+    oe = store.owner_fcf_ttm(conn, yf_ticker, as_of=as_of)
+    if not inc or not bal or not cf or oe is None:
+        return None
+    periods = sorted(inc, reverse=True)[:4]
+    ebitda = revenue = 0.0
+    for pe in periods:
+        cell = inc[pe]
+        e = cell.get("EBITDA")
+        r = cell.get("Total Revenue")
+        if e is None or r is None:
+            return None
+        ebitda += float(e)
+        revenue += float(r)
+    sbc = oe.value.sbc_ttm
+    latest_bal = bal[max(bal)]
+    debt = latest_bal.get("Total Debt")
+    cash = latest_bal.get("Cash And Cash Equivalents")
+    if debt is None or cash is None or ebitda == 0 or revenue <= 0:
+        return None
+    net_debt = debt - cash                                   # RF2 — raw net debt
+    return {
+        "ebitda": ebitda,                                    # RF2 — raw TTM EBITDA
+        "net_debt": net_debt,                                # RF2 — raw net debt
+        "net_debt_to_ebitda": net_debt / ebitda,
+        "owner_fcf_positive": oe.value.owner_fcf_ttm > 0,
+        "owner_fcf_negative_all_periods": _owner_fcf_negative_all_periods(cf),  # RF3
+        "sbc_to_revenue_pct": 100.0 * sbc / revenue,
+    }
