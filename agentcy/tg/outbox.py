@@ -7,6 +7,8 @@ their render+archive transaction; only the daemon delivers.
 """
 from __future__ import annotations
 
+from datetime import timedelta
+
 from agentcy import db
 from agentcy.clock import Clock
 
@@ -47,3 +49,18 @@ def enqueue(conn, *, dedupe_key: str, kind: str, payload_html: str, document_pat
         reply_markup_json=reply_markup_json)
 
 # --- P7 (daemon) drain/backoff/collapse land below this marker ---
+
+_BACKOFF = [
+    timedelta(seconds=30),
+    timedelta(minutes=2),
+    timedelta(minutes=10),
+    timedelta(minutes=30),
+]
+_HOURLY = timedelta(hours=1)
+
+
+def next_backoff(attempts: int) -> timedelta:
+    """30s, 2m, 10m, 30m, then hourly (§5.4)."""
+    if attempts < len(_BACKOFF):
+        return _BACKOFF[attempts]
+    return _HOURLY
