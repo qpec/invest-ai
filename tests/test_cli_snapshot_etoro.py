@@ -97,6 +97,25 @@ def test_non_dry_run_ingests_api_pull_and_mints(tmp_db, fixed_clock, monkeypatch
     assert len(minted) == 1 and minted[0][0] == snap["snapshot_id"]
 
 
+def test_fetch_error_returns_1_and_writes_nothing(tmp_db, fixed_clock, monkeypatch, capsys):
+    cli = _wire(monkeypatch, tmp_db, fixed_clock)
+    monkeypatch.setenv("AGENTCY_ETORO_API_KEY", "sekret-api")
+    monkeypatch.setenv("AGENTCY_ETORO_USER_KEY", "sekret-user")
+    _stub_fx_and_client(monkeypatch, cli)
+
+    from agentcy.fetch import etoro
+    monkeypatch.setattr(
+        etoro, "fetch_etoro_snapshot",
+        lambda *a, **k: (_ for _ in ()).throw(etoro.EtoroError("boom")))
+
+    rc = cli.main(["snapshot", "etoro"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "boom" in err
+    # a failed pull writes NOTHING
+    assert db.fetch_latest_snapshot(tmp_db) is None
+
+
 def test_live_flag_is_accepted(tmp_db, fixed_clock, monkeypatch, capsys):
     cli = _wire(monkeypatch, tmp_db, fixed_clock)
     monkeypatch.setenv("AGENTCY_ETORO_API_KEY", "sekret-api")

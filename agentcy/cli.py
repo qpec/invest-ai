@@ -68,7 +68,10 @@ def build_parser() -> argparse.ArgumentParser:
     snsub.add_parser("enter").set_defaults(handler="snapshot")
     setoro = snsub.add_parser("etoro", help="pull holdings from the eToro Read API")
     setoro.add_argument("--dry-run", action="store_true")
-    setoro.add_argument("--live", action="store_true", help="opt-in real API smoke")
+    setoro.add_argument(
+        "--live", action="store_true",
+        help="acknowledge live-API use (advisory; real API is used whenever the "
+             "AGENTCY_ETORO_* keys are set)")
     setoro.set_defaults(handler="snapshot")
 
     jr = sub.add_parser("journal", help="Decision Journal")
@@ -327,6 +330,8 @@ def _cmd_snapshot_etoro(args, conn, m, clock) -> int:
               "in the environment.", file=sys.stderr)
         return 1
     if args.live:
+        # --live is advisory only: it gates nothing. The real API is used whenever the
+        # env keys are present (checked above); this just echoes an acknowledgement.
         print("live mode: using the real eToro Read API (env keys present).",
               file=sys.stderr)
 
