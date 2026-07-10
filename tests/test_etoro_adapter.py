@@ -2,9 +2,15 @@
 
 instrument-type mapping + per-symbol lot aggregation. No I/O, no network.
 """
+import json
+
 import pytest
 
 from agentcy.fetch import etoro
+
+
+# fake FX: USD->EUR at 0.9, everything else 1:1. Deterministic, no network.
+_FX = lambda amount, ccy: amount * 0.9 if ccy == "USD" else amount
 
 
 # -- map_instrument_type -----------------------------------------------------
@@ -121,3 +127,125 @@ def test_aggregate_lots_zero_quantity_avg_price_none():
     agg = etoro.aggregate_lots("ZERO", lots)
     assert agg["quantity"] == 0.0
     assert agg["avg_open_price"] is None
+
+
+# -- fetch_etoro_snapshot (Task 5) -------------------------------------------
+def test_fetch_etoro_snapshot_builds_snapshotin_and_details():
+    class FakeClient:
+        def get_positions(self):
+            return [{"symbol": "AAPL", "type": "Stocks", "units": 3.0, "invested": 600.0,
+                     "open_rate": 200.0, "open_date": "2023-01-15", "mv_native": 750.0,
+                     "pnl_native": 150.0, "leverage": 1.0, "currency": "USD"}]
+        def get_balances(self):
+            return {"cash": 100.0, "currency": "USD"}
+    snap = etoro.fetch_etoro_snapshot(FakeClient(), fx=_FX, as_of="2026-07-10")
+    assert snap.source == "api_pull"
+    assert snap.cash_balance_eur == 90.0
+    (p,) = snap.positions
+    assert p.symbol == "AAPL" and p.instrument_type == "stock" and p.quantity == 3.0
+    assert p.mv_eur == 675.0 and p.native_currency == "USD"
+    assert p.yf_ticker == "AAPL"
+    assert p.weight == 1.0  # single position => whole invested MV
+    (d,) = snap.details
+    assert d.symbol == "AAPL" and d.opened_at == "2023-01-15" and d.lot_count == 1
+    assert d.invested_eur == 540.0
+    assert d.invested_native == 600.0
+    assert d.unrealized_pnl_native == 150.0
+    assert d.unrealized_pnl_pct == pytest.approx(25.0)  # 150/600*100
+    # raw_json round-trips the original lot dicts for the symbol
+    assert json.loads(d.raw_json)[0]["symbol"] == "AAPL"
+
+
+def test_fetch_etoro_snapshot_multi_lot_collapses_to_one():
+    class FakeClient:
+        def get_positions(self):
+            return [
+                {"symbol": "MSFT", "type": "Stocks", "units": 2.0, "invested": 400.0,
+                 "open_rate": 200.0, "open_date": "2024-06-01", "mv_native": 500.0,
+                 "pnl_native": 100.0, "leverage": 1.0, "currency": "EUR"},
+                {"symbol": "MSFT", "type": "Stocks", "units": 1.0, "invested": 210.0,
+                 "open_rate": 210.0, "open_date": "2023-01-15", "mv_native": 250.0,
+                 "pnl_native": 40.0, "leverage": 1.0, "currency": "EUR"},
+            ]
+        def get_balances(self):
+            return {"cash": 0.0, "currency": "EUR"}
+    snap = etoro.fetch_etoro_snapshot(FakeClient(), fx=_FX, as_of="2026-07-10")
+    (p,) = snap.positions
+    assert p.symbol == "MSFT" and p.quantity == 3.0
+    assert p.mv_native == 750.0 and p.mv_eur == 750.0  # EUR: 1:1
+    (d,) = snap.details
+    assert d.lot_count == 2
+    assert d.opened_at == "2023-01-15"  # earliest lot
+    assert d.invested_native == 610.0
+    assert len(json.loads(d.raw_json)) == 2
+
+
+def test_fetch_etoro_snapshot_folds_cash_position():
+    class FakeClient:
+        def get_positions(self):
+            return [
+                {"symbol": "AAPL", "type": "Stocks", "units": 1.0, "invested": 100.0,
+                 "open_rate": 100.0, "open_date": "2024-01-01", "mv_native": 110.0,
+                 "pnl_native": 10.0, "leverage": 1.0, "currency": "EUR"},
+                {"symbol": "CASH", "type": "cash", "units": 0.0, "invested": 0.0,
+                 "open_rate": 0.0, "open_date": "2024-01-01", "mv_native": 50.0,
+                 "pnl_native": 0.0, "leverage": 1.0, "currency": "EUR"},
+            ]
+        def get_balances(self):
+            return {"cash": 50.0, "currency": "EUR"}
+    snap = etoro.fetch_etoro_snapshot(FakeClient(), fx=_FX, as_of="2026-07-10")
+    # the cash entry is NOT an instrument
+    assert [p.symbol for p in snap.positions] == ["AAPL"]
+    assert [d.symbol for d in snap.details] == ["AAPL"]
+    # cash comes from balances, not the folded position
+    assert snap.cash_balance_eur == 50.0
+
+
+def test_fetch_etoro_snapshot_shape_guard_rejects_non_list():
+    class FakeClient:
+        def get_positions(self):
+            return {"unexpected": "dict body"}
+        def get_balances(self):
+            return {"cash": 0.0, "currency": "EUR"}
+    with pytest.raises(etoro.EtoroError) as exc:
+        etoro.fetch_etoro_snapshot(FakeClient(), fx=_FX, as_of="2026-07-10")
+    assert "expected a list of positions" in str(exc.value)
+    assert "dict" in str(exc.value)
+
+
+def test_fetch_etoro_snapshot_shape_guard_rejects_non_dict_element():
+    class FakeClient:
+        def get_positions(self):
+            return ["AAPL"]  # str, not a dict
+        def get_balances(self):
+            return {"cash": 0.0, "currency": "EUR"}
+    with pytest.raises(etoro.EtoroError):
+        etoro.fetch_etoro_snapshot(FakeClient(), fx=_FX, as_of="2026-07-10")
+
+
+def test_fetch_etoro_snapshot_unknown_type_propagates():
+    class FakeClient:
+        def get_positions(self):
+            return [{"symbol": "GOLD", "type": "Commodities", "units": 1.0, "invested": 100.0,
+                     "open_rate": 100.0, "open_date": "2024-01-01", "mv_native": 110.0,
+                     "pnl_native": 10.0, "leverage": 1.0, "currency": "USD"}]
+        def get_balances(self):
+            return {"cash": 0.0, "currency": "EUR"}
+    with pytest.raises(etoro.EtoroError) as exc:
+        etoro.fetch_etoro_snapshot(FakeClient(), fx=_FX, as_of="2026-07-10")
+    assert "unknown eToro instrument type" in str(exc.value)
+
+
+def test_fetch_etoro_snapshot_captures_optional_detail_fields():
+    class FakeClient:
+        def get_positions(self):
+            return [{"symbol": "AAPL", "type": "Stocks", "units": 1.0, "invested": 100.0,
+                     "open_rate": 100.0, "open_date": "2024-01-01", "mv_native": 120.0,
+                     "pnl_native": 20.0, "leverage": 1.0, "currency": "USD",
+                     "current_rate": 120.0, "direction": "buy"}]
+        def get_balances(self):
+            return {"cash": 0.0, "currency": "EUR"}
+    snap = etoro.fetch_etoro_snapshot(FakeClient(), fx=_FX, as_of="2026-07-10")
+    (d,) = snap.details
+    assert d.current_rate == 120.0
+    assert d.direction == "buy"

@@ -25,11 +25,31 @@ class PositionIn:
 
 
 @dataclass(frozen=True)
+class PositionDetailIn:
+    """Rich per-position record for the position_detail table (api_pull source only).
+
+    All optional except symbol; column-for-column with schema/001_position_detail.sql.
+    NEVER read by positions_advice / the balance path (invariant 4) — record-keeping only.
+    """
+    symbol: str
+    opened_at: str | None = None
+    invested_native: float | None = None
+    invested_eur: float | None = None
+    unrealized_pnl_native: float | None = None
+    unrealized_pnl_pct: float | None = None
+    current_rate: float | None = None
+    direction: str | None = None
+    lot_count: int | None = None
+    raw_json: str | None = None
+
+
+@dataclass(frozen=True)
 class SnapshotIn:
     as_of: str
     source: str
     cash_balance_eur: float
     positions: tuple[PositionIn, ...]
+    details: tuple[PositionDetailIn, ...] = ()
 
 
 def _yf_for(symbol: str, instrument_type: str) -> str | None:
