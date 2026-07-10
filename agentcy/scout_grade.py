@@ -233,19 +233,20 @@ def durability_metrics(conn, yf_ticker: str, *, as_of: datetime) -> dict | None:
 
 
 def management_metrics(conn, yf_ticker: str, *, as_of: datetime) -> dict | None:
-    """Pillar M deterministic raw metrics (design §1 Pillar M): share-count trend, per-share
-    owner-FCF growth, accrual/cash divergence. The qualitative half (candor, alignment,
-    related-party dealings) is DEFERRED to the Stage-2 shortlist and NEVER faked here (FR9).
-    None when the underlying statements/shares are absent (integrity-suspend, never a silent 0).
+    """Pillar M deterministic raw metrics (design §1 Pillar M): share-count trend + accrual/
+    cash divergence. The qualitative half (candor, alignment, related-party dealings) is
+    DEFERRED to the Stage-2 shortlist and NEVER faked here (FR9). None when the underlying
+    statements/shares are absent (integrity-suspend, never a silent 0).
+
+    Stage-1.5 change 3: per-share owner-FCF growth is MOVED OUT of M into the Growth pillar G
+    (``growth_metrics`` / ``_per_share_normalized_growth``), on the NORMALIZED owner-earnings
+    figure, so it is neither double-counted here nor scored off the conservative number.
 
     - shares_yoy_pct: trailing-12m share-count growth % (B.2 type 4). None (leg SUSPENDED,
       not scored 0) when no ~1y-ago share observation exists (RF6 graceful degradation).
     - accrual_divergence_pct: 100·(net-income TTM − Operating Cash Flow TTM) / revenue TTM
       (classic Sloan accruals, capex-independent — Stage-1.5 change 3). >0 = reported profit
-      with no cash behind it (a Munger earnings-quality red flag); still lower-better.
-    - per_share_ofcf_growth_pct / per_share_ofcf_growth_label: annualized per-share owner-FCF
-      growth over the AVAILABLE share window, labelled honestly (RF11 — the archive holds only
-      a <3yr window, so it is never presented as a true 3yr CAGR)."""
+      with no cash behind it (a Munger earnings-quality red flag); still lower-better."""
     inc = _latest_payloads(conn, yf_ticker, "income", as_of)
     cf = _latest_payloads(conn, yf_ticker, "cashflow", as_of)
     if not inc or not cf:
@@ -271,51 +272,81 @@ def management_metrics(conn, yf_ticker: str, *, as_of: datetime) -> dict | None:
             return None
         ocf += float(o)
     accrual_div = 100.0 * (ni - ocf) / rev
-    # Task 4 removes the per-share growth call below (and this binding); until then the growth
-    # call still needs owner-FCF. REVIEW FIX 2: keep it on store.owner_fcf_ttm for this commit.
-    oe = store.owner_fcf_ttm(conn, yf_ticker, as_of=as_of)
-    if oe is None:
-        return None
 
     sh = store.shares_yoy(conn, yf_ticker, as_of=as_of)      # Stamped[float | None]
     shares_yoy_pct = sh.value if sh.usable() and sh.value is not None else None
 
-    growth_pct, growth_label = _per_share_ofcf_growth(conn, yf_ticker, oe, as_of)
     return {
         "shares_yoy_pct": shares_yoy_pct,
         "accrual_divergence_pct": accrual_div,
-        "per_share_ofcf_growth_pct": growth_pct,
-        "per_share_ofcf_growth_label": growth_label,
     }
 
 
-def _per_share_ofcf_growth(conn, yf_ticker, oe, as_of) -> tuple[float | None, str | None]:
-    """Annualized per-share owner-FCF growth over the deduped share window (oldest usable ->
-    newest at/before as_of); returns (value, honest-label). None with < 2 observations or a
-    non-positive base (integrity-suspend, never 0).
+def _revenue_growth(conn, yf_ticker, as_of) -> tuple[float | None, str | None]:
+    """Annualized revenue growth over the available archive window (oldest usable -> newest
+    usable 'Total Revenue', annualized by the actual calendar span; plan note 4). None with
+    < 2 usable periods or a non-positive base. Honest <3yr-window label."""
+    inc = _latest_payloads(conn, yf_ticker, "income", as_of)
+    pts = []
+    for pe in sorted(inc):
+        rev = inc[pe].get("Total Revenue")
+        if rev is not None and float(rev) > 0:
+            pts.append((pe, float(rev)))
+    if len(pts) < 2:
+        return None, None
+    (oldest_d, oldest_rev), (newest_d, newest_rev) = pts[0], pts[-1]
+    years = max((pd.Timestamp(newest_d) - pd.Timestamp(oldest_d)).days / 365.25, 1e-9)
+    growth = 100.0 * ((newest_rev / oldest_rev) ** (1.0 / years) - 1.0)
+    label = (f"revenue growth, {oldest_d}->{newest_d} annualized "
+             f"— 3yr CAGR not computable from archive")
+    return growth, label
 
-    RF11 — the archive holds only a <3yr window, so the returned label is explicit that this
-    is the annualized available-window growth and that a true 3yr CAGR is not computable."""
+
+def _per_share_normalized_growth(conn, yf_ticker, as_of) -> tuple[float | None, str | None]:
+    """Annualized per-share NORMALIZED owner-earnings growth over the deduped share window
+    (Stage-1.5: normalized figure, moved here from M). None with < 2 share observations or a
+    non-positive base. Honest <3yr-window label (RF11)."""
+    oe = normalized_owner_fcf_ttm(conn, yf_ticker, as_of=as_of)
+    if oe is None:
+        return None, None
     sh = store.shares_history(conn, yf_ticker, as_of=as_of)
     if not sh.usable():
         return None, None
     series = sh.value[sh.value.index <= pd.Timestamp(as_of.date())]
     if len(series) < 2:
         return None, None
-    newest_ps = oe.value.owner_fcf_per_share_ttm
+    newest_ps = oe.owner_fcf_per_share_ttm
     oldest_shares = float(series.iloc[0])
     if oldest_shares <= 0 or newest_ps <= 0:
         return None, None
-    base_ps = oe.value.owner_fcf_ttm / oldest_shares        # owner-FCF at the older share base
+    base_ps = oe.owner_fcf_ttm / oldest_shares              # owner-FCF at the older share base
     if base_ps <= 0:
         return None, None
     oldest_d = series.index[0].date().isoformat()
     newest_d = series.index[-1].date().isoformat()
     years = max((series.index[-1] - series.index[0]).days / 365.25, 1e-9)
     growth = 100.0 * ((newest_ps / base_ps) ** (1.0 / years) - 1.0)
-    label = (f"per-share owner-FCF growth, {oldest_d}->{newest_d} annualized "
+    label = (f"per-share normalized owner-FCF growth, {oldest_d}->{newest_d} annualized "
              f"— 3yr CAGR not computable from archive")
     return growth, label
+
+
+def growth_metrics(conn, yf_ticker: str, *, as_of: datetime) -> dict | None:
+    """Pillar G raw metrics (design change 3): annualized revenue growth + per-share
+    NORMALIZED owner-earnings growth, each with an honest <3yr-window label. Returns a dict
+    with None legs when a leg is not computable (the scoring layer degrades G to neutral 50
+    when BOTH are None). None only when the income archive is absent entirely."""
+    inc = _latest_payloads(conn, yf_ticker, "income", as_of)
+    if not inc:
+        return None
+    rev_pct, rev_label = _revenue_growth(conn, yf_ticker, as_of)
+    ps_pct, ps_label = _per_share_normalized_growth(conn, yf_ticker, as_of)
+    return {
+        "revenue_growth_pct": rev_pct,
+        "revenue_growth_label": rev_label,
+        "per_share_ofcf_growth_pct": ps_pct,
+        "per_share_ofcf_growth_label": ps_label,
+    }
 
 
 # --- Veto / penalty layer (design §2) -------------------------------------------------
@@ -366,6 +397,7 @@ def veto_check(*, net_debt_to_ebitda, ebitda, net_debt, owner_fcf_positive_any,
 # inherited from v1 (scout.QV_ROIC_MIN, there a percentage). Here ROIC is scored as a
 # RATIO floor, so QV_ROIC_MIN is the fraction 0.15 (== 15%) — RF4.
 QV_ROIC_MIN = 0.15
+NEUTRAL_G = 50.0        # Stage-1.5: G degrades to neutral 50 when growth data is too thin
 
 
 def sector_percentile(value: float, cohort, *, higher_better: bool) -> float:
@@ -389,6 +421,17 @@ def roic_leg_score(roic_pct: float, cohort) -> float:
     pct = sector_percentile(roic_pct, cohort, higher_better=True)
     floor_factor = max(0.0, min(1.0, roic_pct / (100.0 * QV_ROIC_MIN)))
     return round(pct * floor_factor, 6)
+
+
+def growth_leg_score(pct: float, cohort, *, roic_pct: float) -> float:
+    """A Growth-pillar leg (Stage-1.5 change 3): the sector percentile of a growth metric
+    DISCOUNTED by the absolute >15% ROIC floor (leg * min(1, ROIC/15%)), mirroring
+    roic_leg_score. The ROIC gate rewards only PROFITABLE growth ('growth at any cost'
+    scores ~0 — a lightweight Munger fad-guard). ``roic_pct`` is a percentage; the floor is
+    QV_ROIC_MIN (0.15 == 15%)."""
+    p = sector_percentile(pct, cohort, higher_better=True)
+    floor_factor = max(0.0, min(1.0, roic_pct / (100.0 * QV_ROIC_MIN)))
+    return round(p * floor_factor, 6)
 
 
 # --- Pillar aggregation -> composite -> grade (design §1 composite table) ---------------
@@ -609,14 +652,14 @@ def grade_universe(conn, universe, *, market_data, as_of) -> list[GradedName]:
             sector_percentile(b["d"]["sbc_to_revenue_pct"],
                               cohort(sym, ("d", "sbc_to_revenue_pct")), higher_better=False),
         ])
+        # Stage-1.5 change 3: per-share owner-FCF growth MOVED to the Growth pillar G
+        # (growth_metrics); M carries dilution + Sloan accrual only. Task 5 wires the G-pillar
+        # leg (normalized per-share growth + revenue growth, ROIC-gated) into the composite.
         m_legs = [sector_percentile(b["m"]["accrual_divergence_pct"],
                                     cohort(sym, ("m", "accrual_divergence_pct")), higher_better=False)]
         if b["m"]["shares_yoy_pct"] is not None:
             m_legs.append(sector_percentile(b["m"]["shares_yoy_pct"],
                                             cohort(sym, ("m", "shares_yoy_pct")), higher_better=False))
-        if b["m"]["per_share_ofcf_growth_pct"] is not None:
-            m_legs.append(sector_percentile(b["m"]["per_share_ofcf_growth_pct"],
-                                            cohort(sym, ("m", "per_share_ofcf_growth_pct")), higher_better=True))
         m = pillar_score(m_legs)
         comp = composite(v=v, q=q, d=d, m=m, penalty=entry["penalty"])
         results[sym] = GradedName(sym, meta[sym]["sector"], meta[sym]["tier"],
