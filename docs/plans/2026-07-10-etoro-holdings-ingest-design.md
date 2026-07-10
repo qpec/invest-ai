@@ -72,7 +72,7 @@ this.
   5. Stamp `source="api_pull"`, `as_of` = fetch date.
 
 ### Secrets
-`ETORO_API_KEY` + `ETORO_USER_KEY` as environment variables (systemd
+`AGENTCY_ETORO_API_KEY` + `AGENTCY_ETORO_USER_KEY` as environment variables (systemd
 `EnvironmentFile`, `chmod 600`, git-ignored), read at job start exactly like the
 Telegram token. **Never in the DB, never committed, never logged.**
 
