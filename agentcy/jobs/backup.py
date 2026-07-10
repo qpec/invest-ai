@@ -114,6 +114,10 @@ def run_one(conn, handle, *, clock: Clock, state_dir: Path) -> tuple[str, dict]:
     sync = {}
     try:
         sync = rsync_second_disk(state_dir / "backups", SECOND_DISK / "backups")
+        # R9/§12.3: the recovery toolchain install.sh staged on-box also mirrors to the second
+        # disk here, so restore_drill's year-8 rebuild verification hashes a real artifact.
+        sync["toolchain"] = rsync_second_disk(
+            state_dir / TOOLCHAIN_SUBDIR, SECOND_DISK / TOOLCHAIN_SUBDIR)
     except Exception as exc:
         sync = {"rsync_error": repr(exc)}
     pushed = gitio.push_backup(state_dir / "archive")      # R9: archive mirror via git push backup
