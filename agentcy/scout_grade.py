@@ -344,3 +344,41 @@ def grade_letter(comp: float) -> str:
         if comp >= lo:
             return letter
     return "F"
+
+
+# --- Circle-of-competence tiering (design §3) — orthogonal to grade, never blended ------
+# Tier is a priority LANE assigned purely from the FinanceDatabase (yfinance) sector/
+# industry categoricals — deterministic, no LLM. Core = the owner's edge (design §3:
+# cloud/SaaS infra, healthcare & insurance tech, AI tooling); Adjacent = one hop out
+# (broader software, IT services, med-devices, fintech, data/analytics); Outside = the rest.
+#
+# RF10 — every keyword below is a case-folded SUBSTRING of an ACTUAL FinanceDatabase
+# industry value; no invented taxonomy ("cloud"/"ai tooling" vanity strings match no real
+# industry and are omitted). "Insurance Brokers" is a real industry but it is DISTRIBUTION,
+# not insurtech, so it is deliberately NOT Core — the insurance-tech edge surfaces through
+# the software industries (an insurtech files under Software - Infrastructure/Application).
+_CORE_INDUSTRY_KEYWORDS = (
+    "software - infrastructure",    # cloud/SaaS infrastructure — the owner's edge
+    "health information services",  # healthcare tech
+)
+_ADJACENT_INDUSTRY_KEYWORDS = (
+    "software - application",            # broader SaaS
+    "software",                          # any remaining software industry (checked after Core)
+    "information technology services",   # IT services
+    "medical devices",                   # med-devices
+    "medical instruments & supplies",    # med-devices (real taxonomy sibling)
+    "semiconductors",                    # data/compute plumbing (real value is plural)
+    "financial data & stock exchanges",  # fintech data/analytics
+)
+
+
+def tier_of(*, sector, industry) -> str:
+    """Core / Adjacent / Outside (design §3). Industry-keyword first, Core before Adjacent
+    (most specific wins so an infra name is never demoted), then Outside default.
+    Case-insensitive; None fields -> Outside. Tier is orthogonal to grade — never blended."""
+    ind = (industry or "").lower()
+    if any(k in ind for k in _CORE_INDUSTRY_KEYWORDS):
+        return "Core"
+    if any(k in ind for k in _ADJACENT_INDUSTRY_KEYWORDS):
+        return "Adjacent"
+    return "Outside"
