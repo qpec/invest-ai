@@ -5,6 +5,7 @@ event job does the actual check (§1.5)."""
 from __future__ import annotations
 
 import dataclasses
+import os
 from datetime import timedelta
 from pathlib import Path
 
@@ -14,7 +15,7 @@ from agentcy import (archive, asks, cluster, config as config_mod, db, events, g
                      mirror, register, study, triggers)
 from agentcy.clock import Clock, SystemClock
 from agentcy.events import EventRequest
-from agentcy.fetch import store, yf
+from agentcy.fetch import etoro, store, yf
 from agentcy.fetch.yf import FetchFailed
 from agentcy.jobs import keyboards, runner
 from agentcy.render import alert as render_alert_mod, contexts
@@ -45,6 +46,41 @@ def _mint_and_spool(conn, req: EventRequest, *, run_id: int, state_dir: Path) ->
                                note=req.note, detected_at=req.detected_at,
                                detected_late=int(req.detected_late), run_id=run_id))
     events.spool_write(state_dir, req)
+
+
+def _etoro_client(api_key, user_key):
+    """Seam: build the eToro Read-API client. Tests monkeypatch this to a FakeClient so
+    the weekly-auto pull is network-free (mirrors the cli.py pattern)."""
+    return etoro.build_client(api_key, user_key)
+
+
+def etoro_refresh(conn, *, run_id, clock, state_dir):
+    """Weekly-auto eToro pull (D.2). Runs ONLY when the API keys are set. Never crashes
+    the weekly run: on any eToro/FX failure it enqueues a notice and returns, leaving the
+    last good snapshot in place (the staleness ladder already flags an old snapshot)."""
+    api_key = os.environ.get("AGENTCY_ETORO_API_KEY")
+    user_key = os.environ.get("AGENTCY_ETORO_USER_KEY")
+    if not (api_key and user_key):
+        return  # eToro auto-ingest not configured; weekly proceeds on the manual snapshot path
+    try:
+        client = _etoro_client(api_key, user_key)
+        fx = etoro.production_fx(conn, as_of=clock.now(), state_dir=state_dir,
+                                 clock=clock, run_id=run_id)
+        snap = etoro.fetch_etoro_snapshot(client, fx=fx, as_of=clock.now().date().isoformat())
+        snapshot_id, deltas = mirror.ingest_snapshot(conn, snap, clock=clock)
+        mirror.mint_reconciliation_asks(conn, snapshot_id, deltas, clock=clock)
+    except (etoro.EtoroError, FetchFailed) as e:
+        last = db.fetch_latest_snapshot(conn)
+        since = last["as_of"] if last else "never"
+        # qualified_key promotes an already-sent/collapsed per-date key to an
+        # attempt-qualified revision so a same-day re-sweep re-enqueue never raises
+        # ValueError out of this except block and crashes the weekly run (§5.4).
+        base = f"etoro-fail:{clock.now().date().isoformat()}"
+        outbox.enqueue(conn, dedupe_key=runner.qualified_key(conn, base),
+                       kind="notice",
+                       payload_html=(f"eToro fetch failed: {e} — holdings unchanged since {since}. "
+                                     "The weekly review proceeds on the last snapshot."),
+                       clock=clock)
 
 
 def refresh_batch(conn, *, run_id: int, clock: Clock, state_dir: Path) -> dict:
@@ -315,6 +351,7 @@ def run_one(conn, handle, *, clock: Clock, state_dir: Path) -> tuple[str, dict]:
     """D.2 top-level: refresh -> triggers/prompted -> context (incl. the F.3 Study digest,
     whose rotation pointer advances in build_weekly_context's study_block) -> assemble/deliver
     -> housekeeping sweeps. Never opens the benchmark store / imports quantstats (invariants 4/7)."""
+    etoro_refresh(conn, run_id=handle.run_id, clock=clock, state_dir=state_dir)
     batch = refresh_batch(conn, run_id=handle.run_id, clock=clock, state_dir=state_dir)
     fired = run_trigger_tests(conn, run_id=handle.run_id, clock=clock)
     qs = queue_prompted_questions(conn, run_id=handle.run_id, clock=clock)

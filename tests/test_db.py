@@ -54,14 +54,20 @@ def test_open_db_pragmas_and_row_factory(tmp_path, monkeypatch):
 
 
 def test_migrate_applies_000_once_and_records(tmp_path):
+    # isolate to only 000 so this test proves "000 applies once + records" independent of
+    # how many later migrations exist (001+ are exercised by their own suites).
+    import shutil
+    sd = tmp_path / "schema"
+    sd.mkdir()
+    shutil.copy(SCHEMA_DIR / "000_init.sql", sd / "000_init.sql")
     conn = db.open_db(tmp_path)
-    assert db.migrate(conn) == [0]
+    assert db.migrate(conn, schema_dir=sd) == [0]
     assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
     row = conn.execute("SELECT * FROM schema_migration WHERE version=0").fetchone()
     sql = (SCHEMA_DIR / "000_init.sql").read_text(encoding="utf-8")
     assert row["sha256"] == hashlib.sha256(sql.encode("utf-8")).hexdigest()
     db.from_iso(row["applied_at"])                     # parses as contract ISO format
-    assert db.migrate(conn) == []                      # idempotent re-run
+    assert db.migrate(conn, schema_dir=sd) == []       # idempotent re-run
     conn.close()
 
 

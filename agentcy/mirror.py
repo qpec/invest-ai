@@ -25,11 +25,31 @@ class PositionIn:
 
 
 @dataclass(frozen=True)
+class PositionDetailIn:
+    """Rich per-position record for the position_detail table (api_pull source only).
+
+    All optional except symbol; column-for-column with schema/001_position_detail.sql.
+    NEVER read by positions_advice / the balance path (invariant 4) — record-keeping only.
+    """
+    symbol: str
+    opened_at: str | None = None
+    invested_native: float | None = None
+    invested_eur: float | None = None
+    unrealized_pnl_native: float | None = None
+    unrealized_pnl_pct: float | None = None
+    current_rate: float | None = None
+    direction: str | None = None
+    lot_count: int | None = None
+    raw_json: str | None = None
+
+
+@dataclass(frozen=True)
 class SnapshotIn:
     as_of: str
     source: str
     cash_balance_eur: float
     positions: tuple[PositionIn, ...]
+    details: tuple[PositionDetailIn, ...] = ()
 
 
 def _yf_for(symbol: str, instrument_type: str) -> str | None:
@@ -124,6 +144,16 @@ def ingest_snapshot(conn, snap: SnapshotIn, *, clock: Clock) -> tuple[int, list[
         "quantity": p.quantity, "avg_open_price": p.avg_open_price,
         "native_currency": p.native_currency, "mv_native": p.mv_native, "mv_eur": p.mv_eur,
         "weight": p.mv_eur / total_mv, "leverage": p.leverage} for p in snap.positions])
+    # api_pull carries rich per-position detail (Task 5/6); CSV/manual snapshots have none,
+    # so the guard keeps those paths untouched. Record-keeping only (invariant 4).
+    if snap.details:
+        db.append_position_details(conn, snapshot_id, [{
+            "symbol": d.symbol, "opened_at": d.opened_at,
+            "invested_native": d.invested_native, "invested_eur": d.invested_eur,
+            "unrealized_pnl_native": d.unrealized_pnl_native,
+            "unrealized_pnl_pct": d.unrealized_pnl_pct, "current_rate": d.current_rate,
+            "direction": d.direction, "lot_count": d.lot_count, "raw_json": d.raw_json}
+            for d in snap.details])
     deltas: list[Delta] = []
     now_by_sym = {p.symbol: p for p in snap.positions}
     # leverage tripwire — every snapshot, regardless of previous state (E.1 continuous Hell-No)

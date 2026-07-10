@@ -120,6 +120,19 @@ def append_positions(conn, snapshot_id: int, rows: Sequence[Mapping]) -> None:
         _insert(conn, "position", vals)
 
 
+_POSITION_DETAIL_COLS = frozenset({"symbol", "opened_at", "invested_native",
+                                   "invested_eur", "unrealized_pnl_native",
+                                   "unrealized_pnl_pct", "current_rate", "direction",
+                                   "lot_count", "raw_json"})
+
+def append_position_details(conn, snapshot_id: int, details: Sequence[Mapping]) -> None:
+    """Insert position_detail rows for a snapshot (append-only companion, invariant 1)."""
+    for row in details:
+        vals = _checked(row, _POSITION_DETAIL_COLS, "position_detail")
+        vals["snapshot_id"] = snapshot_id
+        _insert(conn, "position_detail", vals)
+
+
 def append_designation(conn, *, symbol: str, framework_status: str,
                        valid_from: str, journal_ref: int) -> None:
     """Append designation row (latest wins, E.2)."""
@@ -424,6 +437,13 @@ def fetch_positions_records(conn, snapshot_id: int) -> list[Row]:
     """Raw position rows incl. avg_open_price (AST-enforced caller restrictions, P5)."""
     return conn.execute(
         "SELECT * FROM position WHERE snapshot_id=? ORDER BY symbol",
+        (snapshot_id,)).fetchall()
+
+
+def fetch_position_details(conn, snapshot_id: int) -> list[Row]:
+    """position_detail rows for a snapshot, ordered by symbol (thesis/journal/reporting only)."""
+    return conn.execute(
+        "SELECT * FROM position_detail WHERE snapshot_id=? ORDER BY symbol",
         (snapshot_id,)).fetchall()
 
 
