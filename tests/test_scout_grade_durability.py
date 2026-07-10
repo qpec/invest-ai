@@ -116,5 +116,28 @@ def test_durability_owner_fcf_negative_all_periods_true_when_every_period_negati
     assert d["owner_fcf_negative_all_periods"] is True
 
 
+def test_durability_self_funding_uses_normalized(tmp_db, yf_statements, yf_series):
+    """Stage-1.5: D's self-funding leg + the per-period cash-destruction flag are computed
+    from the NORMALIZED per-period figure. A name that is conservative-negative but
+    normalized-positive in a period is NOT flagged as destroying cash."""
+    pack = yf_statements("msft_statements")
+    cf = pack["cashflow"].copy()
+    # Heavy growth CapEx makes conservative owner-FCF negative every period, but modest D&A
+    # makes NORMALIZED owner-FCF positive every period.
+    for c in list(cf.columns):
+        cf.loc["Operating Cash Flow", c] = 20e9
+        cf.loc["Capital Expenditure", c] = -30e9            # conservative: 20-30-sbc < 0
+        cf.loc["Stock Based Compensation", c] = 1e9
+        cf.loc["Depreciation And Amortization", c] = 4e9    # normalized: 20-4-1 = +15e9 > 0
+    store.store_statements(tmp_db, "MSFT",
+                           {"income": pack["income"], "balance": pack["balance"], "cashflow": cf},
+                           run_id=None, fetched_at="2026-07-01T00:00:00Z")
+    store.store_shares(tmp_db, "MSFT", yf_series("msft_shares_full"),
+                       fetched_at="2026-07-01T00:00:00Z")
+    d = sg.durability_metrics(tmp_db, "MSFT", as_of=AS_OF)
+    assert d["owner_fcf_positive"] is True                   # normalized TTM > 0
+    assert d["owner_fcf_negative_all_periods"] is False      # normalized positive every period
+
+
 def test_durability_none_when_absent(tmp_db):
     assert sg.durability_metrics(tmp_db, "MSFT", as_of=AS_OF) is None

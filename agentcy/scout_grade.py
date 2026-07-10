@@ -78,13 +78,13 @@ def normalized_owner_fcf_ttm(conn, yf_ticker: str, *, as_of: datetime
 
 def value_metrics(conn, yf_ticker: str, *, market_cap: float, total_debt: float,
                   cash: float, as_of: datetime) -> dict | None:
-    """Pillar V raw metrics (design §1 Pillar V, BUF-1/BUF-5): owner-FCF yield on EV and
-    the P/owner-FCF display companion. None when owner-FCF is not computable at all;
-    owner_fcf_yield None when EV <= 0 (RF5 — return None cleanly, never raise)."""
-    oe = store.owner_fcf_ttm(conn, yf_ticker, as_of=as_of)
+    """Pillar V raw metrics (design Pillar V + Stage-1.5 change 1): owner-FCF yield on EV and
+    the P/owner-FCF display companion, both on the NORMALIZED owner-FCF figure. None when
+    normalized owner-FCF is not computable at all; owner_fcf_yield None when EV <= 0 (RF5)."""
+    oe = normalized_owner_fcf_ttm(conn, yf_ticker, as_of=as_of)
     if oe is None:
         return None
-    owner_fcf = oe.value.owner_fcf_ttm
+    owner_fcf = oe.owner_fcf_ttm
     ev = market_cap + total_debt - cash
     return {
         "owner_fcf_ttm": owner_fcf,
@@ -154,7 +154,7 @@ def quality_metrics(conn, yf_ticker: str, *, as_of: datetime) -> dict | None:
     bal = _latest_payloads(conn, yf_ticker, "balance", as_of)
     roic = _roic_pct(inc, bal)
     gm = _gross_margin_series(inc)
-    oe = store.owner_fcf_ttm(conn, yf_ticker, as_of=as_of)
+    oe = normalized_owner_fcf_ttm(conn, yf_ticker, as_of=as_of)
     if roic is None or not gm or oe is None:
         return None
     mean_gm = sum(gm) / len(gm)
@@ -163,16 +163,15 @@ def quality_metrics(conn, yf_ticker: str, *, as_of: datetime) -> dict | None:
         "roic_pct": roic,
         "gross_margin_level_pct": 100.0 * mean_gm,
         "gross_margin_cv": cv,
-        "owner_fcf_margin_pct": 100.0 * oe.value.owner_fcf_margin_ttm,
+        "owner_fcf_margin_pct": 100.0 * oe.owner_fcf_margin_ttm,
     }
 
 
 def _owner_fcf_negative_all_periods(cf_pay: dict) -> bool:
-    """RF3 — owner-FCF < 0 in EVERY available period (per-period cash-destruction, NOT the
-    sign of the TTM sum). Per-period owner-FCF = (OCF - |CapEx|) - SBC, matching the pinned
-    construction in store.owner_fcf_ttm (SBC-free filer -> 0, plan note 4). Periods missing a
-    required pinned row are dropped (never a silent zero); an empty result is not "all
-    negative" -> False."""
+    """Stage-1.5 change 1 + RF3 — NORMALIZED owner-FCF < 0 in EVERY available period
+    (per-period cash-destruction, NOT the sign of the TTM sum). Per-period normalized owner-FCF
+    = OCF - min(|CapEx|, D&A) - SBC, D&A absent -> |CapEx| (plan note 3). Periods missing a
+    required pinned row are dropped; an empty result is not 'all negative' -> False."""
     vals = []
     for pe in sorted(cf_pay):
         cell = cf_pay[pe]
@@ -180,8 +179,11 @@ def _owner_fcf_negative_all_periods(cf_pay: dict) -> bool:
         capex = cell.get("Capital Expenditure")
         if ocf is None or capex is None:
             continue
+        capex_abs = abs(float(capex))
+        da = cell.get("Depreciation And Amortization")
+        maint = min(capex_abs, float(da)) if da is not None else capex_abs
         sbc = float(cell.get("Stock Based Compensation") or 0.0)
-        vals.append((float(ocf) - abs(float(capex))) - sbc)
+        vals.append(float(ocf) - maint - sbc)
     return bool(vals) and all(v < 0 for v in vals)
 
 
@@ -197,7 +199,7 @@ def durability_metrics(conn, yf_ticker: str, *, as_of: datetime) -> dict | None:
     inc = _latest_payloads(conn, yf_ticker, "income", as_of)
     bal = _latest_payloads(conn, yf_ticker, "balance", as_of)
     cf = _latest_payloads(conn, yf_ticker, "cashflow", as_of)
-    oe = store.owner_fcf_ttm(conn, yf_ticker, as_of=as_of)
+    oe = normalized_owner_fcf_ttm(conn, yf_ticker, as_of=as_of)
     if not inc or not bal or not cf or oe is None:
         return None
     periods = sorted(inc, reverse=True)[:4]
@@ -210,7 +212,10 @@ def durability_metrics(conn, yf_ticker: str, *, as_of: datetime) -> dict | None:
             return None
         ebitda += float(e)
         revenue += float(r)
-    sbc = oe.value.sbc_ttm
+    # SBC/revenue stays on RAW SBC (owner-dilution signal, unrelated to CapEx normalization).
+    sbc = 0.0
+    for pe in sorted(cf, reverse=True)[:4]:
+        sbc += float(cf[pe].get("Stock Based Compensation") or 0.0)
     latest_bal = bal[max(bal)]
     debt = latest_bal.get("Total Debt")
     cash = latest_bal.get("Cash And Cash Equivalents")
@@ -221,7 +226,7 @@ def durability_metrics(conn, yf_ticker: str, *, as_of: datetime) -> dict | None:
         "ebitda": ebitda,                                    # RF2 — raw TTM EBITDA
         "net_debt": net_debt,                                # RF2 — raw net debt
         "net_debt_to_ebitda": net_debt / ebitda,
-        "owner_fcf_positive": oe.value.owner_fcf_ttm > 0,
+        "owner_fcf_positive": oe.owner_fcf_ttm > 0,
         "owner_fcf_negative_all_periods": _owner_fcf_negative_all_periods(cf),  # RF3
         "sbc_to_revenue_pct": 100.0 * sbc / revenue,
     }

@@ -58,3 +58,18 @@ def test_quality_roic_uses_ebit_not_nopat(tmp_db, yf_statements, yf_series):
 
 def test_quality_metrics_none_when_statements_absent(tmp_db):
     assert sg.quality_metrics(tmp_db, "MSFT", as_of=AS_OF) is None
+
+
+def test_quality_owner_fcf_margin_uses_normalized(tmp_db, yf_statements, yf_series):
+    """Stage-1.5: Q's owner-FCF margin uses the NORMALIZED figure. With D&A injected,
+    margin% = 100 * 101.4e9 / 252e9, not 100 * 75.4e9 / 252e9."""
+    pack = yf_statements("msft_statements")
+    cf = pack["cashflow"].copy()
+    cf.loc["Depreciation And Amortization"] = [5e9, 5e9, 5e9, 5e9]
+    store.store_statements(tmp_db, "MSFT",
+                           {"income": pack["income"], "balance": pack["balance"], "cashflow": cf},
+                           run_id=None, fetched_at="2026-07-01T00:00:00Z")
+    store.store_shares(tmp_db, "MSFT", yf_series("msft_shares_full"),
+                       fetched_at="2026-07-01T00:00:00Z")
+    q = sg.quality_metrics(tmp_db, "MSFT", as_of=AS_OF)
+    assert round(q["owner_fcf_margin_pct"], 6) == round(100.0 * 101.4e9 / 252e9, 6)

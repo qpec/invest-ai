@@ -50,3 +50,20 @@ def test_value_metrics_yield_none_when_ev_non_positive(tmp_db, yf_statements, yf
     assert m["owner_fcf_yield"] is None
     # owner_fcf > 0 and market_cap > 0 so the P/owner-FCF companion is still computable
     assert round(m["p_owner_fcf"], 2) == round(50e9 / 75.4e9, 2)
+
+
+def test_value_uses_normalized_owner_fcf(tmp_db, yf_statements, yf_series):
+    """Stage-1.5: V consumes the NORMALIZED owner-FCF. Inject a small D&A row so normalized
+    (101.4e9) > conservative (75.4e9); the yield/p_owner_fcf must reflect 101.4e9."""
+    pack = yf_statements("msft_statements")
+    cf = pack["cashflow"].copy()
+    cf.loc["Depreciation And Amortization"] = [5e9, 5e9, 5e9, 5e9]
+    store.store_statements(tmp_db, "MSFT",
+                           {"income": pack["income"], "balance": pack["balance"], "cashflow": cf},
+                           run_id=None, fetched_at="2026-07-01T00:00:00Z")
+    store.store_shares(tmp_db, "MSFT", yf_series("msft_shares_full"),
+                       fetched_at="2026-07-01T00:00:00Z")
+    m = sg.value_metrics(tmp_db, "MSFT", market_cap=2.8e12, total_debt=59e9,
+                         cash=84e9, as_of=AS_OF)
+    assert round(m["owner_fcf_ttm"] / 1e9, 1) == 101.4       # normalized, not 75.4
+    assert round(m["owner_fcf_yield"], 4) == round(101.4e9 / 2.775e12, 4)
