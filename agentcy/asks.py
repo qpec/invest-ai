@@ -122,6 +122,171 @@ def answer(conn, ask_id: str, *, choice: str | None = None, text: str | None = N
                          already_recorded=False, consequence=_consequence(ask.kind, choice))
 
 
+def apply_consequence(conn, outcome: AnswerOutcome, *, clock: Clock,
+                      evidence: str | None = None, run_id: int | None = None) -> str | None:
+    """The shared fire->resolve dispatcher (B.3, tg-spec §3.3/§3.10a). Called by BOTH
+    daemon._handle_callback and cli._cmd_ask after asks.answer accepts an owner decision.
+    Dispatches on outcome.consequence; every owner-decision branch writes a JournalEntry
+    (global invariant 2). Returns a short owner-facing note, or None when nothing to say.
+
+    Function-level imports keep asks.py free of the register/triggers/gate cycle (triggers
+    imports asks)."""
+    if not outcome.accepted or outcome.already_recorded:
+        return None
+    cons = outcome.consequence
+    if cons == "alert.confirm2":
+        return _apply_confirm_broken(conn, outcome.ask, clock=clock, run_id=run_id)
+    if cons == "alert.refute":
+        return _apply_refute(conn, outcome.ask, clock=clock, evidence=evidence, run_id=run_id)
+    if cons == "alert.revise":
+        return _apply_revise(conn, outcome.ask, clock=clock, run_id=run_id)
+    if cons == "vfu.reject":
+        return _apply_vfu_reject(conn, outcome.ask, clock=clock, evidence=evidence, run_id=run_id)
+    if cons == "vfu.watch":
+        return _apply_vfu_watch(conn, outcome.ask, clock=clock, run_id=run_id)
+    if cons in ("trigger.answer", "trigger.unverifiable"):
+        return _apply_trigger_check(conn, outcome.ask, clock=clock, run_id=run_id)
+    return None                                            # R/F/N notes: the answered row IS the record
+
+
+def _alert_for(conn, ask: Ask):
+    """The open alert this A-ask resolves (alert_ref pinned at fire); None if already closed."""
+    if ask.alert_ref is None:
+        return None
+    return db.fetch_alert(conn, ask.alert_ref)
+
+
+def _sell_advice_line(conn, thesis_id: str) -> str:
+    """Deterministic B.3 sell-advice resolution line — advisory mood, cost basis disowned
+    (§3.3; the lint forbids imperative 'sell' and '!' in this class, so this is phrased as
+    advice with cost basis explicitly not shown)."""
+    from agentcy.render.common import esc
+    ticker = (db.fetch_thesis(conn, thesis_id) or {"ticker": thesis_id})["ticker"]
+    return esc(
+        f"{ticker}: the thesis is now broken. The plan is to exit the full position — "
+        "cost basis is not shown and plays no part. A new position later needs a fresh Gate run.")
+
+
+def _apply_confirm_broken(conn, ask: Ask, *, clock: Clock, run_id: int | None) -> str:
+    """confirm-broken terminal (B.3.2): journal trigger_resolution[confirmed_broken],
+    thesis -> broken, resolve the alert, enqueue the sell-advice line (cost basis ignored)."""
+    from agentcy import journal, register
+    from agentcy.journal import EntryIn
+    from agentcy.tg import outbox
+    thesis_id = ask.thesis_ref
+    je = journal.append(conn, EntryIn(
+        decision_type="trigger_resolution", decision_subtype="confirmed_broken",
+        ticker=None, thesis_ref=thesis_id,
+        system_recommendation="sell advice for the full position, cost basis ignored (B.3.2)",
+        owner_action="followed", reasoning_at_the_moment="Owner confirmed the thesis is broken.",
+        inputs_ref=run_id, ask_ref=ask.ask_id, actor="owner"), clock=clock)
+    status = db.fetch_current_thesis_status(conn, thesis_id)["status"]
+    if status == "under_review":
+        register.transition(conn, thesis_id, "broken", cause="owner confirmed broken",
+                            cause_ref=str(je), clock=clock)
+    if ask.alert_ref is not None:
+        alert = _alert_for(conn, ask)
+        if alert is not None and alert["status"] == "open":
+            db.update_alert_resolution(conn, ask.alert_ref, status="confirmed_broken",
+                                       resolved_at=db.to_iso(clock.now()), resolution_journal_ref=je)
+        outbox.enqueue(conn, dedupe_key=f"alert:{ask.alert_ref}:resolution", kind="alert",
+                       payload_html=_sell_advice_line(conn, thesis_id), ask_ref=ask.ask_id,
+                       run_id=run_id, clock=clock)
+    return "Thesis marked broken. Sell advice issued for the full position; cost basis ignored."
+
+
+def _apply_refute(conn, ask: Ask, *, clock: Clock, evidence: str | None, run_id: int | None) -> str:
+    """refute (B.3.2): journal trigger_resolution[refuted] with the evidence VERBATIM,
+    thesis -> intact, resolve the alert, re-arm the trigger (resolving the alert clears the
+    fire idempotence block, so the armed trigger can fire again)."""
+    from agentcy import journal, register
+    from agentcy.journal import EntryIn
+    thesis_id = ask.thesis_ref
+    je = journal.append(conn, EntryIn(
+        decision_type="trigger_resolution", decision_subtype="refuted",
+        ticker=None, thesis_ref=thesis_id,
+        system_recommendation="written evidence recorded; trigger re-arms, thesis returns to intact (B.3.2)",
+        owner_action="overridden", reasoning_at_the_moment=(evidence or "").strip(),
+        inputs_ref=run_id, ask_ref=ask.ask_id, actor="owner"), clock=clock)
+    status = db.fetch_current_thesis_status(conn, thesis_id)["status"]
+    if status == "under_review":
+        register.transition(conn, thesis_id, "intact", cause="owner refuted with evidence",
+                            cause_ref=str(je), clock=clock)
+    alert = _alert_for(conn, ask)
+    if alert is not None and alert["status"] == "open":
+        db.update_alert_resolution(conn, ask.alert_ref, status="refuted",
+                                   resolved_at=db.to_iso(clock.now()), resolution_journal_ref=je)
+    return "Refute recorded. Trigger re-armed; thesis intact."
+
+
+def _apply_revise(conn, ask: Ask, *, clock: Clock, run_id: int | None) -> str:
+    """revise (goalpost guard A.3): journal the INTENT to revise, routed to the desk — never
+    a phone-typed threshold. Only reachable after a recorded refute (the daemon gates the
+    affordance)."""
+    from agentcy import journal
+    from agentcy.journal import EntryIn
+    journal.append(conn, EntryIn(
+        decision_type="thesis_revision", ticker=None, thesis_ref=ask.thesis_ref,
+        reasoning_at_the_moment="Owner intends to revise the trigger; make it at the desk (A.3).",
+        owner_action="no_action", inputs_ref=run_id, ask_ref=ask.ask_id, actor="owner"), clock=clock)
+    return ("Trigger revision is a versioned change — make it at the desk. I've journaled your "
+            "intent and will echo the loosening with its headroom for 4 weeks (A.3).")
+
+
+def _apply_vfu_reject(conn, ask: Ask, *, clock: Clock, evidence: str | None,
+                      run_id: int | None) -> str:
+    """V-ask reject (C.6 / §3.10a): journal advice_rejected, advance the watchlist item."""
+    from agentcy import gate, journal
+    from agentcy.journal import EntryIn
+    ticker = _vfu_ticker(conn, ask)
+    journal.append(conn, EntryIn(
+        decision_type="advice_rejected", ticker=ticker, thesis_ref=ask.thesis_ref,
+        reasoning_at_the_moment=((evidence or "").strip()
+                                 or "Owner rejected the standing BUY_READY advice (C.6)."),
+        owner_action="followed", inputs_ref=run_id, ask_ref=ask.ask_id, actor="owner"), clock=clock)
+    if ticker is not None:
+        gate.advance_watchlist_for_verdict(conn, ticker=ticker, verdict="PASS",
+                                           thesis_id=ask.thesis_ref, clock=clock)
+    return "Recorded: advice rejected."
+
+
+def _apply_vfu_watch(conn, ask: Ask, *, clock: Clock, run_id: int | None) -> str:
+    """V-ask watch (C.6 / §3.10a): move the item to gate_approved_waiting (arm fair-entry)."""
+    from agentcy import gate
+    ticker = _vfu_ticker(conn, ask)
+    if ticker is not None:
+        gate.advance_watchlist_for_verdict(conn, ticker=ticker, verdict="WATCH",
+                                           thesis_id=ask.thesis_ref, clock=clock)
+    return "Moved to WATCH; the daily fair-entry check now arms."
+
+
+def _vfu_ticker(conn, ask: Ask) -> str | None:
+    if ask.thesis_ref is None:
+        return None
+    th = db.fetch_thesis(conn, ask.thesis_ref)
+    return th["ticker"] if th is not None else None
+
+
+def _apply_trigger_check(conn, ask: Ask, *, clock: Clock, run_id: int | None) -> str | None:
+    """Q-ask (prompted trigger question, B.3.4): record a trigger_check so the prompted
+    trigger actually resolves. yes/no is scored against the committed yes_means (mirroring
+    triggers._eval_prompted); can't-verify -> UNVERIFIABLE (never green)."""
+    if ask.trigger_ref is None:
+        return None
+    choice = (ask.answer or {}).get("choice")
+    trig = next((t for t in db.fetch_armed_triggers(conn)
+                 if t["trigger_id"] == ask.trigger_ref), None)
+    if choice == "cant" or trig is None:
+        result = "UNVERIFIABLE"
+    else:
+        yes_fires = trig["yes_means"] == "fire"
+        result = "FIRE" if (choice == "yes") == yes_fires else "PASS"
+    db.append_trigger_check(conn, dict(
+        trigger_id=ask.trigger_ref, run_id=run_id, checked_at=db.to_iso(clock.now()),
+        result=result, observed_value=None, headroom=None, evaluable_from=None))
+    return None
+
+
 def reprompt(conn, ask_id: str, *, clock: Clock) -> Ask:
     """Exactly ONE re-prompt (D.5): open -> reprompted; any other state raises."""
     row = db.fetch_ask(conn, ask_id)
