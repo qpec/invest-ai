@@ -393,3 +393,158 @@ def tier_of(*, sector, industry) -> str:
     if ind in _ADJACENT_INDUSTRIES:
         return "Adjacent"
     return "Outside"
+
+
+# --- Batch grading over the universe (design §4 Stage-1 pass) --------------------------
+# The "required" metrics whose absence is an integrity-suspend (RF5): each is a pillar leg
+# that MUST feed a percentile call. When any is None (e.g. owner_fcf_yield when EV <= 0, or
+# owner-FCF not computable) the name is emitted as INSUFFICIENT with a printed reason BEFORE
+# any sector_percentile call — None is never handed to percentileofscore.
+
+
+@dataclass(frozen=True)
+class GradedName:
+    """One Stage-1 graded row (design §4). grade in {A,B,C,D,F,VETOED,INSUFFICIENT}."""
+    symbol: str
+    sector: str | None
+    tier: str
+    v: float | None
+    q: float | None
+    d: float | None
+    m: float | None
+    composite: float | None
+    grade: str
+    note: str
+
+
+def _required_metric_gap(bundle) -> str | None:
+    """RF5 — name the first REQUIRED pillar metric that is None (would otherwise be fed into
+    percentileofscore). Returns a printed reason, or None when every required metric is present.
+    ``owner_fcf_yield`` is None precisely when EV <= 0 (value_metrics, RF5); the ROIC /
+    gross-margin / owner-FCF-margin / net-debt / SBC / accrual legs are required too."""
+    required = (
+        ("v", "owner_fcf_yield", "owner-FCF yield (EV <= 0 or not computable)"),
+        ("q", "roic_pct", "ROIC"),
+        ("q", "gross_margin_level_pct", "gross-margin level"),
+        ("q", "owner_fcf_margin_pct", "owner-FCF margin"),
+        ("d", "net_debt_to_ebitda", "net debt/EBITDA"),
+        ("d", "sbc_to_revenue_pct", "SBC/revenue"),
+        ("m", "accrual_divergence_pct", "accrual divergence"),
+    )
+    for pillar, key, label in required:
+        if bundle[pillar].get(key) is None:
+            return label
+    return None
+
+
+def _raw_bundle(conn, symbol, md, as_of):
+    """All four pillars' raw metric dicts for one ticker; None -> insufficient (a pillar is
+    not computable at all: thin/stale archive or missing pinned rows, design §2)."""
+    val = value_metrics(conn, symbol, market_cap=md["market_cap"],
+                        total_debt=md["total_debt"], cash=md["cash"], as_of=as_of)
+    qual = quality_metrics(conn, symbol, as_of=as_of)
+    dur = durability_metrics(conn, symbol, as_of=as_of)
+    mgmt = management_metrics(conn, symbol, as_of=as_of)
+    if None in (val, qual, dur, mgmt):
+        return None
+    return {"v": val, "q": qual, "d": dur, "m": mgmt}
+
+
+def _dig(d, path):
+    for k in path:
+        d = d[k]
+    return d
+
+
+def grade_universe(conn, universe, *, market_data, as_of) -> list[GradedName]:
+    """Design §4 Stage-1 deterministic pass. Two-phase: (1) collect raw metrics per name,
+    integrity-suspend any name with a None REQUIRED metric (RF5 — never a None into
+    percentileofscore), and run the veto layer wired with the REAL durability figures
+    (RF2/RF3); (2) sector-percentile-score the survivors and compose. Vetoed names keep a
+    row with grade='VETOED' (suppressed downstream, not ranked); thin/None-metric names get
+    grade='INSUFFICIENT' with a printed note (never a silent 0). Output order == universe order."""
+    rows = universe.to_dict("records")
+    raw: dict[str, dict] = {}
+    meta: dict[str, dict] = {}
+    results: dict[str, GradedName] = {}
+    _insufficient = ("insufficient data: <2 usable periods, missing pinned rows, "
+                     "or a None required metric (design §2)")
+
+    # Phase 1 — raw metrics, tier, integrity-suspend, veto.
+    for r in rows:
+        sym = r["symbol"]
+        sector = r.get("sector")
+        tier = tier_of(sector=sector, industry=r.get("industry"))
+        meta[sym] = {"sector": sector, "tier": tier}
+        md = market_data.get(sym)
+        bundle = _raw_bundle(conn, sym, md, as_of) if md else None
+        if bundle is None:
+            results[sym] = GradedName(sym, sector, tier, None, None, None, None, None,
+                                      "INSUFFICIENT", _insufficient)
+            continue
+        # RF5 — a None REQUIRED metric is an integrity-suspend, emitted BEFORE any percentile.
+        gap = _required_metric_gap(bundle)
+        if gap is not None:
+            results[sym] = GradedName(sym, sector, tier, None, None, None, None, None,
+                                      "INSUFFICIENT", f"{_insufficient}: {gap}")
+            continue
+        d = bundle["d"]
+        # RF2 — REAL raw ebitda + net_debt; RF3 — per-period cash-destruction flag (owner-FCF
+        # positive in SOME period == not negative in EVERY period), NOT the TTM-sum sign.
+        veto = veto_check(
+            net_debt_to_ebitda=d["net_debt_to_ebitda"],
+            ebitda=d["ebitda"],
+            net_debt=d["net_debt"],
+            owner_fcf_positive_any=not d["owner_fcf_negative_all_periods"],
+            shares_yoy_pct=bundle["m"]["shares_yoy_pct"])
+        if veto.vetoed:
+            results[sym] = GradedName(sym, sector, tier, None, None, None, None, None,
+                                      "VETOED", veto.reason)
+            continue
+        raw[sym] = {"bundle": bundle, "penalty": veto.penalty, "reason": veto.reason}
+
+    # Phase 2 — sector cohorts, percentiles, composite (survivors only).
+    def cohort(sym, path):
+        sec = meta[sym]["sector"]
+        return [_dig(raw[o]["bundle"], path) for o in raw if meta[o]["sector"] == sec]
+
+    for sym, entry in raw.items():
+        b = entry["bundle"]
+        v = pillar_score([sector_percentile(
+            b["v"]["owner_fcf_yield"], cohort(sym, ("v", "owner_fcf_yield")), higher_better=True)])
+        # RF4 — the ROIC leg BLENDS the sector percentile with the absolute >15% floor.
+        # RF8 — gross margin is ONE leg: the level percentile discounted by the CV percentile
+        # (a steadier margin, i.e. a higher lower-better CV percentile, keeps more of the level).
+        gm_level = sector_percentile(b["q"]["gross_margin_level_pct"],
+                                     cohort(sym, ("q", "gross_margin_level_pct")), higher_better=True)
+        gm_stability = sector_percentile(b["q"]["gross_margin_cv"],
+                                         cohort(sym, ("q", "gross_margin_cv")), higher_better=False)
+        gm_leg = gm_level * (gm_stability / 100.0)
+        q = pillar_score([
+            roic_leg_score(b["q"]["roic_pct"], cohort(sym, ("q", "roic_pct"))),
+            gm_leg,
+            sector_percentile(b["q"]["owner_fcf_margin_pct"],
+                              cohort(sym, ("q", "owner_fcf_margin_pct")), higher_better=True),
+        ])
+        d = pillar_score([
+            sector_percentile(b["d"]["net_debt_to_ebitda"],
+                              cohort(sym, ("d", "net_debt_to_ebitda")), higher_better=False),
+            100.0 if b["d"]["owner_fcf_positive"] else 0.0,
+            sector_percentile(b["d"]["sbc_to_revenue_pct"],
+                              cohort(sym, ("d", "sbc_to_revenue_pct")), higher_better=False),
+        ])
+        m_legs = [sector_percentile(b["m"]["accrual_divergence_pct"],
+                                    cohort(sym, ("m", "accrual_divergence_pct")), higher_better=False)]
+        if b["m"]["shares_yoy_pct"] is not None:
+            m_legs.append(sector_percentile(b["m"]["shares_yoy_pct"],
+                                            cohort(sym, ("m", "shares_yoy_pct")), higher_better=False))
+        if b["m"]["per_share_ofcf_growth_pct"] is not None:
+            m_legs.append(sector_percentile(b["m"]["per_share_ofcf_growth_pct"],
+                                            cohort(sym, ("m", "per_share_ofcf_growth_pct")), higher_better=True))
+        m = pillar_score(m_legs)
+        comp = composite(v=v, q=q, d=d, m=m, penalty=entry["penalty"])
+        results[sym] = GradedName(sym, meta[sym]["sector"], meta[sym]["tier"],
+                                  round(v, 1), round(q, 1), round(d, 1), round(m, 1),
+                                  comp, grade_letter(comp), entry["reason"])
+    # stable order: universe order
+    return [results[r["symbol"]] for r in rows]
