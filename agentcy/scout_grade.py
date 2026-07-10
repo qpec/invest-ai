@@ -378,9 +378,10 @@ def veto_check(*, net_debt_to_ebitda, ebitda, net_debt, owner_fcf_positive_any,
     ``not durability_metrics()["owner_fcf_negative_all_periods"]``) — NOT the sign of the
     TTM sum. The cash-destruction veto fires only when owner-FCF is negative every period.
 
-    ``roic_pct``/``revenue_growth_pct`` are accepted-but-unused here (Stage-1.5 change 3):
-    grade_universe already passes the REAL values so Task 6 only edits this body to add the
-    high-ROIC + high-growth carve-out that spares the cash-destruction branch.
+    Stage-1.5 change 4 — the cash-destruction branch is SPARED (a flagged non-veto, still
+    graded) for a genuine reinvestor: ``roic_pct`` > 15% AND ``revenue_growth_pct`` > 10%/yr
+    (both the REAL values from bundle q/g, never fabricated). The ROIC>15 gate keeps this from
+    being a hype loophole; a low-ROIC burner is still vetoed. Leverage above is unaffected.
     """
     # Leverage veto (§2): net debt/EBITDA > 4, OR EBITDA <= 0 while still carrying net debt.
     if (net_debt_to_ebitda is not None and net_debt_to_ebitda > NET_DEBT_EBITDA_VETO) or \
@@ -388,6 +389,15 @@ def veto_check(*, net_debt_to_ebitda, ebitda, net_debt, owner_fcf_positive_any,
         return Veto(True, 0, "leverage veto: net debt/EBITDA above the §2 floor")
     # Cash-destruction veto (§2, RF3): owner-FCF negative across ALL available periods.
     if not owner_fcf_positive_any:
+        # Stage-1.5 change 4 carve-out: spare the GENUINE reinvestor - ROIC>15% AND revenue
+        # growth>10%/yr (investing ahead of profits). The ROIC>15 gate keeps this from being a
+        # hype loophole; a low-ROIC cash-burner is still vetoed. Leverage (above) is unaffected.
+        if (roic_pct is not None and roic_pct > 100.0 * QV_ROIC_MIN
+                and revenue_growth_pct is not None and revenue_growth_pct > 10.0):
+            return Veto(False, 0,
+                        f"flagged - normalized owner-FCF negative every period, spared as a "
+                        f"reinvestor (ROIC {roic_pct:.0f}% > 15%, revenue growth "
+                        f"{revenue_growth_pct:.0f}%/yr > 10%) - a caution, not a suppression")
         return Veto(True, 0, "cash-destruction veto: owner-FCF negative every period")
     # Dilution penalty (§2): serial issuance > 5%/yr — a -15 hit, flagged, not a veto.
     if shares_yoy_pct is not None and shares_yoy_pct > DILUTION_PENALTY_PCT:

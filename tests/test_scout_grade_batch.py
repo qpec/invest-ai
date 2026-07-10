@@ -304,3 +304,64 @@ def test_same_sector_cohort_reaches_top_band_A(tmp_db):
     assert lead.composite >= 80.0
     # the cohort spans real bands (not everyone an A) — a genuine leader, not a flat tie.
     assert by_sym["P4"].composite < lead.composite
+
+
+# --- Stage-1.5 change 4: cash-destruction veto carve-out for genuine reinvestors ----------
+
+
+def test_high_roic_fast_grower_is_flagged_not_vetoed_in_batch(tmp_db, yf_statements, yf_series):
+    """Stage-1.5 change 4 integration: a name that destroys owner-FCF every period but has
+    ROIC>15% and revenue growth>10%/yr is GRADED (flagged), not VETOED. A low-ROIC burner in
+    the same batch is still VETOED."""
+    _seed_full(tmp_db, "MSFT", yf_statements, yf_series)   # a normal peer for the cohort
+    pack = yf_statements("msft_statements")
+
+    # GROW: growth CapEx makes owner-FCF negative every period, but ROIC is high (small IC
+    # denominator) and revenue is strongly rising -> spared.
+    inc = pack["income"].copy()
+    cols = list(inc.columns)                                # newest first
+    inc.loc["Total Revenue"] = [80e9, 60e9, 45e9, 34e9]     # steep annualized growth
+    # EBIT vs the reused MSFT invested capital (WC 76e9 + (TA 550e9 - CA 199e9 - Cash 84e9)
+    # = 343e9): latest 70e9/343e9 = 20.4% -> genuinely clears the ROIC>15 carve-out gate.
+    inc.loc["EBIT"] = [70e9, 52e9, 39e9, 30e9]              # high EBIT vs the 343e9 IC -> ROIC>15
+    cf = pack["cashflow"].copy()
+    for c in cols:
+        cf.loc["Operating Cash Flow", c] = 5e9
+        cf.loc["Capital Expenditure", c] = -25e9            # owner-FCF = 5-25-sbc < 0 every period
+        cf.loc["Stock Based Compensation", c] = 1e9
+    store.store_statements(tmp_db, "GROW",
+                           {"income": inc, "balance": pack["balance"], "cashflow": cf},
+                           run_id=None, fetched_at="2026-07-01T00:00:00Z")
+    store.store_shares(tmp_db, "GROW", yf_series("msft_shares_full"),
+                       fetched_at="2026-07-01T00:00:00Z")
+
+    # BURN: same cash destruction but flat revenue + low ROIC -> still vetoed.
+    inc2 = pack["income"].copy()
+    inc2.loc["EBIT"] = [1e9, 1e9, 1e9, 1e9]                 # tiny EBIT -> ROIC well below 15
+    cf2 = pack["cashflow"].copy()
+    for c in cols:
+        cf2.loc["Operating Cash Flow", c] = 1e9
+        cf2.loc["Capital Expenditure", c] = -10e9
+        cf2.loc["Stock Based Compensation", c] = 3e9
+    store.store_statements(tmp_db, "BURN",
+                           {"income": inc2, "balance": pack["balance"], "cashflow": cf2},
+                           run_id=None, fetched_at="2026-07-01T00:00:00Z")
+    store.store_shares(tmp_db, "BURN", yf_series("msft_shares_full"),
+                       fetched_at="2026-07-01T00:00:00Z")
+
+    universe = pd.DataFrame({
+        "symbol": ["MSFT", "GROW", "BURN"],
+        "sector": ["Technology", "Technology", "Technology"],
+        "industry": ["Software", "Software", "Software"],
+        "market_cap": ["large_cap", "large_cap", "large_cap"],
+    })
+    market = {
+        "MSFT": {"market_cap": 2.8e12, "total_debt": 59e9, "cash": 84e9},
+        "GROW": {"market_cap": 2.8e12, "total_debt": 59e9, "cash": 84e9},
+        "BURN": {"market_cap": 2.8e12, "total_debt": 59e9, "cash": 84e9},
+    }
+    graded = sg.grade_universe(tmp_db, universe, market_data=market, as_of=AS_OF)
+    by_sym = {g.symbol: g for g in graded}
+    assert by_sym["GROW"].grade != "VETOED"                 # spared -> graded
+    assert by_sym["GROW"].composite is not None
+    assert by_sym["BURN"].grade == "VETOED"                 # low-ROIC burner still vetoed
