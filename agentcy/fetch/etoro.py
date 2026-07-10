@@ -17,6 +17,7 @@ import uuid
 from typing import Any, Callable
 
 from agentcy import mirror  # mirror does not import etoro -> no circular import
+from agentcy.fetch import yf as _yf
 
 _DEFAULT_HOST = "https://api.etoro.com"  # base host; exact endpoint paths TBD vs api-portal docs
 
@@ -224,6 +225,87 @@ def fetch_etoro_snapshot(
     return mirror.SnapshotIn(
         as_of=as_of, source="api_pull", cash_balance_eur=cash_balance_eur,
         positions=tuple(position_ins), details=tuple(detail_ins))
+
+
+# -- default FX factory (Task 7) --------------------------------------------
+# fetch_etoro_snapshot (Task 5) takes an injected `fx(amount, currency) -> eur`.
+# In production we need a real default that converts native currency -> EUR via
+# the project's existing paced yfinance path. It stays INJECTABLE: this factory
+# returns an `fx` closure, and the rate source (`rate_lookup`) is itself a seam
+# so tests inject a fake and no network is touched.
+
+
+def _yahoo_rate(pair: str, *, state_dir) -> float:
+    """Production rate source: the pair's current spot via the SAME paced Yahoo
+    path every other fetcher uses (yf.fetch_fast_info -> _paced_call -> the
+    box-wide flock in yahoo_pacing). We never call yfinance directly, so the eToro
+    FX fetch respects the shared box-wide Yahoo rate-limit lock like everything
+    else. Returns the pair's last price (e.g. EURUSD=X ~= 1.08).
+
+    yfinance's FetchFailed is wrapped by the caller into EtoroError (fail-loud).
+    """
+    info = _yf.fetch_fast_info(pair, state_dir=state_dir)
+    price = info.get("last_price")
+    if price is None:
+        price = info.get("lastPrice")
+    return float(price) if price is not None else 0.0
+
+
+def default_fx(state_dir, *, rate_lookup=None) -> Callable[[float, str], float]:
+    """Build a production `fx(amount, currency) -> eur` closure for Task 5's seam.
+
+    Conversion convention (documented precisely):
+      - We quote the pair ``EUR{currency}=X`` (e.g. ``EURUSD=X``), whose value is
+        the number of units of ``currency`` per **1 EUR** (EURUSD=X ~= 1.08 means
+        1 EUR buys 1.08 USD).
+      - Native/eToro amounts are denominated in ``currency``. To convert a native
+        amount to EUR we therefore DIVIDE by that rate::
+
+            eur = amount / rate            # rate = currency units per 1 EUR
+
+        Worked example: 108 USD at EURUSD=X = 1.08  ->  108 / 1.08 = 100.00 EUR.
+        (Another: 100 USD at 1.08  ->  100 / 1.08 = 92.59 EUR.)
+
+    EUR is the identity currency (case-insensitive): ``fx(amount, "EUR")`` returns
+    ``amount`` unchanged and never triggers a lookup.
+
+    Memoization: the rate for each non-EUR currency is fetched at most ONCE and
+    cached in the closure, so converting N USD positions costs one rate fetch, not
+    N. EUR is identity and is never fetched.
+
+    `rate_lookup(pair_ticker, *, state_dir) -> float` is the injectable seam. When
+    None, the real paced yfinance path (`_yahoo_rate`) is used. Tests inject a fake
+    so no network occurs.
+
+    Fail-loud: if the lookup raises, or returns a non-positive / None rate, raise
+    ``EtoroError`` (Task 9's weekly fallback catches EtoroError). yfinance's
+    ``FetchFailed`` is wrapped into ``EtoroError`` too.
+    """
+    lookup = rate_lookup if rate_lookup is not None else _yahoo_rate
+    cache: dict[str, float] = {}
+
+    def fx(amount: float, currency: str) -> float:
+        cur = (currency or "").strip().upper()
+        if cur == "EUR":
+            return amount
+        rate = cache.get(cur)
+        if rate is None:
+            pair = f"EUR{cur}=X"
+            try:
+                rate = lookup(pair, state_dir=state_dir)
+            except _yf.FetchFailed as e:
+                raise EtoroError(f"FX rate unavailable for {cur}: {e}") from e
+            except EtoroError:
+                raise
+            except Exception as e:  # any other lookup failure is fail-loud too
+                raise EtoroError(f"FX rate unavailable for {cur}: {e}") from e
+            if rate is None or rate <= 0:
+                raise EtoroError(
+                    f"FX rate unavailable for {cur}: non-positive or missing rate {rate!r}")
+            cache[cur] = rate
+        return amount / rate
+
+    return fx
 
 
 def _loads(raw: bytes) -> Any:
