@@ -151,6 +151,77 @@ def ingest_snapshot(conn, snap: SnapshotIn, *, clock: Clock) -> tuple[int, list[
     return snapshot_id, deltas
 
 
+# --- reconciliation R-ask minting (E.1/§3.4, MA-12) ------------------------------
+# The ingest contract says "caller mints one R ask per Delta". This is that shared
+# producer, called by BOTH the desk (cli._cmd_snapshot) and the bot
+# (daemon._handle_document) after ingest_snapshot. Each non-trivial Delta becomes an
+# open R-ask loop (jobs/daily.open_loop_lines surfaces + escalates it); leverage_violation
+# is instead the immediate Hell-No leverage tripwire notice, not an R-ask (E.1).
+# Function-level imports keep mirror free of the tg/asks import weight at module load.
+
+_LEVERAGE_TRIPWIRE_HTML = (
+    "Hell-No leverage tripwire: {sym} carries leverage {lev} ({detail}). The Constitution's "
+    "leverage veto is enforced continuously — borrowing against a volatile position is off-path. "
+    "Deleverage is the standing advice; I never trade.")
+
+
+def _recon_ask_spec(d: "Delta") -> tuple[str, list[str], bool] | None:
+    """(prompt, options, expects_freetext) for a delta, or None for leverage_violation
+    (handled as a tripwire notice) — enumerated per §3.4."""
+    if d.kind == "appeared":
+        return (f"Reconciliation — new position: {d.symbol}, {d.detail}, not previously seen. "
+                "How should I treat it?",
+                ["backfill", "outside", "ignore"], False)
+    if d.kind == "disappeared":
+        return (f"Reconciliation — {d.symbol} no longer appears in the snapshot. "
+                "Did you close it? A close needs the one-line reasoning-at-the-moment.",
+                ["close", "gap"], True)
+    if d.kind == "quantity_change":
+        opts = ["add"]
+        if d.new_value is not None and d.old_value is not None and d.new_value < d.old_value:
+            opts.append("trim")                               # trim shown only when qty fell
+        opts.append("gap")
+        return (f"Reconciliation — {d.symbol} quantity changed {d.old_value} → {d.new_value}. "
+                "Add or trim? A change needs the one-line reasoning-at-the-moment.",
+                opts, True)
+    if d.kind == "unexplained_cash":
+        # The full MA-12 external-flow set (matches external_flow.direction CHECK); 'other'
+        # takes a ForceReply note.
+        return (f"Reconciliation — {d.detail} with no matching position change. "
+                "What was it? ('other' takes a note.)",
+                ["deposit", "withdrawal", "dividend", "other"], True)
+    return None
+
+
+def mint_reconciliation_asks(conn, snapshot_id: int, deltas: "list[Delta]", *,
+                             clock: Clock) -> list:
+    """Mint one open R-ask per non-trivial Delta (E.1/§3.4); enqueue the Hell-No leverage
+    tripwire notice for each leverage_violation. Returns the minted Ask objects.
+
+    The snapshot is already accepted append-only — these are open loops that do not block
+    ingest (§3.4). The symbol rides on thesis_ref so the answer-time consequence can act on
+    it; the unexplained-cash flow attaches to snapshot_id (MA-12)."""
+    from agentcy import asks
+    from agentcy.tg import outbox
+    minted = []
+    for d in deltas:
+        if d.kind == "leverage_violation":
+            outbox.enqueue(
+                conn, dedupe_key=f"leverage:{snapshot_id}:{d.symbol}", kind="notice",
+                payload_html=_LEVERAGE_TRIPWIRE_HTML.format(
+                    sym=d.symbol, lev=d.new_value, detail=d.detail),
+                clock=clock)
+            continue
+        spec = _recon_ask_spec(d)
+        if spec is None:
+            continue
+        prompt, options, expects_freetext = spec
+        minted.append(asks.mint(
+            conn, kind="R", prompt=prompt, options=options, expects_freetext=expects_freetext,
+            thesis_ref=d.symbol, clock=clock))
+    return minted
+
+
 @dataclass(frozen=True)
 class AdvicePosition:
     snapshot_id: int

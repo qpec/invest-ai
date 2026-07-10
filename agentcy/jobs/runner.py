@@ -51,14 +51,15 @@ def sweep_and_run(conn, run_type: str, job_fn, *, clock: Clock, state_dir: Path,
     the degraded honesty letter under TODAY's primary key (the one the owner is waiting on,
     P6.3) rather than an old catch-up key, before re-raising. Plan note: sweepable is
     computed BEFORE taking our own lock (flock is per-open-file-description — probing a
-    lock we hold would misread), then each key is re-checked with is_finished inside the lock."""
+    lock we hold would misread), then each key is re-checked with is_done inside the lock
+    (a 'failed' key is NOT done — it is re-claimed and re-run, FIX.3)."""
     keys = runlog.sweepable(conn, run_type, as_of=clock.now(), timeout=timeout, state_dir=state_dir)
     if not keys:
         return 0
     newest = max(keys)
     with runlog.run_lock(state_dir, run_type):
         for key in sorted(keys, reverse=True):
-            if runlog.is_finished(conn, run_type, key):
+            if runlog.is_done(conn, run_type, key):
                 continue
             handle = runlog.start(conn, run_type, key, clock=clock, late=(key != newest))
             conn.commit()
@@ -106,8 +107,11 @@ def honesty_letter(conn, handle, *, clock: Clock) -> None:
 
 
 def _on_job_exception(conn, handle, *, clock, exc) -> None:
-    """Ship the degraded honesty letter, then finish the run as failed so the key stays
-    sweepable-honest. The letter must never mask the original failure — OnFailure= still fires."""
+    """Ship the degraded honesty letter, then finish the run as 'failed'. The finish stamp
+    keeps /status honest (build_status_context reads the last FINISHED run's status), while
+    runlog.sweepable/start still re-claim a 'failed' key on a later sweep so the REAL letter
+    is re-run — never silently lost (FIX.3, NFR1/§1.3). The letter must never mask the
+    original failure — OnFailure= still fires (we re-raise upstream)."""
     try:
         honesty_letter(conn, handle, clock=clock)
     except Exception:

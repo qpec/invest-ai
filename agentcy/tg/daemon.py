@@ -133,10 +133,12 @@ def _handle_document(conn, message, *, client, clock, owner_chat_id) -> None:
     info = client.get_file(doc["file_id"])
     raw = client.download_file(info["file_path"])
     snap = mirror.parse_etoro_csv(raw.decode("utf-8"))
-    _snap_id, deltas = mirror.ingest_snapshot(conn, snap, clock=clock)
+    snap_id, deltas = mirror.ingest_snapshot(conn, snap, clock=clock)
     asks.answer(conn, pending.ask_id, text="file ingested", clock=clock)
-    # Reconciliation R-asks (§3.4) are minted by ingest's domain/jobs caller; here we
-    # only count and point to /status.
+    # Reconciliation R-asks (§3.4) are minted here from the shared producer so the D.5 loop
+    # actually opens (jobs/daily.open_loop_lines then surfaces + escalates them). The
+    # snapshot is accepted append-only regardless — the deltas are open loops (§3.4).
+    mirror.mint_reconciliation_asks(conn, snap_id, deltas, clock=clock)
     if deltas:
         client.send_message(owner_chat_id, esc(
             f"Snapshot accepted. {len(deltas)} items need reconciliation — see /status."))
@@ -231,13 +233,35 @@ def _handle_callback(conn, cq, *, client, clock, owner_chat_id) -> None:
         client.answer_callback_query(cbq_id, text="Cancelled")
         return
 
-    _domain, _action, ask_id, choice = _parse_callback(data)
+    domain, action, ask_id, choice = _parse_callback(data)
 
     if not ask_id or asks.get(conn, ask_id) is None:
         client.answer_callback_query(cbq_id, text="This choice is no longer available")
         return
 
-    outcome = asks.answer(conn, ask_id, choice=choice, clock=clock, tg_message_id=msg_id)
+    # Alert two-step gate + refute-evidence capture (tg-spec §3.3). These intercept BEFORE
+    # asks.answer: confirm shows the confirm2 keyboard (no resolution yet); refute opens the
+    # ForceReply for evidence (resolution lands on the reply, §4); revise is only reachable
+    # after a recorded refute (goalpost guard A.3).
+    if domain == "alert" and action == "confirm":
+        _show_confirm2(conn, ask_id, cbq_id, msg_id, client=client, owner_chat_id=owner_chat_id)
+        return
+    if domain == "alert" and action == "back":
+        _restore_alert_keyboard(conn, ask_id, cbq_id, msg_id, client=client,
+                                owner_chat_id=owner_chat_id)
+        return
+    if domain == "alert" and action == "refute":
+        _open_refute_evidence(conn, ask_id, cbq_id, client=client, owner_chat_id=owner_chat_id)
+        return
+    if domain == "alert" and action == "revise":
+        _apply_revise_after_refute(conn, ask_id, cbq_id, msg_id, client=client,
+                                   clock=clock, owner_chat_id=owner_chat_id)
+        return
+
+    # confirm2 is the terminal confirm; the ask's valid option is 'confirm', so answer with it.
+    answer_choice = "confirm" if (domain == "alert" and action == "confirm2") else choice
+
+    outcome = asks.answer(conn, ask_id, choice=answer_choice, clock=clock, tg_message_id=msg_id)
     if outcome.already_recorded:
         client.answer_callback_query(cbq_id, text="Already recorded")
         return
@@ -246,13 +270,108 @@ def _handle_callback(conn, cq, *, client, clock, owner_chat_id) -> None:
         return
 
     client.answer_callback_query(cbq_id, text="Recorded")
-    # Resolution edit: show the recorded choice, strip the keyboard (§3.10).
+    # Domain consequence (B.3, §3.10a): journal + transition + resolve + advise (invariant 2).
+    note = asks.apply_consequence(conn, outcome, clock=clock)
+    # Resolution edit: show the resolved state, strip the keyboard (§3.10).
     if msg_id is not None:
         try:
             client.edit_message_text(
-                owner_chat_id, msg_id, esc(f"Recorded: {choice} ({ask_id})."), reply_markup=None)
+                owner_chat_id, msg_id, esc(note or f"Recorded: {answer_choice} ({ask_id})."),
+                reply_markup=None)
         except Exception:
             pass  # a failed edit never blocks the recorded answer (SQLite is truth)
+
+
+_CONFIRM2_TEXT = (
+    "Confirm: the thesis is broken. This produces sell advice for the full position, "
+    "ignoring cost basis. The thesis moves to broken (terminal — a new position later needs "
+    "a fresh Gate run). Proceed?"
+)
+
+
+def _show_confirm2(conn, ask_id, cbq_id, msg_id, *, client, owner_chat_id) -> None:
+    """First [Confirm broken] tap: swap to the two-button confirm2 gate; do not resolve (§3.3)."""
+    from agentcy import asks
+    if asks.get(conn, ask_id).status in ("answered", "unanswered"):
+        client.answer_callback_query(cbq_id, text="Already recorded")
+        return
+    client.answer_callback_query(cbq_id)
+    kb = {"inline_keyboard": [[
+        {"text": "Yes, thesis is broken", "callback_data": f"alert:confirm2:{ask_id}"},
+        {"text": "Go back", "callback_data": f"alert:back:{ask_id}"},
+    ]]}
+    if msg_id is not None:
+        try:
+            client.edit_message_text(owner_chat_id, msg_id, esc(_CONFIRM2_TEXT), reply_markup=kb)
+        except Exception:
+            client.send_message(owner_chat_id, esc(_CONFIRM2_TEXT), reply_markup=kb)
+    else:
+        client.send_message(owner_chat_id, esc(_CONFIRM2_TEXT), reply_markup=kb)
+
+
+def _restore_alert_keyboard(conn, ask_id, cbq_id, msg_id, *, client, owner_chat_id) -> None:
+    """[Go back] from the confirm2 gate: restore the two-button [Confirm broken] [Refute]
+    surface without resolving anything (§3.3)."""
+    from agentcy import asks
+    if asks.get(conn, ask_id).status in ("answered", "unanswered"):
+        client.answer_callback_query(cbq_id, text="Already recorded")
+        return
+    client.answer_callback_query(cbq_id)
+    kb = {"inline_keyboard": [[
+        {"text": "Confirm broken", "callback_data": f"alert:confirm:{ask_id}"},
+        {"text": "Refute", "callback_data": f"alert:refute:{ask_id}"},
+    ]]}
+    if msg_id is not None:
+        try:
+            client.edit_message_text(owner_chat_id, msg_id,
+                                     esc("Decision still open. Confirm broken, or refute?"),
+                                     reply_markup=kb)
+        except Exception:
+            pass
+
+
+def _open_refute_evidence(conn, ask_id, cbq_id, *, client, owner_chat_id) -> None:
+    """[Refute] tap: open the ForceReply for the mandatory written evidence (B.3.2, §3.3/§4).
+    The A-ask stays open; the resolution lands when the owner's reply binds to [ask_id]."""
+    from agentcy import asks
+    ask = asks.get(conn, ask_id)
+    if ask.status in ("answered", "unanswered"):
+        client.answer_callback_query(cbq_id, text="Already recorded")
+        return
+    client.answer_callback_query(cbq_id)
+    prompt = (f"Refuting {ask.prompt} Write the evidence that the reason you own this still "
+              f"holds. This is journaled verbatim and re-arms the trigger. [{ask_id}]")
+    client.send_message(owner_chat_id, esc(prompt),
+                        reply_markup={"force_reply": True, "selective": True})
+
+
+_REVISE_INTENT_TEXT = (
+    "Trigger revision is a versioned change — make it at the desk. I've journaled your intent "
+    "and will echo the loosening with its headroom for 4 weeks (A.3)."
+)
+
+
+def _apply_revise_after_refute(conn, ask_id, cbq_id, msg_id, *, client, clock, owner_chat_id) -> None:
+    """[Revise the trigger] tap (only offered after a recorded refute, §3.3): journal the
+    intent to revise, routed to the desk. The A-ask is already answered=refuted, so this
+    dispatches revise directly rather than through asks.answer (which would say already-recorded)."""
+    from agentcy import asks
+    ask = asks.get(conn, ask_id)
+    refuted = [e for e in db.fetch_journal_entries(conn, decision_type="trigger_resolution")
+               if e["ask_ref"] == ask_id and e["decision_subtype"] == "refuted"]
+    if not refuted:
+        client.answer_callback_query(cbq_id, text="Revise opens only after a refute")
+        return
+    outcome = asks.AnswerOutcome(ask=ask, accepted=True, already_recorded=False,
+                                 consequence="alert.revise")
+    note = asks.apply_consequence(conn, outcome, clock=clock)
+    client.answer_callback_query(cbq_id, text="Recorded")
+    if msg_id is not None:
+        try:
+            client.edit_message_text(owner_chat_id, msg_id, esc(note or _REVISE_INTENT_TEXT),
+                                     reply_markup=None)
+        except Exception:
+            pass
 
 
 GENTLE_REDIRECT = (
@@ -306,9 +425,16 @@ def _handle_freetext(conn, message, text, *, client, clock, owner_chat_id) -> No
                 "One more try, or leave it and I'll record it as unanswered."))
         return
 
-    asks.answer(conn, ask.ask_id, text=text, clock=clock)
+    # An A-ask carrying the refute affordance binds its evidence to choice='refute' (B.3.2)
+    # so the dispatcher journals trigger_resolution[refuted] with the text VERBATIM and
+    # re-arms; any other free-text ask records the text as its answer.
+    refute = ask.kind == "A" and "refute" in ask.options
+    outcome = asks.answer(conn, ask.ask_id, choice="refute" if refute else None,
+                          text=text, clock=clock)
+    note = asks.apply_consequence(conn, outcome, clock=clock, evidence=text)
     echo = text[:60] + ("…" if len(text) > 60 else "")
-    client.send_message(owner_chat_id, esc(f"Recorded against {ask.ask_id}: '{echo}'"))
+    tail = f" {note}" if note else ""
+    client.send_message(owner_chat_id, esc(f"Recorded against {ask.ask_id}: '{echo}'.{tail}"))
 
 
 # --- sync loop, report-only startup sweep, entrypoint (§5.2/§1.3, R7) ----------

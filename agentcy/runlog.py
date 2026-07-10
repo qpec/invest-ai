@@ -29,10 +29,13 @@ def start(conn, run_type: str, scheduled_for: str, *, clock: Clock,
     now = db.to_iso(clock.now())
     existing = db.fetch_run(conn, run_type, scheduled_for)
     if existing is not None:
-        if existing["finished_at"] is not None:
+        if existing["finished_at"] is not None and existing["status"] != "failed":
             raise RuntimeError(
                 f"run {run_type}:{scheduled_for} already finished — "
                 "callers check is_finished() and exit 0 (§1.3)")
+        # A FAILED key kept finished_at (so /status stays honest) but never produced its real
+        # letter; a later sweep re-claims it to re-run (FIX.3). update_run_start clears the
+        # stale finish so the re-run's runlog.finish stamps the successful outcome.
         db.update_run_start(conn, existing["run_id"], started_at=now,
                             attempt=existing["attempt"] + 1, late=late)
         conn.commit()
@@ -56,6 +59,14 @@ def finish(conn, run_id: int, *, status: str, outputs, clock: Clock) -> None:
 def is_finished(conn, run_type: str, scheduled_for: str) -> bool:
     row = db.fetch_run(conn, run_type, scheduled_for)
     return row is not None and row["finished_at"] is not None
+
+
+def is_done(conn, run_type: str, scheduled_for: str) -> bool:
+    """Genuinely complete — finished AND not a re-claimable 'failed' key. The sweep loop uses
+    this (not is_finished) so a crashed key that another process finished ON TIME between the
+    sweepable() scan and the lock is skipped, while a 'failed' key is still re-run (FIX.3)."""
+    row = db.fetch_run(conn, run_type, scheduled_for)
+    return row is not None and row["finished_at"] is not None and row["status"] != "failed"
 
 
 # --- per-run_type flock (tech-arch §1.3: 'running' mechanically distinct from 'crashed') ---
@@ -156,16 +167,19 @@ def due_keys(run_type: str, *, as_of: datetime) -> list[str]:
 
 def sweepable(conn, run_type: str, *, as_of: datetime, timeout: timedelta,
               state_dir: Path) -> list[str]:
-    """Own-run_type due keys absent OR started-but-unfinished AND unlocked AND
-    started_at older than timeout (§1.3)."""
+    """Own-run_type due keys absent OR re-claimable AND unlocked AND started_at older than
+    timeout (§1.3). A key is re-claimable when it is started-but-unfinished OR it FAILED —
+    a crashed run stamps finished_at (so /status stays honest) but its real letter was never
+    produced, so a later sweep must re-run it (FIX.3, NFR1/§1.3). A key that genuinely
+    succeeded (status 'ok'/'degraded' with finished_at) is never re-swept."""
     out: list[str] = []
     for key in due_keys(run_type, as_of=as_of):
         row = db.fetch_run(conn, run_type, key)
         if row is None:
             out.append(key)
             continue
-        if row["finished_at"] is not None:
-            continue
+        if row["finished_at"] is not None and row["status"] != "failed":
+            continue                                  # genuinely done — never re-run
         if as_of - db.from_iso(row["started_at"]) <= timeout:
             continue                                  # possibly still running
         if _lock_held(state_dir, run_type):

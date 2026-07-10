@@ -25,6 +25,34 @@ def test_sweep_runs_due_key_and_finished_keys_exit_zero(tmp_db, fixed_clock, tmp
     assert calls == []                                  # re-fired finished key: exit 0, no re-run
 
 
+def test_sweep_runs_all_due_keys_newest_on_time_others_late(tmp_db, fixed_clock, tmp_path):
+    """Multi-key sweep (§1.3): a fresh DB has every due key of the run_type absent, so ONE sweep
+    runs them all under the single per-type lock — the newest key on-time, every other key late —
+    each exactly once, and re-firing the sweep re-runs nothing (all finished)."""
+    from agentcy.jobs import runner
+    due = runlog.due_keys("daily", as_of=fixed_clock.now())
+    newest = max(due)
+    assert len(due) > 1                                     # coverage needs several due keys
+    calls = []
+    assert runner.sweep_and_run(tmp_db, "daily", _recorder(calls), clock=fixed_clock,
+                                state_dir=tmp_path) == 0
+
+    ran = {sf: late for sf, late in calls}
+    assert set(ran) == set(due)                            # every due key ran, exactly once
+    assert len(calls) == len(due)
+    assert ran[newest] is False                            # today's key: on time
+    assert all(ran[k] is True for k in due if k != newest)  # every catch-up key: late
+    for k in due:
+        row = db.fetch_run(tmp_db, "daily", k)
+        assert row["status"] == "ok" and row["finished_at"] is not None
+        assert row["late"] == (0 if k == newest else 1)
+
+    calls.clear()                                          # a second sweep re-runs nothing
+    assert runner.sweep_and_run(tmp_db, "daily", _recorder(calls), clock=fixed_clock,
+                                state_dir=tmp_path) == 0
+    assert calls == []
+
+
 def test_sweep_reclaims_crashed_key_marked_late(tmp_db, fixed_clock, tmp_path):
     from agentcy.jobs import runner
     yesterday = FixedClock(fixed_clock.now() - timedelta(days=1))
@@ -78,6 +106,67 @@ def test_successful_rerun_supersedes_queued_degraded_letter(tmp_db, fixed_clock,
     ob = db.fetch_outbox_by_key(tmp_db, "daily:2026-07-08:letter")
     assert ob["payload_html"] == "<b>the real letter</b>"
     assert len(db.fetch_outbox_queued(tmp_db)) == 1
+
+
+def test_crashed_run_is_reswept_and_real_letter_supersedes_degraded(tmp_db, fixed_clock, tmp_path):
+    """FIX.3 (NFR1/§1.3): a crashed 'failed' daily key must be re-claimable by a LATER sweep
+    once the flock is released and started_at has aged past the unit timeout. The successful
+    re-run supersedes the queued degraded letter IN PLACE under daily:{date}:letter — never a
+    duplicate — so the REAL letter is delivered, at worst late, and never silently lost."""
+    import pytest
+    from datetime import timedelta
+    from agentcy.clock import FixedClock
+    from agentcy.jobs import runner
+    from agentcy.tg import outbox
+
+    # 1) First sweep crashes: ships the degraded honesty letter, finishes 'failed'.
+    with pytest.raises(RuntimeError, match="yahoo wedged"):
+        runner.sweep_and_run(tmp_db, "daily", _boom, clock=fixed_clock, state_dir=tmp_path)
+    row = db.fetch_run(tmp_db, "daily", "2026-07-08")
+    assert row["status"] == "failed"
+    degraded = db.fetch_outbox_by_key(tmp_db, "daily:2026-07-08:letter")
+    assert degraded is not None and degraded["status"] == "queued"
+    assert "I just can't see" in degraded["payload_html"]
+
+    # 2) A LATER sweep, past the unit timeout, with a job that succeeds and enqueues the REAL
+    #    letter under the same primary key (mirrors the real daily job's supersede-in-place).
+    later = FixedClock(fixed_clock.now() + runner.JOB_TIMEOUT + timedelta(minutes=1))
+
+    def _real(conn, handle, *, clock, state_dir):
+        key = outbox.scheduled_key(handle.run_type, handle.scheduled_for, "letter")
+        outbox.enqueue(conn, dedupe_key=runner.qualified_key(conn, key), kind="daily",
+                       payload_html="<b>the real letter</b>", run_id=handle.run_id, clock=clock)
+        return "ok", {"ran": True}
+
+    runner.sweep_and_run(tmp_db, "daily", _real, clock=later, state_dir=tmp_path)
+
+    # 3) The failed key was re-claimed and re-run to success.
+    row = db.fetch_run(tmp_db, "daily", "2026-07-08")
+    assert row["status"] == "ok" and row["finished_at"] is not None
+    assert row["attempt"] == 2
+
+    # 4) Exactly ONE outbox row under the crashed key daily:2026-07-08:letter (the degraded
+    #    letter was superseded IN PLACE, never a duplicate/revision), carrying the REAL letter.
+    ob = db.fetch_outbox_by_key(tmp_db, "daily:2026-07-08:letter")
+    assert ob["payload_html"] == "<b>the real letter</b>"
+    for_this_key = [r for r in db.fetch_outbox_queued(tmp_db)
+                    if r["dedupe_key"].startswith("daily:2026-07-08:letter")]
+    assert len(for_this_key) == 1
+    assert for_this_key[0]["payload_html"] == "<b>the real letter</b>"
+
+
+def test_genuinely_successful_key_is_never_reswept(tmp_db, fixed_clock, tmp_path):
+    """The re-sweep must NOT re-run a key that genuinely succeeded (status='ok'/'degraded')."""
+    from datetime import timedelta
+    from agentcy.clock import FixedClock
+    from agentcy.jobs import runner
+    calls = []
+    runner.sweep_and_run(tmp_db, "daily", _recorder(calls, status="ok"), clock=fixed_clock, state_dir=tmp_path)
+    assert ("2026-07-08", False) in calls
+    later = FixedClock(fixed_clock.now() + runner.JOB_TIMEOUT + timedelta(minutes=1))
+    calls.clear()
+    runner.sweep_and_run(tmp_db, "daily", _recorder(calls, status="ok"), clock=later, state_dir=tmp_path)
+    assert ("2026-07-08", False) not in calls   # ok key not re-swept despite aging
 
 
 def test_weekly_honesty_letter_lands_under_msg1(tmp_db, tmp_path):
