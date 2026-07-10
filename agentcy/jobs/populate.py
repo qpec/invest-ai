@@ -43,9 +43,14 @@ def main(*, clock: Clock | None = None, state_dir: Path | None = None,
 
 def _run(conn, *, clock, state_dir, budget, minutes) -> int:
     start = clock.now()
-    # One populate run per Amsterdam night (plan note 8); a same-day manual re-run reclaims
-    # the key, which is the desired resumable behaviour.
+    # One populate run per Amsterdam night (plan note 8). A same-day manual re-run resumes:
+    # if the night finished OK/degraded, the key is already done, so short-circuit clean
+    # (exit 0) mirroring runner.sweep_and_run's is_done guard; a failed/interrupted key is
+    # re-claimed by runlog.start and re-run. Without this guard a re-run after a SUCCESSFUL
+    # night would hit runlog.start's "already finished" RuntimeError.
     scheduled_for = start.astimezone(AMS).date().isoformat()
+    if runlog.is_done(conn, RUN_TYPE, scheduled_for):
+        return 0
     handle = runlog.start(conn, RUN_TYPE, scheduled_for, clock=clock)
 
     if minutes is None and budget is None:

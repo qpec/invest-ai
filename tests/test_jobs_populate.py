@@ -146,3 +146,30 @@ def test_populate_rate_limit_stops_early_and_reports_degraded(tmp_db, tmp_path, 
     assert latest["MSFT"]["outcome"] == "rate_limited"
     run = db.fetch_run(tmp_db, "populate", START.astimezone(AMS).date().isoformat())
     assert run is not None and run["status"] == "degraded"
+
+
+def test_populate_same_day_rerun_after_success_is_clean_noop(tmp_db, tmp_path, monkeypatch):
+    """A same-Amsterdam-day manual re-run AFTER a successful night is the advertised
+    resumable behaviour: it must exit 0 cleanly, never raise. The first run finishes
+    'ok'; the second run under the same scheduled_for key short-circuits on the already-
+    done run_log row (mirroring runner.sweep_and_run's is_done guard)."""
+    _seed_universe(tmp_path, tmp_db)
+    monkeypatch.setattr(populate, "yf", _FakeYf())
+    _inject_db(monkeypatch, tmp_db)
+    key = START.astimezone(AMS).date().isoformat()
+
+    rc1 = job.main(clock=AdvancingClock(START, step_seconds=1), state_dir=tmp_path,
+                   budget=2, minutes=None)
+    assert rc1 == 0
+    run1 = db.fetch_run(tmp_db, "populate", key)
+    assert run1 is not None and run1["status"] == "ok"
+
+    # Second same-day run: another AdvancingClock anchored the same Amsterdam night. The
+    # prior key finished 'ok', so runlog.start would raise RuntimeError without the guard.
+    rc2 = job.main(clock=AdvancingClock(START, step_seconds=1), state_dir=tmp_path,
+                   budget=2, minutes=None)
+    assert rc2 == 0  # clean resumable no-op, not a traceback
+    # The finished 'ok' run is untouched (no new attempt stamped by the short-circuit).
+    run2 = db.fetch_run(tmp_db, "populate", key)
+    assert run2 is not None and run2["status"] == "ok"
+    assert run2["attempt"] == run1["attempt"]
