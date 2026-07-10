@@ -133,10 +133,12 @@ def _handle_document(conn, message, *, client, clock, owner_chat_id) -> None:
     info = client.get_file(doc["file_id"])
     raw = client.download_file(info["file_path"])
     snap = mirror.parse_etoro_csv(raw.decode("utf-8"))
-    _snap_id, deltas = mirror.ingest_snapshot(conn, snap, clock=clock)
+    snap_id, deltas = mirror.ingest_snapshot(conn, snap, clock=clock)
     asks.answer(conn, pending.ask_id, text="file ingested", clock=clock)
-    # Reconciliation R-asks (§3.4) are minted by ingest's domain/jobs caller; here we
-    # only count and point to /status.
+    # Reconciliation R-asks (§3.4) are minted here from the shared producer so the D.5 loop
+    # actually opens (jobs/daily.open_loop_lines then surfaces + escalates them). The
+    # snapshot is accepted append-only regardless — the deltas are open loops (§3.4).
+    mirror.mint_reconciliation_asks(conn, snap_id, deltas, clock=clock)
     if deltas:
         client.send_message(owner_chat_id, esc(
             f"Snapshot accepted. {len(deltas)} items need reconciliation — see /status."))
