@@ -289,6 +289,43 @@ def default_fx(conn, *, as_of, rate_source=None) -> Callable[[float, str], float
     return fx
 
 
+# -- self-priming production FX (Task 8, Piece A) ----------------------------
+# default_fx fails loud on a cache miss; for a FIRST eToro pull nothing is cached
+# yet. production_fx composes default_fx with a rate_source that fetches {CUR}EUR=X
+# on a miss and stores it (same yfinance path daily.refresh_prices uses), so a
+# first pull / a newly-seen currency self-heals. `bar_fetcher` and `bar_store` are
+# the INJECTABLE seams so tests never hit the network or the price DB.
+
+
+def production_fx(conn, *, as_of, state_dir, clock, run_id=None,
+                  bar_fetcher=None, bar_store=None):
+    """The fx(amount, currency)->EUR used by the CLI and weekly-auto. Backed by
+    store.fx_rate_eur, but on a cache miss it fetches {CUR}EUR=X via yfinance
+    (paced) and stores it, so a first pull / new currency self-heals. Fail-loud
+    (EtoroError) if the fetch fails or the rate is still unavailable."""
+    from agentcy import db
+    from agentcy.fetch import yf
+
+    fetch = bar_fetcher if bar_fetcher is not None else yf.fetch_daily_bars
+    put = bar_store if bar_store is not None else store.store_price_bars
+
+    def rate_source(conn2, cur, *, as_of):
+        stamped = store.fx_rate_eur(conn2, cur, as_of=as_of)
+        if stamped is not None:
+            return stamped
+        # Cache miss: prime {CUR}EUR=X the same way daily.refresh_prices does.
+        pair = f"{cur}EUR=X"
+        try:
+            frame = fetch(pair, state_dir=state_dir)
+            put(conn2, pair, frame, run_id=run_id, fetched_at=db.to_iso(clock.now()))
+        except yf.FetchFailed as e:
+            raise EtoroError(f"FX fetch failed for {pair}: {e}") from e
+        # Re-read after priming (may still be None -> default_fx raises EtoroError).
+        return store.fx_rate_eur(conn2, cur, as_of=as_of)
+
+    return default_fx(conn, as_of=as_of, rate_source=rate_source)
+
+
 def _loads(raw: bytes) -> Any:
     if not raw:
         return {}
