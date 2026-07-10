@@ -132,8 +132,65 @@ def _cmd_run(args) -> int:
     return _job_module(args.job).main(clock=_clock(), state_dir=db.state_dir())
 
 
+def _daemon():
+    """Seam: the P7 Telegram long-poll daemon (agentcy-bot.service)."""
+    from agentcy.tg import daemon
+    return daemon
+
+
+def _archive():
+    """Seam: the P5 archive layer (rebuild regenerates every file from the DB, §8)."""
+    from agentcy import archive
+    return archive
+
+
+def _scout():
+    """Seam: the P4 Scout (H) — human-run screen, never persisted."""
+    from agentcy import scout
+    return scout
+
+
+def _cmd_bot(args) -> int:
+    """agentcy-bot.service: hand off to the long-poll daemon. run() never returns
+    under systemd (§5.2/§5.3); returns None on a clean stop in tests."""
+    _daemon().run()
+    return 0
+
+
+def _cmd_render(args) -> int:
+    """agentcy render --rebuild: regenerate every archive file from the DB (§8).
+    Archive is derived data, so corruption is never data loss."""
+    conn = _open()
+    n = _archive().rebuild(conn, archive_dir=_archive_dir())
+    print(f"rebuilt {n} archive files")
+    return 0
+
+
+def _cmd_scout(args) -> int:
+    """agentcy scout run qv (R6): call the real P4 API scout.run_qv and print the
+    ScreenResult for human reading. H.2 forbids storing the result — no DB write here."""
+    scout = _scout()
+    conn = _open()
+    result = scout.run_qv(conn, universe_path=None)
+    print(f"[{result.recipe}] {len(result.candidates)} candidate(s):")
+    for c in result.candidates:
+        print(f"  {c.symbol}: EV/EBITDA {c.ev_ebitda:.1f}  ROIC {c.roic:.1f}%  D/E {c.debt_to_equity:.2f}")
+    print()
+    print(scout.HONEST_EVIDENCE_NOTE)
+    return 0
+
+
+def _archive_dir():
+    """§8: the archive lives at <state_dir>/archive — derived, never hardcoded."""
+    from agentcy import db
+    return db.state_dir() / "archive"
+
+
 _HANDLERS: dict = {}  # filled by the tasks below: name -> callable(args) -> int
 _HANDLERS["run"] = _cmd_run
+_HANDLERS["bot"] = _cmd_bot
+_HANDLERS["render"] = _cmd_render
+_HANDLERS["scout"] = _cmd_scout
 
 
 def main(argv: Sequence[str] | None = None) -> int:
