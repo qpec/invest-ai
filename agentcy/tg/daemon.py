@@ -3,6 +3,7 @@ watchdog-budgeted. Owner lock at the top of handle(). last_update_id persisted i
 same transaction as handle()'s writes (P7.13)."""
 from __future__ import annotations
 
+from agentcy import db
 from agentcy.clock import Clock
 from agentcy.render.common import esc
 
@@ -308,3 +309,73 @@ def _handle_freetext(conn, message, text, *, client, clock, owner_chat_id) -> No
     asks.answer(conn, ask.ask_id, text=text, clock=clock)
     echo = text[:60] + ("…" if len(text) > 60 else "")
     client.send_message(owner_chat_id, esc(f"Recorded against {ask.ask_id}: '{echo}'"))
+
+
+# --- sync loop, report-only startup sweep, entrypoint (§5.2/§1.3, R7) ----------
+
+def _startup_sweep(conn, *, clock: Clock) -> None:
+    """Report-only startup sweep (R7, tech-arch §1.3: the daemon detects and reports,
+    never executes). Enqueue one durable 'notice' per missing due key; NEVER touch
+    run_log, NEVER run a job. Idempotent — the 'health:{key}' dedupe supersedes in place
+    across restarts so a lingering gap is not re-announced on every boot."""
+    from agentcy import runlog
+    from agentcy.tg import outbox
+    for key in runlog.report_missing(conn, as_of=clock.now()):
+        outbox.enqueue(
+            conn, dedupe_key=f"health:{key}", kind="notice",
+            payload_html=esc(
+                f"Data-health notice: {key} was due but has not completed. "
+                "I only detect and report — I never run a job for you."),
+            clock=clock)
+    conn.commit()
+
+
+def serve_once(conn, client, *, clock, owner_chat_id, notify=None) -> None:
+    """One loop iteration (§5.2). WATCHDOG at top, between sends (via drain hook), between handles.
+    last_update_id persists in the SAME transaction as each handle()'s writes."""
+    from agentcy.tg import outbox
+    if notify is None:
+        from agentcy import sdnotify
+        notify = sdnotify.notify
+
+    notify("WATCHDOG=1")
+
+    # Deliver first so a busy inbound batch can never starve the outbox.
+    try:
+        outbox.drain(conn, client, clock=clock, chat_id=owner_chat_id,
+                     sleep=lambda _s: notify("WATCHDOG=1"))
+    except Exception:
+        pass  # delivery failure never stops the loop; artifacts stay durable in SQLite
+
+    state = db.fetch_bot_state(conn)
+    offset = state["last_update_id"] + 1
+    updates = client.get_updates(offset=offset, timeout=25, limit=25)
+
+    for u in updates:
+        with conn:  # ONE transaction: handle() writes + offset persist commit together (§5.2)
+            handle(conn, u, client=client, clock=clock, owner_chat_id=owner_chat_id)
+            db.update_bot_state(conn, last_update_id=u["update_id"])
+        notify("WATCHDOG=1")
+
+
+def run() -> None:
+    """Entry point (agentcy bot / agentcy-bot.service). Reads env, never returns (§5.2/§5.3)."""
+    import os
+
+    from agentcy import sdnotify
+    from agentcy.clock import SystemClock
+    from agentcy.tg.client import TelegramClient
+
+    token = os.environ["AGENTCY_BOT_TOKEN"]
+    owner_chat_id = int(os.environ["AGENTCY_OWNER_CHAT_ID"])
+    conn = db.open_db()
+    db.migrate(conn)
+    client = TelegramClient(token)
+    client.set_my_commands(_command_menu())
+
+    clock = SystemClock()
+    _startup_sweep(conn, clock=clock)  # detect + report only (R7)
+    sdnotify.ready()
+
+    while True:
+        serve_once(conn, client, clock=clock, owner_chat_id=owner_chat_id)
