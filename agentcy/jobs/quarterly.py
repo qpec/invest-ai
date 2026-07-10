@@ -70,3 +70,43 @@ def flow_caveats(conn, *, start: str, end: str) -> list[str]:
     if abs(net) / v0 * 100.0 > LARGE_FLOW_PCT:
         return [f"approximate — large flows this period (net {net:+.0f} EUR on {v0:.0f} base)"]
     return []
+
+
+def hand_stats(port_returns, bench_returns) -> dict:
+    """D.4 four-stat hand fallback on pandas (no quantstats): period return, vs-benchmark
+    simple return, max drawdown, volatility. Labeled indicative, never authoritative."""
+    def _cum(r):
+        return float((1.0 + r).prod() - 1.0) if len(r) else 0.0
+
+    def _mdd(r):
+        if not len(r):
+            return 0.0
+        curve = (1.0 + r).cumprod()
+        return float((curve / curve.cummax() - 1.0).min())
+
+    pr = _cum(port_returns)
+    br = _cum(bench_returns)
+    vol = float(port_returns.std() * (252 ** 0.5)) if len(port_returns) > 1 else 0.0
+    return {"period_return": pr, "vs_benchmark_simple": pr - br,
+            "max_drawdown": _mdd(port_returns), "volatility": vol}
+
+
+def compute_stats(port_returns, bench_returns) -> dict:
+    """Try quantstats (the ONLY import site, §4.6); ANY failure -> hand_stats. Returns
+    {'stats': ..., 'degraded': bool, 'label': 'indicative, not authoritative'}."""
+    try:
+        import quantstats as qs                         # lazy: nothing else imports this (invariant 7)
+        metrics = qs.reports.metrics(returns=port_returns, benchmark=bench_returns,
+                                     mode="basic", display=False)
+        return {"stats": {**hand_stats(port_returns, bench_returns), "quantstats": metrics},
+                "degraded": False, "label": "indicative, not authoritative"}
+    except Exception:
+        return {"stats": hand_stats(port_returns, bench_returns),
+                "degraded": True, "label": "indicative, not authoritative (quantstats unavailable)"}
+
+
+def benchmark_series_eur(start: str, end: str):
+    """The SOLE benchmark read (§4.6): delegates to benchmark.py (imported lazily so the
+    import-graph test sees quarterly as the only reader; jobs.daily/weekly/event cannot)."""
+    from agentcy import benchmark
+    return benchmark.series_eur(start, end)
