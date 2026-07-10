@@ -115,6 +115,57 @@ def _handle_callback(conn, cq, *, client, clock, owner_chat_id) -> None:
             pass  # a failed edit never blocks the recorded answer (SQLite is truth)
 
 
+GENTLE_REDIRECT = (
+    "I only act on the commands and on questions I've asked you. "
+    "Nothing is waiting right now. /status shows the current picture."
+)
+
+
+def _reply_to_ask_id(message: dict) -> str | None:
+    """Extract the trailing [ask_id] token embedded in a ForceReply prompt (tg-spec §4.1)."""
+    rt = message.get("reply_to_message") or {}
+    text = rt.get("text") or ""
+    if text.endswith("]") and "[" in text:
+        return text[text.rindex("[") + 1 : -1] or None
+    return None
+
+
+def _short_label(ask) -> str:
+    return (ask.prompt or ask.ask_id)[:32]
+
+
 def _handle_freetext(conn, message, text, *, client, clock, owner_chat_id) -> None:
-    # Filled in P7.10.
-    pass
+    """Attribute inbound plain text to an open free-text ask; never guess (tg-spec §4)."""
+    from agentcy import asks
+
+    reply_to = _reply_to_ask_id(message)
+    resolved = asks.resolve_freetext(conn, reply_to_ask_id=reply_to)
+
+    if resolved is None:
+        # No open ask — never parsed, never stored; gently redirect (§4).
+        client.send_message(owner_chat_id, esc(GENTLE_REDIRECT))
+        return
+
+    if isinstance(resolved, list):
+        # Several open — the bot CANNOT guess (§4). Offer a bind keyboard.
+        buttons = [[{"text": _short_label(a), "callback_data": f"sys:bind:{a.ask_id}"}]
+                   for a in resolved]
+        client.send_message(
+            owner_chat_id,
+            esc("More than one question is open. Which does this answer? "
+                "Tap it, then send your reply again."),
+            reply_markup={"inline_keyboard": buttons})
+        return
+
+    ask = resolved
+    if not text.strip():
+        asks.reprompt(conn, ask.ask_id, clock=clock)  # exactly one re-prompt (§3.6)
+        client.send_message(
+            owner_chat_id,
+            esc(f"I didn't get a usable answer for {ask.ask_id}. "
+                "One more try, or leave it and I'll record it as unanswered."))
+        return
+
+    asks.answer(conn, ask.ask_id, text=text, clock=clock)
+    echo = text[:60] + ("…" if len(text) > 60 else "")
+    client.send_message(owner_chat_id, esc(f"Recorded against {ask.ask_id}: '{echo}'"))
