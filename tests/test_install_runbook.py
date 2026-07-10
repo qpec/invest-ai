@@ -51,3 +51,24 @@ def test_verifies_units_and_enables_timers():
     _has("systemd-analyze verify", "deploy/systemd/",
          "systemctl enable", "agentcy-bot", "agentcy-daily.timer",
          "agentcy-event.path")
+
+
+RB = (ROOT / "docs" / "runbook.md").read_text(encoding="utf-8")
+
+
+def test_runbook_has_the_deadman_rule_verbatim():
+    assert "No message by 08:00" in RB and "the box is down" in RB
+    assert "systemctl status 'agentcy-*'" in RB
+
+
+def test_runbook_lists_quarterly_ritual_steps_0_through_6():
+    for step in ("(0)", "(1)", "(2)", "(3)", "(4)", "(5)", "(6)"):
+        assert step in RB, f"quarterly ritual {step} missing"
+    assert "license_gate.py" in RB and "systemd-analyze verify" in RB
+
+
+def test_runbook_has_yfinance_emergency_lane_and_spool_recovery_and_restore_drill():
+    assert "emergency" in RB.lower() and "yfinance" in RB
+    assert "reset-failed agentcy-event" in RB          # event-spool recovery line (§1.5)
+    assert "spool/failed" in RB
+    assert "restore drill" in RB.lower() and "integrity_check" in RB
