@@ -729,9 +729,12 @@ def update_watchlist_stage(conn, item_id: int, *, stage: str, stage_changed_at: 
 
 def update_run_start(conn, run_id: int, *, started_at: str, attempt: int,
                      late: bool) -> None:
-    """Sweep re-claim of a crashed logical key (§1.3)."""
+    """Sweep re-claim of a crashed logical key (§1.3): a fresh attempt, so clear any FAILED
+    finish stamp (a never-finished key already carries NULL — this is a no-op there). The
+    re-run's update_run_finish restamps finished_at/status on success (FIX.3)."""
     _update(conn, "run_log", "run_id", run_id,
-            {"started_at": started_at, "attempt": attempt, "late": int(late)})
+            {"started_at": started_at, "attempt": attempt, "late": int(late),
+             "finished_at": None, "status": None})
 
 
 def update_run_finish(conn, run_id: int, *, finished_at: str, status: str,
