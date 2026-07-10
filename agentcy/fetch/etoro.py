@@ -79,6 +79,53 @@ class EtoroClient:
         return self._get("api/v1/user/balances") or {}
 
 
+# -- pure transforms (Task 4) ------------------------------------------------
+# No I/O, no network: instrument-type mapping onto the schema taxonomy and
+# per-symbol lot aggregation (canonical `position` PK is (snapshot_id, symbol),
+# so a symbol's multiple open lots must collapse to ONE row).
+
+_TYPE_MAP = {
+    "stocks": "stock", "stock": "stock",
+    "etf": "etf", "etfs": "etf",
+    "crypto": "crypto", "cryptocurrencies": "crypto", "cryptocurrency": "crypto",
+    "copyportfolio": "copyportfolio", "copyportfolios": "copyportfolio",
+}
+
+
+def map_instrument_type(raw: str) -> str:
+    """Map an eToro instrument-type label onto the schema taxonomy.
+
+    Case-insensitive and trimmed. Unknown labels raise EtoroError rather than
+    silently mis-mapping — mapping to the wrong taxonomy is a correctness bug.
+    """
+    key = (raw or "").strip().lower()
+    if key not in _TYPE_MAP:
+        raise EtoroError(f"unknown eToro instrument type: {raw!r}")
+    return _TYPE_MAP[key]
+
+
+def aggregate_lots(symbol: str, lots: list[dict]) -> dict:
+    """Collapse a symbol's open lots into one aggregate position row.
+
+    quantity/invested/mv/pnl sum; opened_at = earliest lot; leverage = max
+    (so any leveraged lot trips the tripwire); avg_open_price is cost basis
+    per unit (None when quantity is zero).
+    """
+    units = sum(lot["units"] for lot in lots)
+    invested = sum(lot["invested"] for lot in lots)
+    return {
+        "symbol": symbol,
+        "quantity": units,
+        "invested_native": invested,
+        "avg_open_price": (invested / units) if units else None,
+        "opened_at": min(lot["open_date"] for lot in lots),
+        "mv_native": sum(lot["mv_native"] for lot in lots),
+        "pnl_native": sum(lot["pnl_native"] for lot in lots),
+        "leverage": max(lot.get("leverage", 1.0) for lot in lots),
+        "lot_count": len(lots),
+    }
+
+
 def _loads(raw: bytes) -> Any:
     if not raw:
         return {}
