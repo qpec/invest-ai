@@ -7,7 +7,7 @@ their render+archive transaction; only the daemon delivers.
 """
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from agentcy import db
 from agentcy.clock import Clock
@@ -64,3 +64,19 @@ def next_backoff(attempts: int) -> timedelta:
     if attempts < len(_BACKOFF):
         return _BACKOFF[attempts]
     return _HOURLY
+
+
+def collapse_stale_letters(conn, *, as_of: datetime) -> int:
+    """Mark superseded queued daily letters 'collapsed' (newest stays queued); returns count.
+
+    The archive keeps all letters (report rows are untouched) — only delivery is collapsed
+    so the owner does not get a backlog of stale 'no action needed' letters (§5.3/§1.3).
+    """
+    dailies = [r for r in db.fetch_outbox_queued(conn) if r["kind"] == "daily"]
+    if len(dailies) <= 1:
+        return 0
+    # fetch_outbox_queued is FIFO by created_at; the last one is newest.
+    stale = dailies[:-1]
+    for r in stale:
+        db.update_outbox_state(conn, r["outbox_id"], status="collapsed")
+    return len(stale)
