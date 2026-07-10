@@ -118,7 +118,7 @@ def aggregate_lots(symbol: str, lots: list[dict]) -> dict:
         "quantity": units,
         "invested_native": invested,
         "avg_open_price": (invested / units) if units else None,
-        "opened_at": min(lot["open_date"] for lot in lots),
+        "opened_at": min(lot["open_date"] for lot in lots),  # ISO-8601 dates: lexicographic min == chronological earliest
         "mv_native": sum(lot["mv_native"] for lot in lots),
         "pnl_native": sum(lot["pnl_native"] for lot in lots),
         "leverage": max(lot.get("leverage", 1.0) for lot in lots),

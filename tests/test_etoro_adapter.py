@@ -79,6 +79,20 @@ def test_aggregate_lots_single_lot():
     assert agg["leverage"] == 1.0
 
 
+def test_aggregate_lots_opened_at_is_earliest_regardless_of_order():
+    lots = [
+        {"units": 1.0, "invested": 100.0, "open_rate": 100.0, "open_date": "2025-03-10",
+         "mv_native": 110.0, "pnl_native": 10.0, "leverage": 1.0},
+        {"units": 1.0, "invested": 100.0, "open_rate": 100.0, "open_date": "2022-11-01",
+         "mv_native": 120.0, "pnl_native": 20.0, "leverage": 1.0},   # earliest, in the middle
+        {"units": 1.0, "invested": 100.0, "open_rate": 100.0, "open_date": "2024-07-22",
+         "mv_native": 130.0, "pnl_native": 30.0, "leverage": 1.0},
+    ]
+    agg = etoro.aggregate_lots("MSFT", lots)
+    assert agg["opened_at"] == "2022-11-01"
+    assert agg["lot_count"] == 3
+
+
 def test_aggregate_lots_leverage_is_max():
     lots = [
         {"units": 1.0, "invested": 100.0, "open_rate": 100.0, "open_date": "2024-01-01",
