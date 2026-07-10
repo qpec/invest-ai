@@ -240,14 +240,15 @@ def management_metrics(conn, yf_ticker: str, *, as_of: datetime) -> dict | None:
 
     - shares_yoy_pct: trailing-12m share-count growth % (B.2 type 4). None (leg SUSPENDED,
       not scored 0) when no ~1y-ago share observation exists (RF6 graceful degradation).
-    - accrual_divergence_pct: 100·(net-income TTM − owner-FCF TTM) / revenue TTM. >0 =
-      reported profit with no cash behind it (a Munger earnings-quality red flag).
+    - accrual_divergence_pct: 100·(net-income TTM − Operating Cash Flow TTM) / revenue TTM
+      (classic Sloan accruals, capex-independent — Stage-1.5 change 3). >0 = reported profit
+      with no cash behind it (a Munger earnings-quality red flag); still lower-better.
     - per_share_ofcf_growth_pct / per_share_ofcf_growth_label: annualized per-share owner-FCF
       growth over the AVAILABLE share window, labelled honestly (RF11 — the archive holds only
       a <3yr window, so it is never presented as a true 3yr CAGR)."""
     inc = _latest_payloads(conn, yf_ticker, "income", as_of)
-    oe = store.owner_fcf_ttm(conn, yf_ticker, as_of=as_of)
-    if not inc or oe is None:
+    cf = _latest_payloads(conn, yf_ticker, "cashflow", as_of)
+    if not inc or not cf:
         return None
     periods = sorted(inc, reverse=True)[:4]                  # newest 4 quarters (TTM)
     ni = rev = 0.0
@@ -260,8 +261,21 @@ def management_metrics(conn, yf_ticker: str, *, as_of: datetime) -> dict | None:
         rev += float(r)
     if rev <= 0:
         return None
-    owner_fcf = oe.value.owner_fcf_ttm
-    accrual_div = 100.0 * (ni - owner_fcf) / rev
+    # Stage-1.5 change 3 - classic Sloan accruals: NI TTM - Operating Cash Flow TTM,
+    # normalized by revenue (capex-independent; earnings quality must not depend on capital
+    # intensity). Still lower-better; >0 = reported profit with no cash behind it.
+    ocf = 0.0
+    for pe in periods:
+        o = cf.get(pe, {}).get("Operating Cash Flow")
+        if o is None:
+            return None
+        ocf += float(o)
+    accrual_div = 100.0 * (ni - ocf) / rev
+    # Task 4 removes the per-share growth call below (and this binding); until then the growth
+    # call still needs owner-FCF. REVIEW FIX 2: keep it on store.owner_fcf_ttm for this commit.
+    oe = store.owner_fcf_ttm(conn, yf_ticker, as_of=as_of)
+    if oe is None:
+        return None
 
     sh = store.shares_yoy(conn, yf_ticker, as_of=as_of)      # Stamped[float | None]
     shares_yoy_pct = sh.value if sh.usable() and sh.value is not None else None
