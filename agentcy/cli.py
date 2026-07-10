@@ -321,6 +321,153 @@ def _cmd_absence(args) -> int:
     return 0
 
 
+def _register():
+    """Seam: the P3 Thesis Register (A.1-A.3); tests inject fakes here."""
+    from agentcy import register
+    return register
+
+
+def _journal():
+    """Seam: the P3 Decision Journal (F.1); tests inject fakes here."""
+    from agentcy import journal
+    return journal
+
+
+def _asks():
+    """Seam: the P3 Ask register (D.5 desk fallback); tests inject fakes here."""
+    from agentcy import asks
+    return asks
+
+
+def _events():
+    """Seam: the P3 event spool (§1.5 owner-sensor channel); tests inject fakes here."""
+    from agentcy import events
+    return events
+
+
+# FR9 owner fields carry enumerated choices; other A.1 version fields are free text.
+_REVISION_CHOICES = {
+    "conviction": ("high", "medium", "low"),
+    "mgmt_trust": ("trusted_owner_operator", "trusted_professional", "neutral", "distrust"),
+    "circle_fit": ("core", "edge"),
+}
+
+
+def _collect_revision_changes() -> dict:
+    """Interactive-ONLY revision collector (FR9): prompt field-by-field for the A.1 fields
+    the owner names. FR9 fields (conviction/mgmt_trust/circle_fit/ten_year_statement) enter
+    here through input() with enumerated choices where applicable — never a flag, never JSON.
+    Goalpost-guard / band re-anchoring is enforced downstream in register.revise (A.3)."""
+    from agentcy.register import _VERSION_COLUMNS
+    allowed = sorted(_VERSION_COLUMNS)
+    picked = _prompt(f"fields to revise (comma-separated from {', '.join(allowed)})")
+    changes: dict = {}
+    for name in (f.strip() for f in picked.split(",")):
+        if name not in _VERSION_COLUMNS:
+            continue
+        changes[name] = _prompt(f"  {name}", choices=_REVISION_CHOICES.get(name))
+    return changes
+
+
+def _cmd_thesis(args) -> int:
+    """agentcy thesis show/revise (A.1-A.3). show is a read/--json OUTPUT surface; revise
+    journals the reason first (F.1) then hands the interactively-collected changes to
+    register.revise, which enforces the goalpost guard and band re-anchor rules (A.3)."""
+    conn = _open()
+    reg = _register()
+    if args.thesis_cmd == "show":
+        row = reg.current(conn, args.thesis_id)
+        if args.json:
+            import json
+            print(json.dumps(dict(row)))
+        else:
+            for k, v in dict(row).items():
+                print(f"{k:24} {v}")
+        return 0
+    from agentcy.journal import EntryIn
+    clock = _clock()
+    reason = _prompt("reason for revision")
+    changes = _collect_revision_changes()
+    je = _journal().append(conn, EntryIn(
+        decision_type="thesis_revision", ticker=None, thesis_ref=args.thesis_id,
+        reasoning_at_the_moment=reason, actor="owner"), clock=clock)
+    new_v = reg.revise(conn, args.thesis_id, changes, reason=reason, actor="owner",
+                       journal_ref=je, clock=clock)
+    conn.commit()
+    print(f"{args.thesis_id} revised to v{new_v}")
+    return 0
+
+
+def _cmd_journal(args) -> int:
+    """agentcy journal grade (F.1): walk the due-for-review entries and grade each against
+    its pre-committed expectation/falsifier — never raw price. Process is judged separately
+    from outcome (the decision journal's whole point)."""
+    conn = _open()
+    jr = _journal()
+    clock = _clock()
+    due = jr.due_for_review(conn, as_of=clock.now())
+    if not due:
+        print("no journal entries are due for review.")
+        return 0
+    for row in due:
+        eid = row["entry_id"]
+        print(f"JE-{eid}  {row['decision_type']}  {row.get('ticker') or ''}".rstrip())
+        grade = _prompt("  outcome_grade", choices=("good", "neutral", "bad", "too_early"))
+        note = _prompt("  note (optional)") or None
+        jr.grade(conn, eid, outcome_grade=grade, note=note, clock=clock)
+        print(f"graded JE-{eid}: {grade}")
+    conn.commit()
+    return 0
+
+
+def _cmd_ask(args) -> int:
+    """agentcy ask list/answer (D.5 desk fallback). list is a read/--json OUTPUT surface;
+    answer collects the choice (validated against the ask's options) or free text and hands
+    it to asks.answer, which does the authoritative server-side validation."""
+    conn = _open()
+    ak = _asks()
+    if args.ask_cmd == "list":
+        asks_open = ak.open_asks(conn)
+        if args.json:
+            import json
+            print(json.dumps([
+                {"ask_id": a.ask_id, "kind": a.kind, "prompt": a.prompt,
+                 "options": list(a.options), "expects_freetext": a.expects_freetext}
+                for a in asks_open]))
+        else:
+            for a in asks_open:
+                print(f"{a.ask_id} [{a.kind}] {a.prompt}")
+        return 0
+    ask = ak.get(conn, args.ask_id)
+    if ask is None:
+        print(f"agentcy: no ask {args.ask_id}", file=sys.stderr)
+        return 1
+    choice = text = None
+    if ask.options:
+        choice = _prompt("choice", choices=tuple(ask.options))
+    elif ask.expects_freetext:
+        text = _prompt("answer")
+    outcome = ak.answer(conn, args.ask_id, choice=choice, text=text, clock=_clock())
+    conn.commit()
+    if outcome.already_recorded:
+        print("already recorded")
+    print(outcome.consequence)
+    return 0
+
+
+def _cmd_event(args) -> int:
+    """agentcy event TICKER (FR6 owner-sensor channel, §1.5): identical to the bot's /event —
+    write a source='owner' spool file that the event job picks up. The desk never runs the
+    check inline; it queues it for jobs.event."""
+    from agentcy import db
+    ev = _events()
+    req = ev.EventRequest(yf_ticker=args.ticker, source="owner", kind=args.kind,
+                          note=args.note, detected_at=db.to_iso(_clock().now()))
+    ev.spool_write(db.state_dir(), req)
+    print(f"event queued for {args.ticker}; the event job will run it")
+    return 0
+
+
 def _archive_dir():
     """§8: the archive lives at <state_dir>/archive — derived, never hardcoded."""
     from agentcy import db
@@ -337,6 +484,10 @@ _HANDLERS["watchlist"] = _cmd_watchlist
 _HANDLERS["snapshot"] = _cmd_snapshot
 _HANDLERS["config"] = _cmd_config
 _HANDLERS["absence"] = _cmd_absence
+_HANDLERS["thesis"] = _cmd_thesis
+_HANDLERS["journal"] = _cmd_journal
+_HANDLERS["ask"] = _cmd_ask
+_HANDLERS["event"] = _cmd_event
 
 
 def main(argv: Sequence[str] | None = None) -> int:
