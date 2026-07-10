@@ -4,11 +4,13 @@ fetch door and the single store surface. No new pip dependency, no new fetch doo
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from enum import Enum
 
 import pandas as pd
 
 from agentcy import db
-from agentcy.fetch import store
+from agentcy.fetch import store, yf  # yf = the ONE fetch door (design 1)
+from agentcy.fetch.yf import FetchFailed, RateLimited
 from agentcy.freshness import DataState
 
 # Highest-liquidity -> lowest; unknown/missing bands sort AFTER these (plan note 1).
@@ -101,3 +103,30 @@ def next_targets(conn, ranked, *, budget: int, as_of: datetime,
     refresh.sort(key=lambda pair: pair[1])  # oldest last_attempt first
     ordered = never + [t for t, _ in refresh]
     return ordered[:budget]
+
+
+class Outcome(str, Enum):
+    """One populator fetch-attempt result (design 6). Logged to universe_fetch."""
+    OK = "ok"
+    NO_DATA = "no_data"
+    FAILED = "failed"
+    RATE_LIMITED = "rate_limited"
+
+
+def fetch_one(conn, yf_ticker: str, *, run_id: int | None, fetched_at: str,
+              state_dir) -> Outcome:
+    """Fetch statements + shares + daily price for ONE ticker via the single yf door and
+    persist via store.* (design 3). Returns an Outcome; RateLimited surfaces so the loop
+    stops the night (design 6). This unit does NOT pace or budget — the loop owns that."""
+    try:
+        statements = yf.fetch_statements(yf_ticker, state_dir=state_dir)
+        store.store_statements(conn, yf_ticker, statements, run_id=run_id, fetched_at=fetched_at)
+        shares = yf.fetch_shares_full(yf_ticker, state_dir=state_dir)
+        store.store_shares(conn, yf_ticker, shares, fetched_at=fetched_at)
+        bars = yf.fetch_daily_bars(yf_ticker, state_dir=state_dir)
+        store.store_price_bars(conn, yf_ticker, bars, run_id=run_id, fetched_at=fetched_at)
+    except RateLimited:
+        return Outcome.RATE_LIMITED  # RateLimited subclasses FetchFailed: catch first
+    except FetchFailed:
+        return Outcome.FAILED  # empty/None/zero-row/NaN -> failed (design 6)
+    return Outcome.OK
