@@ -44,6 +44,15 @@ def _cached_count(conn, ranked, *, as_of) -> int:
     return sum(1 for t in ranked if populate.is_cached(conn, t, as_of=as_of))
 
 
+def _already_delivered(conn, key) -> bool:
+    """True once this milestone's fixed dedupe_key row has left the queue (status 'sent' or
+    'collapsed') - the terminal states where `enqueue` would raise ValueError and the recompute
+    is thrown away. A single indexed lookup that lets `maybe_emit_milestones` skip the whole
+    detector branch on every night after delivery (no nightly full-universe DB walk)."""
+    row = db.fetch_outbox_by_key(conn, key)
+    return row is not None and row["status"] != "queued"
+
+
 def _enqueue_once(conn, key, rendered, *, run_id, clock) -> None:
     """Enqueue idempotently: a queued row supersedes in place; a SENT row raises ValueError
     (caught) so a re-fire after delivery never re-notifies (plan note 7)."""
@@ -58,12 +67,18 @@ def _enqueue_once(conn, key, rendered, *, run_id, clock) -> None:
 
 def maybe_emit_milestones(conn, ranked, *, starter_size, run_id, as_of, clock) -> None:
     """Enqueue the starter and/or first-full-pass note when the derived transition holds;
-    each fires at most once (fixed dedupe_key). Called at the tail of every populate run."""
-    if _starter_complete(conn, ranked, starter_size=starter_size, as_of=as_of):
+    each fires at most once (fixed dedupe_key). Called at the tail of every populate run.
+
+    Once a milestone is delivered its key is skipped by a single indexed lookup, so the
+    expensive coverage detectors (full-universe `is_cached` walks) never re-run nightly for
+    a note that would only be discarded."""
+    if (not _already_delivered(conn, _STARTER_KEY)
+            and _starter_complete(conn, ranked, starter_size=starter_size, as_of=as_of)):
         _enqueue_once(conn, _STARTER_KEY,
                       render_starter_note(cached=_cached_count(conn, ranked, as_of=as_of)),
                       run_id=run_id, clock=clock)
-    if _full_pass_complete(conn, ranked):
+    if (not _already_delivered(conn, _FULL_PASS_KEY)
+            and _full_pass_complete(conn, ranked)):
         cached = _cached_count(conn, ranked, as_of=as_of)
         _enqueue_once(conn, _FULL_PASS_KEY,
                       render_full_pass_note(cached=cached, skipped=len(ranked) - cached),
