@@ -175,7 +175,7 @@ def _etoro_client(api_key: str, user_key: str):
     """Seam: build the eToro Read-API client. Tests monkeypatch this to a FakeClient
     so the `snapshot etoro` branch is network-free."""
     from agentcy.fetch import etoro
-    return etoro.EtoroClient(api_key=api_key, user_key=user_key)
+    return etoro.build_client(api_key, user_key)
 
 
 IDEA_SOURCES = ("own_research", "scout_screen", "reading", "referral")
