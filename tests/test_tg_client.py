@@ -100,3 +100,29 @@ def test_429_raises_retry_after(fake, client):
     with pytest.raises(TelegramRetryAfter) as ei:
         client.send_message(1, "x")
     assert ei.value.retry_after == 7.0
+
+
+def test_send_document_builds_multipart_with_file_and_caption(fake, client):
+    fake.responses["sendDocument"] = {"ok": True, "result": {"message_id": 88}}
+    msg = client.send_document(3, "weekly-review-2026-07-11.md", b"# heading\nbody\n",
+                               caption="Weekly review")
+    assert msg["message_id"] == 88
+    method, raw, headers = fake.calls("sendDocument")[0]
+    assert headers["Content-Type"].startswith("multipart/form-data; boundary=")
+    body = raw if isinstance(raw, (bytes, bytearray)) else raw.encode()
+    assert b'name="chat_id"' in body and b"3" in body
+    assert b'name="caption"' in body and b"Weekly review" in body
+    assert b'name="document"; filename="weekly-review-2026-07-11.md"' in body
+    assert b"# heading" in body
+
+
+def test_get_file_returns_file_path(fake, client):
+    fake.responses["getFile"] = {"ok": True, "result": {"file_id": "F1", "file_path": "documents/x.csv"}}
+    info = client.get_file("F1")
+    assert info["file_path"] == "documents/x.csv"
+
+
+def test_download_file_gets_raw_bytes(fake, client):
+    fake.files["documents/x.csv"] = b"Symbol,Units\nMSFT,40\n"
+    data = client.download_file("documents/x.csv")
+    assert data == b"Symbol,Units\nMSFT,40\n"
