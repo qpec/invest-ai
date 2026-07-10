@@ -1,0 +1,21 @@
+[Unit]
+Description=stock-agentcy Telegram daemon (long-poll in, outbox out)
+OnFailure=agentcy-fail@%n.service
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=notify
+User=agentcy
+WatchdogSec=90
+Restart=always
+RestartSec=10
+EnvironmentFile=/etc/stock-agentcy/agentcy.env
+ExecStart=/opt/stock-agentcy/.venv/bin/agentcy bot
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/stock-agentcy
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

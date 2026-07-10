@@ -1,0 +1,19 @@
+[Unit]
+Description=stock-agentcy event-spool drain (D.3 — one check per spooled request)
+Wants=network-online.target
+After=network-online.target
+OnFailure=agentcy-fail@%n.service
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=oneshot
+User=agentcy
+TimeoutStartSec=30min
+EnvironmentFile=/etc/stock-agentcy/agentcy.env
+Environment=MPLBACKEND=Agg
+ExecStart=/opt/stock-agentcy/.venv/bin/agentcy run event
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/stock-agentcy
+PrivateTmp=true
