@@ -1,0 +1,1 @@
+Populator: starter set ready - 2 names now cached. Run `agentcy scout run grade` to see the first ranked picks.
