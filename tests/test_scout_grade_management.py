@@ -1,12 +1,11 @@
-"""Stage-1 Management pillar (design §1 Pillar M): share-count trend, per-share owner-FCF
-growth, accrual/cash divergence. Qualitative half is deferred to Stage-2 (never faked).
+"""Stage-1 Management pillar (design §1 Pillar M): share-count trend + accrual/cash
+divergence. Qualitative half is deferred to Stage-2 (never faked). (Stage-1.5: per-share
+owner-FCF growth moved to the Growth pillar G — see test_scout_grade_growth.py.)
 
 RF6 — every share-dependent case seeds a MULTI-YEAR share series with a real ~1y-ago
 baseline (index 2025-06-20, 2025-12-20, 2026-06-20; latest within 90d of as_of 2026-07-08)
 so shares_yoy is actually computable (the recorded msft_shares_full fixture does NOT
 satisfy that). A rising-share case proves the dilution signal actually surfaces.
-RF11 — the per-share owner-FCF metric is labelled honestly (only a <3yr window exists in
-the archive) so it is never presented as a true 3yr CAGR.
 """
 from datetime import datetime, timezone
 
@@ -41,22 +40,6 @@ def test_management_metrics_shrinking_shares(tmp_db, yf_statements):
     #   NI_ttm = 25+24+23+22 = 94e9 ; OCF_ttm = 36+34+32+30 = 132e9 ; revenue = 252e9
     #   accrual% = 100 * (94 - 132) / 252 = negative (cash exceeds reported profit = clean)
     assert round(m["accrual_divergence_pct"], 3) == round(100.0 * (94e9 - 132e9) / 252e9, 3)
-    # per-share owner-FCF growth is present (>= 2 share observations)
-    assert m["per_share_ofcf_growth_pct"] is not None
-    # shrinking shares on a constant owner-FCF base => per-share growth is POSITIVE
-    assert m["per_share_ofcf_growth_pct"] > 0
-
-
-def test_management_per_share_growth_labelled_honestly(tmp_db, yf_statements):
-    """RF11 — only a <3yr window exists in the archive, so the metric must be labelled as
-    the annualized available-window growth, never presented as a true 3yr CAGR."""
-    _seed(tmp_db, yf_statements, [7.60e9, 7.50e9, 7.434e9])
-    m = sg.management_metrics(tmp_db, "MSFT", as_of=AS_OF)
-    assert m is not None
-    label = m["per_share_ofcf_growth_label"]
-    assert "3yr CAGR not computable" in label
-    # honest label names the actual window used (oldest -> newest share observation).
-    assert "2025-06-20" in label and "2026-06-20" in label
 
 
 def test_management_metrics_rising_shares_flags_dilution(tmp_db, yf_statements):
@@ -67,8 +50,6 @@ def test_management_metrics_rising_shares_flags_dilution(tmp_db, yf_statements):
     assert m is not None
     # diluting: latest 7.60e9 vs ~1y-ago 7.20e9 => >5% issuance
     assert m["shares_yoy_pct"] > 5
-    # per-share owner-FCF growth on a rising share base (constant owner-FCF) is NEGATIVE
-    assert m["per_share_ofcf_growth_pct"] < 0
 
 
 def test_management_shares_leg_degrades_gracefully_without_baseline(tmp_db, yf_statements):
@@ -85,7 +66,6 @@ def test_management_shares_leg_degrades_gracefully_without_baseline(tmp_db, yf_s
     assert m is not None
     assert m["shares_yoy_pct"] is None                    # leg suspended, not scored 0
     assert m["accrual_divergence_pct"] is not None        # rest of the metric intact
-    assert m["per_share_ofcf_growth_pct"] is not None
 
 
 def test_management_none_when_absent(tmp_db):
