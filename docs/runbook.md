@@ -53,6 +53,29 @@ sanity-check row counts, and confirm the toolchain artifacts (uv binary, wheelho
 python-build-standalone tarball) exist and hash-match — a year-8 rebuild on a fresh
 machine needs only the second disk.
 
+## 6. eToro auto-ingest (optional — blank keys = manual snapshot mode)
+The weekly review can pull holdings straight from eToro's official **read-only** API
+(advises/monitors, never trades). It runs only when BOTH keys are set; blank keeps the
+box in manual-snapshot mode.
+
+- **Create a read-only key** — in eToro: *Settings → Trading → API Key Management →
+  Create New Key*. Set **Environment = Real**, **Scope = Read**, confirm via SMS. You
+  get back a public **API key** and a **user key**.
+- **Install** — put them in `/etc/stock-agentcy/agentcy.env`:
+
+      AGENTCY_ETORO_API_KEY=<public api key>
+      AGENTCY_ETORO_USER_KEY=<user key>
+
+  then re-run the weekly unit (`systemctl start agentcy-weekly.service`, or wait for
+  Saturday). The unit already inherits this EnvironmentFile.
+- **Rotate** — edit the env file and restart; nothing else. The key is Read scope only,
+  so a leak cannot move money.
+- **First run / a new holding currency** — the FX pairs self-prime (`{CUR}EUR=X` is
+  fetched on cache-miss). A transient eToro/FX failure emits a one-line notice and keeps
+  the **last** snapshot; it never crashes the weekly letter.
+- **Test manually** — `agentcy snapshot etoro --dry-run` prints the resolved holdings
+  and writes nothing.
+
 ## LTS obligation (dated)
 Ubuntu Pro ESM covers to May 2034; the 10-year clock runs to mid-2036, so the LTS hop is
 a scheduled obligation — ~2030 recommended, May 2034 at the latest, unless Legacy is paid.
