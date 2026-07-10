@@ -17,6 +17,7 @@ import pandas as pd
 from scipy.stats import percentileofscore
 
 from agentcy.fetch import store
+from agentcy.scout import HONEST_EVIDENCE_NOTE  # re-export (design §9: printed every run)
 
 
 def value_metrics(conn, yf_ticker: str, *, market_cap: float, total_debt: float,

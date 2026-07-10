@@ -1,0 +1,27 @@
+# The Scout - graded screen - Fri 10 Jul 2026
+
+Core tier
+```
+Ticker  Grade  Comp  V     Q     D     M   
+VEEV    B      78    58.0  92.0  84.0  80.0
+MSFT    B      71    40.0  88.0  90.0  70.0
+```
+
+Adjacent tier
+```
+Ticker  Grade  Comp  V     Q     D     M   
+SWX     C      60    55.0  60.0  65.0  60.0
+```
+  suppressed - LEVR: leverage veto: net debt/EBITDA above the §2 floor
+
+Outside tier
+```
+Ticker  Grade  Comp  V     Q     D     M   
+DIST    A      83    90.0  74.0  82.0  88.0
+```
+  not graded - THIN: insufficient data: <2 usable periods
+
+Outside-tier A-grades (circle-expansion candidates):
+  * DIST - composite 83 (A)
+
+Honest evidence note: independent replications put quality-value screening at roughly 3-6%/yr gross outperformance with multi-year losing stretches - not the book's 30%. This screen surfaces cheap, capital-productive businesses; it promises nothing. Every candidate still passes the full Gate, and second-guessing the screen's valuation call destroys the edge - the Gate judges the framework, not price timing.
