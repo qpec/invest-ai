@@ -232,3 +232,57 @@ def test_absence_start_with_until(tmp_db, fixed_clock, monkeypatch):
     assert cli.main(["absence", "start", "--until", "2026-07-20"]) == 0
     ev = db.fetch_absence_events(tmp_db)[-1]
     assert ev["kind"] == "on" and ev["planned_end"].startswith("2026-07-20")
+
+
+# --- P8.8 thesis show/revise, journal grade, ask list/answer, event TICKER --------
+
+def test_thesis_show_json(tmp_db, fixed_clock, monkeypatch, capsys):
+    import json
+    cli = _wire(monkeypatch, tmp_db, fixed_clock)
+    row = {"thesis_id": "TH-CRWD-001", "version": 2, "conviction": "high"}
+    monkeypatch.setattr(cli, "_register", lambda: types.SimpleNamespace(current=lambda conn, tid: row))
+    assert cli.main(["thesis", "show", "TH-CRWD-001", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["version"] == 2
+
+
+def test_ask_list_and_answer(tmp_db, fixed_clock, monkeypatch, capsys):
+    cli = _wire(monkeypatch, tmp_db, fixed_clock)
+    ask_obj = types.SimpleNamespace(ask_id="A238", kind="A", prompt="confirm broken?",
+                                    options=("confirm", "refute"), expects_freetext=False)
+    outcome = types.SimpleNamespace(accepted=True, already_recorded=False, consequence="alert.confirm2")
+    fake = types.SimpleNamespace(
+        open_asks=lambda conn, kind=None: [ask_obj],
+        get=lambda conn, aid: ask_obj,
+        answer=lambda conn, aid, *, choice=None, text=None, clock, tg_message_id=None: outcome)
+    monkeypatch.setattr(cli, "_asks", lambda: fake)
+    assert cli.main(["ask", "list"]) == 0
+    assert "A238" in capsys.readouterr().out
+    monkeypatch.setattr("builtins.input", lambda prompt="": "confirm")
+    assert cli.main(["ask", "answer", "A238"]) == 0
+    assert "alert.confirm2" in capsys.readouterr().out
+
+
+def test_event_spools_a_request(tmp_db, fixed_clock, monkeypatch, tmp_path):
+    cli = _wire(monkeypatch, tmp_db, fixed_clock)
+    written = {}
+    Req = types.SimpleNamespace
+    fake = types.SimpleNamespace(
+        EventRequest=lambda **k: Req(**k),
+        spool_write=lambda state_dir, req: written.update(req=req, dir=state_dir) or (state_dir / "x"))
+    monkeypatch.setattr(cli, "_events", lambda: fake)
+    monkeypatch.setattr("agentcy.db.state_dir", lambda: tmp_path)
+    assert cli.main(["event", "MSFT", "--kind", "earnings"]) == 0
+    assert written["req"].yf_ticker == "MSFT" and written["req"].source == "owner"
+
+
+def test_journal_grade_lists_due_then_grades(tmp_db, fixed_clock, monkeypatch):
+    cli = _wire(monkeypatch, tmp_db, fixed_clock)
+    graded = {}
+    fake = types.SimpleNamespace(
+        due_for_review=lambda conn, *, as_of: [{"entry_id": 3, "decision_type": "buy", "ticker": "CRWD"}],
+        grade=lambda conn, eid, *, outcome_grade, note, clock: graded.update(eid=eid, g=outcome_grade))
+    monkeypatch.setattr(cli, "_journal", lambda: fake)
+    answers = iter(["good", "thesis played out"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    assert cli.main(["journal", "grade"]) == 0
+    assert graded == {"eid": 3, "g": "good"}
