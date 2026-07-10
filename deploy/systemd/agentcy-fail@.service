@@ -1,0 +1,11 @@
+[Unit]
+Description=stock-agentcy failure notifier for %i (direct-send, bypasses DB/outbox)
+
+[Service]
+Type=oneshot
+User=agentcy
+EnvironmentFile=/etc/stock-agentcy/agentcy.env
+ExecStart=/opt/stock-agentcy/.venv/bin/python /opt/stock-agentcy/tools/fail_notify.py %i
+NoNewPrivileges=true
+ProtectSystem=strict
+PrivateTmp=true
