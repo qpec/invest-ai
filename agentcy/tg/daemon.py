@@ -82,8 +82,13 @@ def handle(conn, update: dict, *, client, clock: Clock, owner_chat_id: int) -> N
         return
 
     if "message" in update:
-        _handle_message(conn, update["message"], client=client, clock=clock,
-                        owner_chat_id=owner_chat_id)
+        message = update["message"]
+        if "document" in message:
+            _handle_document(conn, message, client=client, clock=clock,
+                             owner_chat_id=owner_chat_id)
+        else:
+            _handle_message(conn, message, client=client, clock=clock,
+                            owner_chat_id=owner_chat_id)
     elif "callback_query" in update:
         _handle_callback(conn, update["callback_query"], client=client, clock=clock,
                          owner_chat_id=owner_chat_id)
@@ -96,6 +101,46 @@ def _handle_message(conn, message: dict, *, client, clock, owner_chat_id) -> Non
         _handle_command(conn, message, text, client=client, clock=clock, owner_chat_id=owner_chat_id)
         return
     _handle_freetext(conn, message, text, client=client, clock=clock, owner_chat_id=owner_chat_id)
+
+
+# --- /snapshot document ingestion (state-scoped to snap:mode:file, §1.5) -------
+
+_SNAP_FILE_OPT = "snap:file"
+
+
+def _open_snap_file_ask(conn):
+    """The single open N-ask that records a pending file upload, or None."""
+    from agentcy import asks
+    for a in asks.open_asks(conn, kind="N"):
+        if _SNAP_FILE_OPT in a.options:
+            return a
+    return None
+
+
+def _handle_document(conn, message, *, client, clock, owner_chat_id) -> None:
+    """Ingest a document ONLY when a snap:file ask is open; a cold file is redirected,
+    never ingested (a stray upload must not become portfolio truth, §1.5/§4)."""
+    pending = _open_snap_file_ask(conn)
+    if pending is None:
+        client.send_message(owner_chat_id, esc(
+            "I only ingest a file right after you choose 'Upload export file' in /snapshot. "
+            "Send /snapshot to start."))
+        return
+    from agentcy import asks, mirror
+    doc = message["document"]
+    client.send_chat_action(owner_chat_id, "typing")  # >1s work ahead (§5.5)
+    info = client.get_file(doc["file_id"])
+    raw = client.download_file(info["file_path"])
+    snap = mirror.parse_etoro_csv(raw.decode("utf-8"))
+    _snap_id, deltas = mirror.ingest_snapshot(conn, snap, clock=clock)
+    asks.answer(conn, pending.ask_id, text="file ingested", clock=clock)
+    # Reconciliation R-asks (§3.4) are minted by ingest's domain/jobs caller; here we
+    # only count and point to /status.
+    if deltas:
+        client.send_message(owner_chat_id, esc(
+            f"Snapshot accepted. {len(deltas)} items need reconciliation — see /status."))
+    else:
+        client.send_message(owner_chat_id, esc("Snapshot accepted. Everything reconciles."))
 
 
 def _handle_command(conn, message, text, *, client, clock, owner_chat_id) -> None:
@@ -172,6 +217,19 @@ def _handle_callback(conn, cq, *, client, clock, owner_chat_id) -> None:
     cbq_id = cq.get("id")
     data = cq.get("data") or ""
     msg_id = cq.get("message", {}).get("message_id")
+
+    # /snapshot mode taps carry no ask_id — they mint state or cancel (§1.5), so they
+    # must be handled before the generic ask-validation path below.
+    if data == "snap:mode:file":
+        asks.mint(conn, kind="N", prompt="Send the CSV export now",
+                  options=[_SNAP_FILE_OPT], expects_freetext=True, clock=clock)
+        client.answer_callback_query(cbq_id, text="Ready")
+        client.send_message(owner_chat_id, esc("Send the CSV export as a document now."))
+        return
+    if data == "snap:cancel":
+        client.answer_callback_query(cbq_id, text="Cancelled")
+        return
+
     _domain, _action, ask_id, choice = _parse_callback(data)
 
     if not ask_id or asks.get(conn, ask_id) is None:
