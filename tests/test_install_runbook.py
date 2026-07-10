@@ -28,6 +28,15 @@ def test_environmentfile_is_0600_with_the_two_secrets():
          "AGENTCY_BOT_TOKEN", "AGENTCY_OWNER_CHAT_ID")
 
 
+def test_environmentfile_has_the_optional_etoro_keys_blank():
+    # eToro auto-ingest keys are OPTIONAL: present in the template but blank, so an
+    # unconfigured install stays in manual-snapshot mode (the weekly guard needs BOTH).
+    _has("/etc/stock-agentcy/agentcy.env", "chmod 600",
+         "AGENTCY_ETORO_API_KEY=", "AGENTCY_ETORO_USER_KEY=")
+    assert "AGENTCY_ETORO_API_KEY=\n" in SH, "eToro API key must be blank (manual-mode default)"
+    assert "AGENTCY_ETORO_USER_KEY=\n" in SH, "eToro user key must be blank (manual-mode default)"
+
+
 def test_inits_the_archive_repo_with_backup_remote():
     _has("git init", "/var/lib/stock-agentcy/archive",
          "git remote add backup", "/mnt/agentcy-backup")

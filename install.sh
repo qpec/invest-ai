@@ -35,12 +35,16 @@ mkdir -p /var/lib/stock-agentcy/locks \
          /var/lib/stock-agentcy/backups
 chown -R agentcy:agentcy "$STATE"
 
-# --- 4. secrets: 0600 EnvironmentFile, exactly two entries (§9) ----------------
+# --- 4. secrets: 0600 EnvironmentFile — two required secrets + two optional -----
+# eToro keys (auto-ingest; blank = manual snapshot mode). The weekly guard requires
+# BOTH eToro keys truthy, so leaving them blank keeps the box in manual-snapshot mode.
 mkdir -p "$ETC"
 if [ ! -f /etc/stock-agentcy/agentcy.env ]; then
   cat > /etc/stock-agentcy/agentcy.env <<'ENV'
 AGENTCY_BOT_TOKEN=REPLACE_ME
 AGENTCY_OWNER_CHAT_ID=REPLACE_ME
+AGENTCY_ETORO_API_KEY=
+AGENTCY_ETORO_USER_KEY=
 ENV
   echo ">>> edit /etc/stock-agentcy/agentcy.env with the real bot token and owner chat-id, then re-run."
 fi

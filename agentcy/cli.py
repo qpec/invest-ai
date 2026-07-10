@@ -6,6 +6,7 @@ Job exceptions propagate uncaught: the degraded letter is already in the outbox
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import Sequence
@@ -65,6 +66,13 @@ def build_parser() -> argparse.ArgumentParser:
     simp.add_argument("csv", help="path to the broker CSV export")
     simp.set_defaults(handler="snapshot")
     snsub.add_parser("enter").set_defaults(handler="snapshot")
+    setoro = snsub.add_parser("etoro", help="pull holdings from the eToro Read API")
+    setoro.add_argument("--dry-run", action="store_true")
+    setoro.add_argument(
+        "--live", action="store_true",
+        help="acknowledge live-API use (advisory; real API is used whenever the "
+             "AGENTCY_ETORO_* keys are set)")
+    setoro.set_defaults(handler="snapshot")
 
     jr = sub.add_parser("journal", help="Decision Journal")
     jsub = jr.add_subparsers(dest="journal_cmd", required=True)
@@ -161,6 +169,13 @@ def _mirror():
     """Seam: the P3 Portfolio Mirror (E.1 snapshot ingest); tests inject fakes here."""
     from agentcy import mirror
     return mirror
+
+
+def _etoro_client(api_key: str, user_key: str):
+    """Seam: build the eToro Read-API client. Tests monkeypatch this to a FakeClient
+    so the `snapshot etoro` branch is network-free."""
+    from agentcy.fetch import etoro
+    return etoro.build_client(api_key, user_key)
 
 
 IDEA_SOURCES = ("own_research", "scout_screen", "reading", "referral")
@@ -286,9 +301,17 @@ def _cmd_snapshot(args) -> int:
     clock = _clock()
     if args.snap_cmd == "import":
         snap = m.parse_etoro_csv(Path(args.csv).read_text(encoding="utf-8"))
+    elif args.snap_cmd == "etoro":
+        return _cmd_snapshot_etoro(args, conn, m, clock)
     else:  # enter: paste on stdin
         print("Paste positions, then EOF (Ctrl-D):", file=sys.stderr)
         snap = m.parse_manual_text(sys.stdin.read())
+    return _ingest_and_report(conn, m, snap, clock=clock)
+
+
+def _ingest_and_report(conn, m, snap, *, clock) -> int:
+    """Shared E.1 tail: ingest append-only, mint one R-ask per delta (same producer
+    the bot uses, §3.4), commit, then print the reconciliation report."""
     snapshot_id, deltas = m.ingest_snapshot(conn, snap, clock=clock)
     m.mint_reconciliation_asks(conn, snapshot_id, deltas, clock=clock)
     conn.commit()
@@ -300,6 +323,52 @@ def _cmd_snapshot(args) -> int:
         print(f"  [{d.kind}] {d.symbol or ''} — {d.detail}")
     print("Open loops recorded; answer them via `agentcy ask list` or the bot.")
     return 0
+
+
+def _cmd_snapshot_etoro(args, conn, m, clock) -> int:
+    """agentcy snapshot etoro [--dry-run] [--live] — pull holdings from the eToro
+    Read API (E.1 api_pull source). Keys come from the environment ONLY and are never
+    printed/logged. --dry-run resolves + prints the snapshot but writes NOTHING."""
+    from agentcy import db
+    from agentcy.fetch import etoro
+
+    api_key = os.environ.get("AGENTCY_ETORO_API_KEY")
+    user_key = os.environ.get("AGENTCY_ETORO_USER_KEY")
+    if not api_key or not user_key:
+        print("eToro snapshot: set AGENTCY_ETORO_API_KEY and AGENTCY_ETORO_USER_KEY "
+              "in the environment.", file=sys.stderr)
+        return 1
+    if args.live:
+        # --live is advisory only: it gates nothing. The real API is used whenever the
+        # env keys are present (checked above); this just echoes an acknowledgement.
+        print("live mode: using the real eToro Read API (env keys present).",
+              file=sys.stderr)
+
+    as_of = clock.now().date().isoformat()
+    client = _etoro_client(api_key, user_key)
+    # Self-priming production FX: {CUR}EUR=X is fetched+cached on a miss so a first
+    # pull self-heals. run_id=None: a CLI FX prime is not part of a scheduled run.
+    fx = etoro.production_fx(conn, as_of=clock.now(), state_dir=db.state_dir(),
+                             clock=clock, run_id=None)
+    try:
+        snap = etoro.fetch_etoro_snapshot(client, fx=fx, as_of=as_of)
+    except etoro.EtoroError as e:
+        print(f"eToro snapshot failed: {e}", file=sys.stderr)
+        return 1
+
+    if args.dry_run:
+        print(f"[dry-run] eToro snapshot resolved (source={snap.source}, as_of={as_of}) "
+              f"— NOTHING written.")
+        print(f"  cash_balance_eur: {snap.cash_balance_eur:.2f}")
+        details = {d.symbol: d for d in snap.details}
+        for p in snap.positions:
+            d = details.get(p.symbol)
+            opened = f", opened_at={d.opened_at}" if d is not None else ""
+            print(f"  {p.symbol} [{p.instrument_type}] qty={p.quantity} "
+                  f"mv_eur={p.mv_eur:.2f}{opened}")
+        return 0
+
+    return _ingest_and_report(conn, m, snap, clock=clock)
 
 
 def _cmd_config(args) -> int:
