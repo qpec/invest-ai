@@ -11,6 +11,8 @@ import json
 import statistics
 from datetime import datetime
 
+import pandas as pd
+
 from agentcy.fetch import store
 
 
@@ -163,3 +165,75 @@ def durability_metrics(conn, yf_ticker: str, *, as_of: datetime) -> dict | None:
         "owner_fcf_negative_all_periods": _owner_fcf_negative_all_periods(cf),  # RF3
         "sbc_to_revenue_pct": 100.0 * sbc / revenue,
     }
+
+
+def management_metrics(conn, yf_ticker: str, *, as_of: datetime) -> dict | None:
+    """Pillar M deterministic raw metrics (design §1 Pillar M): share-count trend, per-share
+    owner-FCF growth, accrual/cash divergence. The qualitative half (candor, alignment,
+    related-party dealings) is DEFERRED to the Stage-2 shortlist and NEVER faked here (FR9).
+    None when the underlying statements/shares are absent (integrity-suspend, never a silent 0).
+
+    - shares_yoy_pct: trailing-12m share-count growth % (B.2 type 4). None (leg SUSPENDED,
+      not scored 0) when no ~1y-ago share observation exists (RF6 graceful degradation).
+    - accrual_divergence_pct: 100·(net-income TTM − owner-FCF TTM) / revenue TTM. >0 =
+      reported profit with no cash behind it (a Munger earnings-quality red flag).
+    - per_share_ofcf_growth_pct / per_share_ofcf_growth_label: annualized per-share owner-FCF
+      growth over the AVAILABLE share window, labelled honestly (RF11 — the archive holds only
+      a <3yr window, so it is never presented as a true 3yr CAGR)."""
+    inc = _latest_payloads(conn, yf_ticker, "income", as_of)
+    oe = store.owner_fcf_ttm(conn, yf_ticker, as_of=as_of)
+    if not inc or oe is None:
+        return None
+    periods = sorted(inc, reverse=True)[:4]                  # newest 4 quarters (TTM)
+    ni = rev = 0.0
+    for pe in periods:
+        n = inc[pe].get("Net Income")
+        r = inc[pe].get("Total Revenue")
+        if n is None or r is None:
+            return None                                      # a required pinned row missing
+        ni += float(n)
+        rev += float(r)
+    if rev <= 0:
+        return None
+    owner_fcf = oe.value.owner_fcf_ttm
+    accrual_div = 100.0 * (ni - owner_fcf) / rev
+
+    sh = store.shares_yoy(conn, yf_ticker, as_of=as_of)      # Stamped[float | None]
+    shares_yoy_pct = sh.value if sh.usable() and sh.value is not None else None
+
+    growth_pct, growth_label = _per_share_ofcf_growth(conn, yf_ticker, oe, as_of)
+    return {
+        "shares_yoy_pct": shares_yoy_pct,
+        "accrual_divergence_pct": accrual_div,
+        "per_share_ofcf_growth_pct": growth_pct,
+        "per_share_ofcf_growth_label": growth_label,
+    }
+
+
+def _per_share_ofcf_growth(conn, yf_ticker, oe, as_of) -> tuple[float | None, str | None]:
+    """Annualized per-share owner-FCF growth over the deduped share window (oldest usable ->
+    newest at/before as_of); returns (value, honest-label). None with < 2 observations or a
+    non-positive base (integrity-suspend, never 0).
+
+    RF11 — the archive holds only a <3yr window, so the returned label is explicit that this
+    is the annualized available-window growth and that a true 3yr CAGR is not computable."""
+    sh = store.shares_history(conn, yf_ticker, as_of=as_of)
+    if not sh.usable():
+        return None, None
+    series = sh.value[sh.value.index <= pd.Timestamp(as_of.date())]
+    if len(series) < 2:
+        return None, None
+    newest_ps = oe.value.owner_fcf_per_share_ttm
+    oldest_shares = float(series.iloc[0])
+    if oldest_shares <= 0 or newest_ps <= 0:
+        return None, None
+    base_ps = oe.value.owner_fcf_ttm / oldest_shares        # owner-FCF at the older share base
+    if base_ps <= 0:
+        return None, None
+    oldest_d = series.index[0].date().isoformat()
+    newest_d = series.index[-1].date().isoformat()
+    years = max((series.index[-1] - series.index[0]).days / 365.25, 1e-9)
+    growth = 100.0 * ((newest_ps / base_ps) ** (1.0 / years) - 1.0)
+    label = (f"per-share owner-FCF growth, {oldest_d}->{newest_d} annualized "
+             f"— 3yr CAGR not computable from archive")
+    return growth, label
