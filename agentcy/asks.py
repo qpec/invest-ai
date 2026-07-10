@@ -146,7 +146,10 @@ def apply_consequence(conn, outcome: AnswerOutcome, *, clock: Clock,
         return _apply_vfu_watch(conn, outcome.ask, clock=clock, run_id=run_id)
     if cons in ("trigger.answer", "trigger.unverifiable"):
         return _apply_trigger_check(conn, outcome.ask, clock=clock, run_id=run_id)
-    return None                                            # R/F/N notes: the answered row IS the record
+    if cons.startswith("recon."):
+        return _apply_reconciliation(conn, outcome.ask, cons[len("recon."):],
+                                     clock=clock, evidence=evidence, run_id=run_id)
+    return None                                            # F/N notes: the answered row IS the record
 
 
 def _alert_for(conn, ask: Ask):
@@ -284,6 +287,75 @@ def _apply_trigger_check(conn, ask: Ask, *, clock: Clock, run_id: int | None) ->
     db.append_trigger_check(conn, dict(
         trigger_id=ask.trigger_ref, run_id=run_id, checked_at=db.to_iso(clock.now()),
         result=result, observed_value=None, headroom=None, evaluable_from=None))
+    return None
+
+
+# Reconciliation choices carried by an R-ask (E.1/§3.4). Each maps to a journal
+# decision_type so answering closes the FR8 off-system-trade loop (global invariant 2:
+# every owner decision produces a JournalEntry). The R-ask's thesis_ref carries the symbol.
+_FLOW_DIRECTIONS = {"deposit": "deposit", "withdrawal": "withdrawal",
+                    "dividend": "dividend", "other": "other"}
+
+
+def _apply_reconciliation(conn, ask: Ask, choice: str, *, clock: Clock,
+                          evidence: str | None, run_id: int | None) -> str | None:
+    """Dispatch a reconciliation R-ask choice (§3.4) to its journal (+ external_flow for the
+    MA-12 cash-flow set). The snapshot the delta was reconciled against is the latest one at
+    answer time (the R-ask is minted right after ingest and answered before the next snapshot).
+    'ignore' is stored as a no-action journal note, not as portfolio truth."""
+    from agentcy import journal, mirror
+    from agentcy.journal import EntryIn
+    symbol = ask.thesis_ref
+    reason = (evidence or "").strip()
+
+    if choice in _FLOW_DIRECTIONS:                          # unexplained_cash → MA-12 flow
+        journal.append(conn, EntryIn(
+            decision_type="config_or_designation", decision_subtype="external_flow",
+            reasoning_at_the_moment=(reason or f"Owner confirmed the unexplained cash move was a {choice} (MA-12)."),
+            owner_action="followed", inputs_ref=run_id, ask_ref=ask.ask_id, actor="owner"),
+            clock=clock)
+        recent = db.fetch_recent_snapshots(conn, 2)
+        if recent:
+            latest = recent[0]
+            cash_delta = latest["cash_balance_eur"] - (recent[1]["cash_balance_eur"]
+                                                       if len(recent) > 1 else 0.0)
+            db.append_external_flow(
+                conn, snapshot_id=latest["snapshot_id"], date=latest["as_of"],
+                amount_eur=cash_delta, direction=_FLOW_DIRECTIONS[choice], ask_ref=ask.ask_id)
+        return f"Recorded external flow: {choice}. It will not masquerade as alpha (MA-12)."
+
+    if choice in ("backfill", "outside", "ignore", "gap"):
+        subtype = "outside_framework" if choice == "outside" else "config_change"
+        note = {
+            "backfill": f"{symbol} enters the backfill queue by weight; a Gate run resolves the thesis (C.6).",
+            "outside": f"{symbol} designated outside-framework (once-only designation, E.2).",
+            "ignore": f"{symbol} flagged for re-check — not stored as portfolio truth (§3.4).",
+            "gap": f"{symbol} carried at last-snapshot value; flagged in data-health (§3.4).",
+        }[choice]
+        je = journal.append(conn, EntryIn(
+            decision_type="config_or_designation", decision_subtype=subtype, ticker=symbol,
+            reasoning_at_the_moment=(reason or note), owner_action="followed",
+            inputs_ref=run_id, ask_ref=ask.ask_id, actor="owner"), clock=clock)
+        if choice == "backfill" and symbol is not None:
+            mirror.designate(conn, symbol, "backfill_pending",
+                             journal_ref=je, valid_from=db.to_iso(clock.now()))
+        elif choice == "outside" and symbol is not None:
+            mirror.designate(conn, symbol, "outside_framework",
+                             journal_ref=je, valid_from=db.to_iso(clock.now()))
+        return note
+
+    if choice in ("add", "trim", "close"):                 # quantity_change / disappeared
+        dtype = {"add": "add_to_position", "trim": "trim", "close": "sell"}[choice]
+        default = {
+            "add": f"Owner added to {symbol} off-system; the thesis is the falsifier (F.1).",
+            "trim": f"Owner trimmed {symbol} off-system.",
+            "close": f"Owner closed {symbol} off-system; advice was not the driver.",
+        }[choice]
+        journal.append(conn, EntryIn(
+            decision_type=dtype, ticker=symbol, thesis_ref=None,
+            reasoning_at_the_moment=(reason or default), owner_action="followed",
+            inputs_ref=run_id, ask_ref=ask.ask_id, actor="owner"), clock=clock)
+        return f"Recorded: {choice} on {symbol}."
     return None
 
 

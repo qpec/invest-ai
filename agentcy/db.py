@@ -386,6 +386,14 @@ def fetch_snapshot(conn, snapshot_id: int) -> Row | None:
         "SELECT * FROM snapshot WHERE snapshot_id=?", (snapshot_id,)).fetchone()
 
 
+def fetch_recent_snapshots(conn, limit: int) -> list[Row]:
+    """The newest `limit` snapshots, newest first (E.1 reconciliation reads the last two to
+    recover the cash delta for an MA-12 external-flow confirmation)."""
+    return conn.execute(
+        "SELECT * FROM snapshot ORDER BY as_of DESC, snapshot_id DESC LIMIT ?",
+        (limit,)).fetchall()
+
+
 def fetch_snapshots_between(conn, start: str, end: str) -> list[Row]:
     """Snapshot rows with start <= as_of <= end, oldest first (quarterly return series)."""
     return conn.execute(

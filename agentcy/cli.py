@@ -268,17 +268,21 @@ def _cmd_watchlist(args) -> int:
 
 def _cmd_snapshot(args) -> int:
     """agentcy snapshot import <csv> / enter (E.1). Parse via the P3 adapter, ingest,
-    then surface the reconciliation deltas. The handler stops at surfacing — it does NOT
-    mint R asks (the §3.9 ingest_snapshot contract puts 'caller mints one R ask per Delta'
-    on the bot/asks layer); at the desk the deltas point the owner to `ask`/bot follow-up."""
+    then mint one reconciliation R-ask per delta (the §3.9 ingest_snapshot contract:
+    'caller mints one R ask per Delta') so the D.5 reconciliation loop has a desk producer
+    identical to the bot's. The snapshot is accepted append-only regardless — the deltas
+    are open loops (`ask list`/bot answerable), they do not block ingest."""
     conn = _open()
     m = _mirror()
+    clock = _clock()
     if args.snap_cmd == "import":
         snap = m.parse_etoro_csv(Path(args.csv).read_text(encoding="utf-8"))
     else:  # enter: paste on stdin
         print("Paste positions, then EOF (Ctrl-D):", file=sys.stderr)
         snap = m.parse_manual_text(sys.stdin.read())
-    snapshot_id, deltas = m.ingest_snapshot(conn, snap, clock=_clock())
+    snapshot_id, deltas = m.ingest_snapshot(conn, snap, clock=clock)
+    m.mint_reconciliation_asks(conn, snapshot_id, deltas, clock=clock)
+    conn.commit()
     if not deltas:
         print(f"snapshot {snapshot_id} accepted — everything reconciles.")
         return 0
