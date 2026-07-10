@@ -10,7 +10,7 @@ import json
 import ssl
 import urllib.error
 import urllib.request
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 _DEFAULT_HOST = "https://api.telegram.org"
 
@@ -79,6 +79,31 @@ class TelegramClient:
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
         return self._request("sendMessage", payload)
+
+    def edit_message_text(self, chat_id: int, message_id: int, html: str,
+                          *, reply_markup: dict | None = None) -> dict:
+        """Resolution edit: show recorded choice, strip keyboard (§3.10)."""
+        payload: dict[str, Any] = {
+            "chat_id": chat_id, "message_id": message_id,
+            "text": html, "parse_mode": "HTML"}
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        return self._request("editMessageText", payload)
+
+    def answer_callback_query(self, callback_query_id: str, *, text: str | None = None) -> None:
+        """Always answered — clients spin a progress bar otherwise (§5.5)."""
+        payload: dict[str, Any] = {"callback_query_id": callback_query_id}
+        if text is not None:
+            payload["text"] = text
+        self._request("answerCallbackQuery", payload)
+
+    def send_chat_action(self, chat_id: int, action: str = "typing") -> None:
+        """Precedes any >1s action (/event, /snapshot)."""
+        self._request("sendChatAction", {"chat_id": chat_id, "action": action})
+
+    def set_my_commands(self, commands: Sequence[Mapping]) -> None:
+        """Command menu, called once at daemon start."""
+        self._request("setMyCommands", {"commands": list(commands)})
 
 
 def _loads(raw: bytes) -> dict:

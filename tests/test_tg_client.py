@@ -60,3 +60,43 @@ def test_ok_false_raises_telegram_error(fake, client):
     from agentcy.tg.client import TelegramError
     with pytest.raises(TelegramError):
         client.send_message(1, "x")
+
+
+def test_edit_message_text_posts_message_id(fake, client):
+    fake.responses["editMessageText"] = {"ok": True, "result": {"message_id": 42}}
+    client.edit_message_text(5, 42, "<i>recorded</i>", reply_markup=None)
+    _, body, _ = fake.calls("editMessageText")[0]
+    assert body["chat_id"] == 5 and body["message_id"] == 42
+    assert body["parse_mode"] == "HTML" and body["text"] == "<i>recorded</i>"
+
+
+def test_answer_callback_query_sends_id_and_text(fake, client):
+    fake.responses["answerCallbackQuery"] = {"ok": True, "result": True}
+    client.answer_callback_query("CBQ1", text="Already recorded")
+    _, body, _ = fake.calls("answerCallbackQuery")[0]
+    assert body["callback_query_id"] == "CBQ1" and body["text"] == "Already recorded"
+
+
+def test_send_chat_action_defaults_to_typing(fake, client):
+    fake.responses["sendChatAction"] = {"ok": True, "result": True}
+    client.send_chat_action(7)
+    _, body, _ = fake.calls("sendChatAction")[0]
+    assert body["chat_id"] == 7 and body["action"] == "typing"
+
+
+def test_set_my_commands_posts_command_list(fake, client):
+    fake.responses["setMyCommands"] = {"ok": True, "result": True}
+    cmds = [{"command": "status", "description": "current calm state"}]
+    client.set_my_commands(cmds)
+    _, body, _ = fake.calls("setMyCommands")[0]
+    assert body["commands"][0]["command"] == "status"
+
+
+def test_429_raises_retry_after(fake, client):
+    from agentcy.tg.client import TelegramRetryAfter
+    fake.responses["sendMessage"] = {
+        "ok": False, "error_code": 429, "description": "Too Many Requests",
+        "parameters": {"retry_after": 7}}
+    with pytest.raises(TelegramRetryAfter) as ei:
+        client.send_message(1, "x")
+    assert ei.value.retry_after == 7.0
