@@ -25,6 +25,34 @@ def test_sweep_runs_due_key_and_finished_keys_exit_zero(tmp_db, fixed_clock, tmp
     assert calls == []                                  # re-fired finished key: exit 0, no re-run
 
 
+def test_sweep_runs_all_due_keys_newest_on_time_others_late(tmp_db, fixed_clock, tmp_path):
+    """Multi-key sweep (§1.3): a fresh DB has every due key of the run_type absent, so ONE sweep
+    runs them all under the single per-type lock — the newest key on-time, every other key late —
+    each exactly once, and re-firing the sweep re-runs nothing (all finished)."""
+    from agentcy.jobs import runner
+    due = runlog.due_keys("daily", as_of=fixed_clock.now())
+    newest = max(due)
+    assert len(due) > 1                                     # coverage needs several due keys
+    calls = []
+    assert runner.sweep_and_run(tmp_db, "daily", _recorder(calls), clock=fixed_clock,
+                                state_dir=tmp_path) == 0
+
+    ran = {sf: late for sf, late in calls}
+    assert set(ran) == set(due)                            # every due key ran, exactly once
+    assert len(calls) == len(due)
+    assert ran[newest] is False                            # today's key: on time
+    assert all(ran[k] is True for k in due if k != newest)  # every catch-up key: late
+    for k in due:
+        row = db.fetch_run(tmp_db, "daily", k)
+        assert row["status"] == "ok" and row["finished_at"] is not None
+        assert row["late"] == (0 if k == newest else 1)
+
+    calls.clear()                                          # a second sweep re-runs nothing
+    assert runner.sweep_and_run(tmp_db, "daily", _recorder(calls), clock=fixed_clock,
+                                state_dir=tmp_path) == 0
+    assert calls == []
+
+
 def test_sweep_reclaims_crashed_key_marked_late(tmp_db, fixed_clock, tmp_path):
     from agentcy.jobs import runner
     yesterday = FixedClock(fixed_clock.now() - timedelta(days=1))
