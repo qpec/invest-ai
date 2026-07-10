@@ -279,13 +279,13 @@ def _framework_audit(matrix: dict) -> dict:
     }
 
 
-def build_quarterly_context(conn, *, as_of, run_id: int) -> contexts.QuarterlyContext:
+def build_quarterly_context(conn, *, as_of, run_id: int, clock: Clock) -> contexts.QuarterlyContext:
     """G.4 seven sections. Benchmark + records appendix live ONLY on this context (§3.16)."""
     snap = db.fetch_latest_snapshot(conn)
-    first = conn.execute("SELECT MIN(as_of) AS a FROM snapshot").fetchone()["a"]
+    first = db.fetch_first_snapshot_as_of(conn)
     period = f"{as_of.year}-Q{(as_of.month - 1) // 3 + 1}"
     start, end = (first or db.to_iso(as_of)), db.to_iso(as_of)
-    fetch_and_store_benchmark(conn, start=start[:10], end=end[:10], run_id=run_id, clock=SystemClock())
+    fetch_and_store_benchmark(conn, start=start[:10], end=end[:10], run_id=run_id, clock=clock)
     port = portfolio_series_eur(conn, start=start, end=end)
     bench = benchmark_series_eur(start[:10], end[:10])
     pr = port.pct_change().dropna() if len(port) else port
@@ -318,7 +318,7 @@ def run_one(conn, handle, *, clock: Clock, state_dir: Path) -> tuple[str, dict]:
     """D.4 top-level (the sole benchmark/quantstats process). Build G.4 context, render the
     summary message + full document, archive, enqueue both."""
     run_id = handle.run_id
-    ctx = build_quarterly_context(conn, as_of=clock.now(), run_id=run_id)
+    ctx = build_quarterly_context(conn, as_of=clock.now(), run_id=run_id, clock=clock)
     summary, doc = render_quarterly_mod.render_quarterly(ctx)
     report_id = archive.archive_and_store(conn, doc, run_id=run_id, report_type="quarterly",
                                           period=handle.scheduled_for, freshness={}, clock=clock)
