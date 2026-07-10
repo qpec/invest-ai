@@ -15,6 +15,12 @@ from agentcy.render.contexts import RenderedOutput
 _TIER_ORDER = ("Core", "Adjacent", "Outside")
 _HEADER = ("Ticker", "Grade", "Comp", "V", "Q", "G", "D", "M")
 
+_GRADE_FRAMING = (
+    "This grade is quantitative evidence, not a thesis verdict: moat durability, management "
+    "candor, and fad-risk are Stage-2 judgments still pending. A computed A is a strong "
+    "lead to investigate, never a decision."
+)
+
 
 @dataclass(frozen=True)
 class ScoutGradedContext:
@@ -75,6 +81,8 @@ def _segments(ctx: ScoutGradedContext):
             segs.append(("text", f"  * {g.symbol} - composite {g.composite:.0f} (A)"))
     else:
         segs.append(("text", "  (none this run)"))
+    segs.append(("text", ""))
+    segs.append(("text", _GRADE_FRAMING))
     segs.append(("text", ""))
     segs.append(("text", ctx.evidence_note))
     return segs

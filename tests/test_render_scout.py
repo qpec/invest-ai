@@ -45,6 +45,9 @@ def test_render_tiered_grade_sorted(golden):
     assert "insufficient data" in md.lower()
     # honest evidence note printed every run
     assert "promises nothing" in md.lower()
+    # Stage-1.5 change 5: honest grade-vs-thesis framing (grade is evidence, not a verdict).
+    assert "quantitative evidence" in md.lower()
+    assert "stage-2" in md.lower() or "stage 2" in md.lower()
     # lint-clean (no !, no benchmark/euro tokens)
     assert lint(r) == []
     golden("scout_graded.md.txt", r.markdown)
