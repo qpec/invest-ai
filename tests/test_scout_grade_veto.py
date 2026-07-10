@@ -76,6 +76,55 @@ def test_clean_name_no_veto_no_penalty():
     assert not v.vetoed and v.penalty == 0 and v.reason == ""
 
 
+def test_cash_destruction_spared_for_high_roic_fast_grower():
+    """Stage-1.5 change 4: owner-FCF negative every period is SPARED (flagged non-veto) when
+    ROIC>15% AND revenue growth>10%/yr - the young high-return compounder investing ahead of
+    profits. Leverage is unaffected (this name is un-levered)."""
+    v = sg.veto_check(net_debt_to_ebitda=1.0, ebitda=10.0, net_debt=1.0,
+                      owner_fcf_positive_any=False, shares_yoy_pct=0.0,
+                      roic_pct=25.0, revenue_growth_pct=30.0)
+    assert not v.vetoed
+    assert v.penalty == 0
+    assert "reinvest" in v.reason.lower() or "flag" in v.reason.lower()
+
+
+def test_cash_destruction_still_vetoes_low_roic_burner():
+    """A low-ROIC cash-burner is still VETOED (the ROIC>15 gate keeps the carve-out from
+    being a hype loophole)."""
+    v = sg.veto_check(net_debt_to_ebitda=1.0, ebitda=10.0, net_debt=1.0,
+                      owner_fcf_positive_any=False, shares_yoy_pct=0.0,
+                      roic_pct=8.0, revenue_growth_pct=40.0)
+    assert v.vetoed and "cash" in v.reason.lower()
+
+
+def test_cash_destruction_still_vetoes_slow_grower_even_if_high_roic():
+    """High ROIC but slow growth (<=10%/yr) is NOT the invest-ahead-of-profits case -> still
+    vetoed."""
+    v = sg.veto_check(net_debt_to_ebitda=1.0, ebitda=10.0, net_debt=1.0,
+                      owner_fcf_positive_any=False, shares_yoy_pct=0.0,
+                      roic_pct=25.0, revenue_growth_pct=5.0)
+    assert v.vetoed and "cash" in v.reason.lower()
+
+
+def test_cash_destruction_none_growth_or_roic_still_vetoes():
+    """Missing ROIC or growth data can never SPARE (no evidence of profitable growth)."""
+    assert sg.veto_check(net_debt_to_ebitda=1.0, ebitda=10.0, net_debt=1.0,
+                         owner_fcf_positive_any=False, shares_yoy_pct=0.0,
+                         roic_pct=None, revenue_growth_pct=30.0).vetoed
+    assert sg.veto_check(net_debt_to_ebitda=1.0, ebitda=10.0, net_debt=1.0,
+                         owner_fcf_positive_any=False, shares_yoy_pct=0.0,
+                         roic_pct=25.0, revenue_growth_pct=None).vetoed
+
+
+def test_leverage_still_beats_cash_destruction_carveout():
+    """Leverage is always disqualifying - a levered high-ROIC fast-grower is STILL vetoed for
+    leverage (the carve-out only touches the cash-destruction branch)."""
+    v = sg.veto_check(net_debt_to_ebitda=6.8, ebitda=1.0, net_debt=6.8,
+                      owner_fcf_positive_any=False, shares_yoy_pct=0.0,
+                      roic_pct=25.0, revenue_growth_pct=30.0)
+    assert v.vetoed and "leverage" in v.reason.lower()
+
+
 def test_veto_is_frozen_dataclass():
     v = sg.veto_check(net_debt_to_ebitda=1.0, ebitda=10.0, net_debt=1.0,
                       owner_fcf_positive_any=True, shares_yoy_pct=1.0)
