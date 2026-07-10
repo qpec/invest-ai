@@ -23,8 +23,12 @@ def _archive_dir(archive_dir: Path | None) -> Path:
 
 
 def path_for(report_type: str, period: str, *, archive_dir: Path) -> Path:
-    """letters|weekly|quarterly|alerts|events|gate/<period>.md (§8)."""
-    return archive_dir / _SUBDIR[report_type] / f"{period}.md"
+    """letters|weekly|quarterly|alerts|events|gate/<period>.md (§8). The DB keeps the
+    period verbatim; the on-disk filename maps ':' (event key '{ticker}:{detected_at}')
+    to '-' so the git-tracked archive stays portable off Linux. Deterministic, so
+    archive_and_store and rebuild agree on the same file."""
+    safe = period.replace(":", "-")
+    return archive_dir / _SUBDIR[report_type] / f"{safe}.md"
 
 
 def archive_and_store(conn, r: RenderedOutput, *, run_id: int, report_type: str, period: str,
