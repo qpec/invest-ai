@@ -9,6 +9,13 @@ STATE=/var/lib/stock-agentcy
 ETC=/etc/stock-agentcy
 BACKUP=/mnt/agentcy-backup
 
+# The uv-managed CPython must live where the no-login `agentcy` runtime user can
+# read it: root's ~/.local is 0700, so a venv whose interpreter lives there is
+# unexecutable by agentcy (systemd ExecStart → "Permission denied"). Pin it under
+# /opt, world-traversable. (§12.2 interpreter; must exist before `uv sync`.)
+export UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-/opt/uv-python}"
+mkdir -p "$UV_PYTHON_INSTALL_DIR"; chmod 755 "$UV_PYTHON_INSTALL_DIR"
+
 # --- 1. dedicated no-login user (system unit topology, §1.1) ------------------
 id agentcy >/dev/null 2>&1 || useradd --system --home "$STATE" --shell /usr/sbin/nologin agentcy
 
@@ -42,14 +49,27 @@ chown root:agentcy /etc/stock-agentcy/agentcy.env
 
 # --- 5. the locked venv via uv (pinned interpreter + lockfile, §12.2/§12.3) ----
 uv sync --locked
-# archive the recovery toolchain on-box (nightly backup syncs it to the second disk, §11.6):
+# code + venv must be readable/executable by the no-login agentcy runtime user
+# (the units run ExecStart=/opt/stock-agentcy/.venv/bin/agentcy as User=agentcy):
+chmod -R a+rX "$CODE"
+# archive the recovery toolchain on-box (best-effort durability insurance, §11.6;
+# the nightly backup syncs it to the second disk). Must NOT block bringing the
+# system live — every step here is guarded. uv has no `pip download`, so the
+# wheelhouse is built with pip installed into the locked venv (targets the exact
+# pinned CPython, so the archived wheels match the runtime).
 mkdir -p "$STATE"/toolchain/wheelhouse
-uv export --format requirements-txt > "$STATE"/toolchain/requirements.lock.txt
-uv pip download -r "$STATE"/toolchain/requirements.lock.txt -d "$STATE"/toolchain/wheelhouse
-cp "$(command -v uv)" "$STATE"/toolchain/uv
+if uv export --format requirements-txt --no-emit-project --no-hashes \
+     > "$STATE"/toolchain/requirements.lock.txt 2>/dev/null; then
+  uv pip install pip -q 2>/dev/null || true
+  "$CODE"/.venv/bin/python -m pip download \
+     -r "$STATE"/toolchain/requirements.lock.txt \
+     -d "$STATE"/toolchain/wheelhouse >/dev/null 2>&1 \
+     || echo ">>> WARN: wheelhouse pre-download incomplete (durability insurance only; redo later — not required to run)."
+fi
+cp "$(command -v uv)" "$STATE"/toolchain/uv 2>/dev/null || true
 # the pinned python-build-standalone interpreter tarball uv fetched:
-cp -a "${UV_PYTHON_INSTALL_DIR:-$HOME/.local/share/uv/python}" "$STATE"/toolchain/python-build-standalone || true
-chown -R agentcy:agentcy "$STATE"/toolchain
+cp -a "${UV_PYTHON_INSTALL_DIR:-$HOME/.local/share/uv/python}" "$STATE"/toolchain/python-build-standalone 2>/dev/null || true
+chown -R agentcy:agentcy "$STATE"/toolchain 2>/dev/null || true
 
 # --- 6. NFR7 license wall — blocks the install on any violation (§2.2) ---------
 "$CODE"/.venv/bin/python "$CODE"/tools/license_gate.py
