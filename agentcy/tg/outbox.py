@@ -7,10 +7,14 @@ their render+archive transaction; only the daemon delivers.
 """
 from __future__ import annotations
 
+import json
+import os
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from agentcy import db
 from agentcy.clock import Clock
+from agentcy.tg.client import TelegramError, TelegramRetryAfter
 
 
 def scheduled_key(run_type: str, scheduled_for: str, section: str, *, attempt: int | None = None) -> str:
@@ -80,3 +84,60 @@ def collapse_stale_letters(conn, *, as_of: datetime) -> int:
     for r in stale:
         db.update_outbox_state(conn, r["outbox_id"], status="collapsed")
     return len(stale)
+
+
+def drain(conn, client, *, clock: Clock, chat_id: int, sleep=None) -> dict:
+    """FIFO by created_at, alerts first on flush; collapse stale daily letters; >=1s pacing;
+    honor retry_after; mark sent ONLY on ok:true with message_id stored; backoff ladder;
+    alerts have no dead-letter (§5.3/§5.4). Delivery is at-least-once.
+
+    ``chat_id`` (required, single-owner) and ``sleep`` (test seam) are additive keyword-only
+    args beyond contracts §3.20 (R10); the positional/``clock`` shape is preserved.
+    """
+    import time as _time
+    if sleep is None:
+        sleep = _time.sleep
+
+    collapsed = collapse_stale_letters(conn, as_of=clock.now())
+
+    rows = db.fetch_outbox_queued(conn)  # FIFO by created_at (contract)
+    now = clock.now()
+
+    def _due(r):
+        if r["next_attempt_at"] is None:
+            return True
+        return db.from_iso(r["next_attempt_at"]) <= now
+
+    # alerts first, otherwise stable FIFO (sorted() preserves the fetch order within a class).
+    ordered = sorted((r for r in rows if _due(r)),
+                     key=lambda r: (0 if r["kind"] == "alert" else 1,))
+
+    sent = 0
+    retry_after = None
+    first = True
+    for r in ordered:
+        if not first:
+            sleep(1.0)  # >=1s pacing (§5.5)
+        first = False
+        try:
+            reply_markup = json.loads(r["reply_markup_json"]) if r["reply_markup_json"] else None
+            if r["document_path"]:
+                content = Path(r["document_path"]).read_bytes()
+                filename = os.path.basename(r["document_path"])
+                msg = client.send_document(chat_id, filename, content, caption=r["payload_html"])
+            else:
+                msg = client.send_message(chat_id, r["payload_html"], reply_markup=reply_markup)
+        except TelegramRetryAfter as e:
+            retry_after = e.retry_after
+            deferred = db.to_iso(clock.now() + timedelta(seconds=e.retry_after))
+            db.update_outbox_state(conn, r["outbox_id"], next_attempt_at=deferred)
+            break  # never hammer — stop this batch
+        except (TelegramError, OSError):
+            attempts = r["attempts"] + 1
+            nxt = db.to_iso(clock.now() + next_backoff(attempts))
+            db.update_outbox_state(conn, r["outbox_id"], attempts=attempts, next_attempt_at=nxt)
+            continue  # alert stays queued (no dead-letter); letters retry too
+        db.update_outbox_state(conn, r["outbox_id"], status="sent",
+                               tg_message_id=msg.get("message_id"))
+        sent += 1
+    return {"sent": sent, "collapsed": collapsed, "retry_after": retry_after}
