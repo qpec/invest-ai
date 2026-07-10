@@ -117,7 +117,23 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _job_module(name: str):
+    """Seam for the P6 job entry points (R1); tests inject fakes here."""
+    import importlib
+    return importlib.import_module(f"agentcy.jobs.{name}")
+
+
+def _cmd_run(args) -> int:
+    """systemd ExecStart surface (§10). Per R1 the job's main() owns the connection,
+    the due-run sweep and (for daily) the S2 dead-man ping; the CLI just forwards
+    clock/state_dir and returns main()'s int (0 ok, 1 degraded/failed) verbatim.
+    Job exceptions propagate uncaught so OnFailure= fires (§1.3)."""
+    from agentcy import db
+    return _job_module(args.job).main(clock=_clock(), state_dir=db.state_dir())
+
+
 _HANDLERS: dict = {}  # filled by the tasks below: name -> callable(args) -> int
+_HANDLERS["run"] = _cmd_run
 
 
 def main(argv: Sequence[str] | None = None) -> int:
