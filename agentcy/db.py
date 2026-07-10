@@ -380,6 +380,26 @@ def fetch_latest_snapshot(conn) -> Row | None:
     ).fetchone()
 
 
+def fetch_snapshot(conn, snapshot_id: int) -> Row | None:
+    """One snapshot row by id (cash_balance_eur lives here, not on positions)."""
+    return conn.execute(
+        "SELECT * FROM snapshot WHERE snapshot_id=?", (snapshot_id,)).fetchone()
+
+
+def fetch_snapshots_between(conn, start: str, end: str) -> list[Row]:
+    """Snapshot rows with start <= as_of <= end, oldest first (quarterly return series)."""
+    return conn.execute(
+        "SELECT * FROM snapshot WHERE as_of >= ? AND as_of <= ? "
+        "ORDER BY as_of ASC, snapshot_id ASC", (start, end)).fetchall()
+
+
+def fetch_external_flows_for_snapshot(conn, snapshot_id: int) -> list[Row]:
+    """MA-12 external flows attributed to the period ending at this snapshot."""
+    return conn.execute(
+        "SELECT * FROM external_flow WHERE snapshot_id=? ORDER BY flow_id ASC",
+        (snapshot_id,)).fetchall()
+
+
 def fetch_positions_advice(conn, snapshot_id: int) -> list[Row]:
     """SELECT from positions_advice view ONLY (invariant 4)."""
     return conn.execute(
