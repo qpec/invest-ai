@@ -153,14 +153,17 @@ def test_derive_four_triggers_exact_thresholds():
     by_type = {s.type: s for s in specs}
     assert set(by_type) == {"growth_floor", "margin_erosion",
                             "balance_sheet_safety", "dilution"}
-    assert by_type["growth_floor"].comparator == ">"
+    # Comparators are the FIRE condition (triggers._breaches returns `value cmp threshold`),
+    # matching the canonical gate-created forms in test_triggers.py: floors fire on '<',
+    # ceilings fire on '>'. The end-to-end FIRE/PASS test below proves these actually fire.
+    assert by_type["growth_floor"].comparator == "<"
     assert round(by_type["growth_floor"].threshold, 4) == round(14.2 - 10.0, 4)
-    assert by_type["margin_erosion"].comparator == ">"
+    assert by_type["margin_erosion"].comparator == "<"
     assert round(by_type["margin_erosion"].threshold, 4) == round(30.0 * 0.75, 4)
     assert by_type["margin_erosion"].moat_link == "switching_costs"
-    assert by_type["balance_sheet_safety"].comparator == "<"
+    assert by_type["balance_sheet_safety"].comparator == ">"
     assert by_type["balance_sheet_safety"].threshold == min(1.5 + 1.0, 4.0)
-    assert by_type["dilution"].comparator == "<" and by_type["dilution"].threshold == 5.0
+    assert by_type["dilution"].comparator == ">" and by_type["dilution"].threshold == 5.0
     assert by_type["dilution"].persistence == "ttm"
 
 
@@ -196,3 +199,67 @@ def test_bootstrapping_when_only_non_moat_legs_compute():
     assert len(specs) >= 2                       # enough legs by count alone
     assert not any(s.moat_link for s in specs)   # ... but none carries a moat link
     assert backfill._triggers_form_a_thesis(specs) is False
+
+
+def _backfill_fields():
+    from agentcy.register import ThesisFields
+    return ThesisFields(
+        business_model_2s="a. b.", moat_types=("switching_costs",), moat_evidence="e",
+        owner_earnings_json="{}", owner_earnings_narrative="n", value_at_purchase=None,
+        fair_band_low=25.0, fair_band_high=35.0, denominator_note=None, conviction="high",
+        mgmt_trust="neutral", mgmt_trust_note=None, circle_fit="core", circle_fit_note=None,
+        ten_year_statement="t", status_buy_flag=False, status_buy_note=None)
+
+
+def _armed_backfill_triggers(tmp_db, fixed_clock):
+    """derive -> commit (via create_thesis) -> activate: the real onboarding path, returning
+    the four armed derived triggers keyed by type."""
+    from agentcy import backfill, journal, register
+    from agentcy.journal import EntryIn
+    je = journal.append(tmp_db, EntryIn(
+        decision_type="config_or_designation", decision_subtype="config_change",
+        reasoning_at_the_moment="seed", actor="owner"), clock=fixed_clock)
+    specs = backfill.derive_triggers(_baseline())          # rev 14.2, margin 30, ndte 1.5, shares 1.2
+    tid = register.create_thesis(tmp_db, ticker="ADYEN", origin="backfill",
+                                 fields=_backfill_fields(), triggers=specs, journal_ref=je,
+                                 clock=fixed_clock)
+    register.activate(tmp_db, tid, cause="backfill confirmed", clock=fixed_clock)
+    return {t["type"]: t for t in db.fetch_armed_triggers(tmp_db, tid)}
+
+
+def test_derived_triggers_fire_on_deterioration_and_pass_when_healthy(
+        tmp_db, fixed_clock, monkeypatch, stamped):
+    """End-to-end guard against comparator inversion: each derived trigger is committed through
+    register + armed, then evaluated against BOTH a deteriorating series (must FIRE) and a
+    healthy one (must PASS). Thresholds from _baseline(): growth floor 4.2%, margin floor 22.5%,
+    net-debt/EBITDA ceiling 2.5x, dilution ceiling 5%/yr."""
+    from agentcy import triggers
+    from agentcy.fetch import store
+    armed = _armed_backfill_triggers(tmp_db, fixed_clock)
+
+    def _set(name, value):
+        monkeypatch.setattr(store, name, lambda c, t, *, as_of: stamped(value), raising=False)
+
+    # --- growth_floor: floor = 14.2 - 10 = 4.2, fires when revenue_yoy < 4.2 for 2 quarters ---
+    _set("revenue_yoy_series", [("2026-03-31", 2.0), ("2026-06-30", 1.5)])   # collapse below floor
+    assert triggers.evaluate(tmp_db, armed["growth_floor"], as_of=AS_OF).result == "FIRE"
+    _set("revenue_yoy_series", [("2026-03-31", 18.0), ("2026-06-30", 20.0)])  # healthy > floor
+    assert triggers.evaluate(tmp_db, armed["growth_floor"], as_of=AS_OF).result == "PASS"
+
+    # --- margin_erosion: floor = 30 * 0.75 = 22.5, fires when margin < 22.5 for 2 quarters ---
+    _set("margin_series", [("2026-03-31", 18.0), ("2026-06-30", 17.0)])       # eroded below floor
+    assert triggers.evaluate(tmp_db, armed["margin_erosion"], as_of=AS_OF).result == "FIRE"
+    _set("margin_series", [("2026-03-31", 30.0), ("2026-06-30", 31.0)])       # healthy > floor
+    assert triggers.evaluate(tmp_db, armed["margin_erosion"], as_of=AS_OF).result == "PASS"
+
+    # --- balance_sheet_safety: ceiling = min(1.5+1, 4) = 2.5, fires when net_debt/EBITDA > 2.5 ---
+    _set("balance_safety_series", [("2026-03-31", 5.0), ("2026-06-30", 6.0)])  # levered above ceil
+    assert triggers.evaluate(tmp_db, armed["balance_sheet_safety"], as_of=AS_OF).result == "FIRE"
+    _set("balance_safety_series", [("2026-03-31", 1.5), ("2026-06-30", 1.2)])  # safe < ceiling
+    assert triggers.evaluate(tmp_db, armed["balance_sheet_safety"], as_of=AS_OF).result == "PASS"
+
+    # --- dilution (ttm scalar): ceiling 5%/yr, fires when shares_yoy > 5 ---
+    _set("shares_yoy", 10.0)                                                   # 10%/yr dilution
+    assert triggers.evaluate(tmp_db, armed["dilution"], as_of=AS_OF).result == "FIRE"
+    _set("shares_yoy", 1.0)                                                    # 1%/yr, healthy
+    assert triggers.evaluate(tmp_db, armed["dilution"], as_of=AS_OF).result == "PASS"
