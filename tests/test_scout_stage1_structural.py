@@ -30,6 +30,8 @@ def test_scout_grade_imports_no_llm():
         "Stage-1 is deterministic-only (design §8): no LLM client may be imported")
 
 
-def test_stage2_and_populator_are_explicit_followons():
-    # Stage-2 (LLM reviewer) and the archive batch populator are NOT built in Stage-1.
-    assert not any("qualitative" in m.lower() for m in sys.modules)
+def test_populator_is_an_explicit_followon():
+    # The archive batch populator is NOT built by Stage-1 or Stage-2 Part A (Explicit follow-on).
+    # Stage-2's *interface + desk path* IS built (agentcy.scout_review); the API adapter and the
+    # claudeclaw droplet install are Part B / follow-ons, not in this import graph.
+    assert not any("populate_batch" in m.lower() for m in sys.modules)
