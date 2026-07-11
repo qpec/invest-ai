@@ -1,0 +1,13 @@
+# The Scout - Stage-2 annotated shortlist - Fri 10 Jul 2026
+
+```
+Ticker  Tier      Det  Final  Qualitative                   
+MSFT    Core      B    A      moat[+] mgmt[+] fad[+] tier[+]
+FADS    Adjacent  B    C      fad[x]                        
+PEND    Outside   C    C      pending                       
+```
+  MSFT: promote one band (B -> A): all four axes clear, no pillar < 50 (switching costs; founder-led; real trend)
+  FADS: demote one band (B -> C): fad flag (AI-branded rollup)
+  PEND: no qualitative adjustment (axes pending or mixed; grade unchanged)
+
+Honest evidence note: independent replications put quality-value screening at roughly 3-6%/yr gross outperformance with multi-year losing stretches - not the book's 30%. This screen surfaces cheap, capital-productive businesses; it promises nothing. Every candidate still passes the full Gate, and second-guessing the screen's valuation call destroys the edge - the Gate judges the framework, not price timing.

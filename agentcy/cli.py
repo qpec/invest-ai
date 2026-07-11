@@ -63,6 +63,10 @@ def build_parser() -> argparse.ArgumentParser:
     sbadge.add_argument("--tier", default=None, help="ok | correction:<Core|Adjacent|Outside>")
     sbadge.add_argument("--reason", default=None)
     sbadge.set_defaults(handler="scout")
+    sreview = ssub.add_parser("review", help="Stage-2 review renders (review artifact only)")
+    srsub = sreview.add_subparsers(dest="scout_review_cmd", required=True)
+    srsub.add_parser("render", help="annotated shortlist: det grade -> badges -> adjusted final"
+                     ).set_defaults(handler="scout")
 
     wl = sub.add_parser("watchlist", help="C.1 watchlist")
     wsub = wl.add_subparsers(dest="wl_cmd", required=True)
@@ -275,6 +279,28 @@ def _cmd_scout(args) -> int:
             print(f"{args.ticker}: no axes given; nothing recorded (all pending).")
             return 0
         print(f"{args.ticker}: recorded {', '.join(written)} (Stage-2 review artifact).")
+        return 0
+    if args.scout_cmd == "review" and args.scout_review_cmd == "render":
+        from agentcy import db, scout_review
+        from agentcy.render.scout_review import ScoutReviewContext, render_scout_review
+        from agentcy.render import common as cm
+        as_of = _clock().now()
+        result = scout.run_graded(conn, universe_path=None, market_data=None, as_of=as_of)
+        shortlist = scout_review.select_shortlist(result.graded)
+        verdicts: dict = {}
+        for g in shortlist:
+            axes = {r["axis"]: r for r in db.fetch_scout_verdicts_current(conn, g.symbol)}
+            verdicts[g.symbol] = scout_review.Verdict(
+                moat=axes["moat"]["value"] if "moat" in axes else None,
+                mgmt=axes["mgmt"]["value"] if "mgmt" in axes else None,
+                fad=axes["fad"]["value"] if "fad" in axes else None,
+                tier=axes["tier"]["value"] if "tier" in axes else None,
+                reason=next((axes[a]["reason"] for a in ("moat", "mgmt", "fad", "tier")
+                             if a in axes and axes[a]["reason"]), None))
+        ctx = ScoutReviewContext(as_of_label=cm.ams_date_label(as_of),
+                                 shortlist=tuple(shortlist), verdicts=verdicts,
+                                 evidence_note=result.evidence_note)
+        print(render_scout_review(ctx).markdown)
         return 0
     if args.recipe == "grade":
         from agentcy.render.scout import ScoutGradedContext, render_scout_graded
