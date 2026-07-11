@@ -137,3 +137,62 @@ def test_baseline_owner_earnings_json_is_pinned_with_provenance(tmp_db, fixed_cl
     from agentcy.freshness import Stamped, DataState
     stamped = Stamped(value=oe, fetched_at=AS_OF, state=DataState("fresh"), note=None)
     assert b.owner_earnings_json == gate._oe_json(stamped)
+
+
+def _baseline(**kw):
+    from agentcy import backfill
+    base = dict(yf_ticker="ADYEN", revenue_yoy=14.2, owner_fcf_margin=30.0,
+                net_debt_ebitda=1.5, shares_yoy=1.2, owner_earnings_json="{}")
+    base.update(kw)
+    return backfill.Baseline(**base)
+
+
+def test_derive_four_triggers_exact_thresholds():
+    from agentcy import backfill
+    specs = backfill.derive_triggers(_baseline())
+    by_type = {s.type: s for s in specs}
+    assert set(by_type) == {"growth_floor", "margin_erosion",
+                            "balance_sheet_safety", "dilution"}
+    assert by_type["growth_floor"].comparator == ">"
+    assert round(by_type["growth_floor"].threshold, 4) == round(14.2 - 10.0, 4)
+    assert by_type["margin_erosion"].comparator == ">"
+    assert round(by_type["margin_erosion"].threshold, 4) == round(30.0 * 0.75, 4)
+    assert by_type["margin_erosion"].moat_link == "switching_costs"
+    assert by_type["balance_sheet_safety"].comparator == "<"
+    assert by_type["balance_sheet_safety"].threshold == min(1.5 + 1.0, 4.0)
+    assert by_type["dilution"].comparator == "<" and by_type["dilution"].threshold == 5.0
+    assert by_type["dilution"].persistence == "ttm"
+
+
+def test_balance_ndte_caps_at_four():
+    from agentcy import backfill
+    specs = backfill.derive_triggers(_baseline(net_debt_ebitda=8.0))
+    ndte = next(s for s in specs if s.type == "balance_sheet_safety")
+    assert ndte.threshold == 4.0   # min(8.0 + 1.0, 4.0)
+
+
+def test_derive_omits_uncomputable_legs():
+    from agentcy import backfill
+    specs = backfill.derive_triggers(_baseline(revenue_yoy=None, shares_yoy=None))
+    types = {s.type for s in specs}
+    assert types == {"margin_erosion", "balance_sheet_safety"}   # rev + dilution omitted
+    assert any(s.moat_link for s in specs)   # BUF-4 still satisfiable
+
+
+def test_derive_series_triggers_get_two_quarter_persistence():
+    from agentcy import backfill
+    specs = {s.type: s for s in backfill.derive_triggers(_baseline())}
+    for t in ("growth_floor", "margin_erosion", "balance_sheet_safety"):
+        assert specs[t].persistence == "2_consecutive_quarters"
+
+
+def test_bootstrapping_when_only_non_moat_legs_compute():
+    """RF5: >=2 legs compute but the moat-linked margin_erosion is absent -> the triggers do
+    NOT form a thesis (moat-link guard, BUF-4), so onboarding is reported BOOTSTRAPPING rather
+    than minting a moat-linkless thesis."""
+    from agentcy import backfill
+    # margin (the only moat-linked leg) is absent; growth + balance + dilution compute
+    specs = backfill.derive_triggers(_baseline(owner_fcf_margin=None))
+    assert len(specs) >= 2                       # enough legs by count alone
+    assert not any(s.moat_link for s in specs)   # ... but none carries a moat link
+    assert backfill._triggers_form_a_thesis(specs) is False
