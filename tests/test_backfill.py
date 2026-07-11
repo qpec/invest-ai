@@ -557,3 +557,40 @@ def test_run_backfill_ticker_filter(tmp_db, fixed_clock, monkeypatch):
     _stub_full_baseline(monkeypatch)
     results = backfill.run_backfill(conn, ticker="MISSING", clock=fixed_clock, as_of=AS_OF)
     assert results == []                     # no thesis-less holding named MISSING
+
+
+# --- Task 8: cost-basis quarantine + structural guards ------------------------------
+
+
+def test_cost_basis_never_in_positions_advice(tmp_db, fixed_clock, monkeypatch):
+    from agentcy import backfill
+    conn = _seed_two_holdings(tmp_db, fixed_clock)
+    _stub_full_baseline(monkeypatch)
+    backfill.run_backfill(conn, ticker="ADYEN", clock=fixed_clock, as_of=AS_OF)
+    snap = db.fetch_latest_snapshot(conn)
+    rows = db.fetch_positions_advice(conn, snap["snapshot_id"])
+    # positions_advice physically omits avg_open_price / invested_eur; assert the columns are gone
+    assert all("avg_open_price" not in r.keys() for r in rows)
+    assert all("invested_eur" not in r.keys() for r in rows)
+    # and the ratified thesis version pins value_at_purchase to None (cost basis quarantined)
+    for th in db.fetch_theses(conn):
+        tv = db.fetch_current_thesis_version(conn, th["thesis_id"])
+        assert tv["value_at_purchase"] is None
+
+
+def test_no_new_pip_dependency_and_no_llm_import():
+    import ast
+    from pathlib import Path
+    src = Path("agentcy/backfill.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module.split(".")[0])
+    # only stdlib + agentcy; no new runtime pip package, no LLM SDK
+    allowed = {"agentcy", "dataclasses", "json", "__future__"}
+    assert imported <= allowed, f"unexpected imports in backfill.py: {imported - allowed}"
+    for banned in ("anthropic", "openai", "claudeclaw", "yfinance", "requests"):
+        assert banned not in src
