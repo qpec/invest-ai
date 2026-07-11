@@ -197,21 +197,31 @@ def entry_price(held: HeldWithoutThesis) -> float | None:
 
 
 def is_placeholder_draft(version) -> bool:
-    """RF1 (FR9) guard: True while the RF1-named qualitative fields are STILL the deterministic
-    placeholders — the neutral 'medium' conviction default together with the unmistakable
-    '(draft ...)' sentinel in the business-model / ten-year statement. A thesis version in this
-    state is NOT owner judgment: approve must REFUSE to activate it (rendering system-chosen
-    placeholders as the owner's conviction/rationale is exactly what FR9 forbids, and it is the
-    exact untouched v1 state create_backfill_draft mints). Once the owner + Claude have drafted
-    real values (via register.revise at the desk / Part B — replacing the '(draft ...)' text and,
-    typically, the conviction), this returns False and approve may activate. The conjunction lets
-    a genuine 'medium' conviction through once the rationale text has been drafted; the
-    '(draft ...)' sentinel is never a legitimate owner value."""
+    """RF1 (FR9) guard: True while ANY of the RF1-named qualitative fields is STILL the
+    deterministic '(draft ...)' sentinel — the Claude-drafted moat / business-model / ten-year
+    text MUST be real values before approve activates. A thesis version in this state is NOT owner
+    judgment: approve must REFUSE to activate it (rendering system-chosen placeholders as the
+    owner's moat/rationale is exactly what FR9 forbids, and the literal '(draft - pending
+    ratification)' would otherwise surface in the weekly ten-year alert span (weekly.py:189) and
+    the archive '## Moat' section once status flips to intact — the is_draft blanking only guards
+    while status=='draft').
+
+    The guard refuses activation while ANY of the three Claude-drafted qualitative fields —
+    business_model_2s, ten_year_statement, moat_evidence — is still the '(draft ...)' sentinel,
+    INDEPENDENT of conviction: a real, non-'medium' conviction (e.g. 'high') does NOT license
+    shipping the untouched draft moat/business-model/ten-year as owner judgment (the earlier
+    'conviction == medium AND ...' conjunction let exactly that through). This subsumes the exact
+    untouched v1 state create_backfill_draft mints (medium + all three sentinels).
+
+    Once the owner + Claude have drafted real values (via register.revise at the desk / Part B —
+    replacing every '(draft ...)' text), this returns False and approve may activate. A genuine
+    'medium' conviction passes once ALL the rationale text is real; the '(draft ...)' sentinel is
+    never a legitimate owner value in any of those fields."""
     if version is None:
         return True
-    return (version["conviction"] == "medium"
-            and (version["business_model_2s"] == _DRAFT_TEXT
-                 or version["ten_year_statement"] == _DRAFT_TEXT))
+    return (version["business_model_2s"] == _DRAFT_TEXT
+            or version["ten_year_statement"] == _DRAFT_TEXT
+            or version["moat_evidence"] == _DRAFT_TEXT)
 
 
 _RATIFY_PROMPT = (

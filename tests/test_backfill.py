@@ -337,6 +337,7 @@ def _apply_real_ratification(conn, tid, fixed_clock, *, conviction="high"):
     register.revise(conn, tid, {
         "conviction": conviction,
         "moat_types": ("network_effects", "switching_costs"),
+        "moat_evidence": "Single-integration lock-in; net revenue retention consistently above 110%.",
         "business_model_2s": "Adyen is a single global payments platform. Merchants integrate once.",
         "ten_year_statement": "In ten years Adyen still processes a widening share of global commerce.",
     }, reason="owner ratification draft", actor="owner", journal_ref=je, clock=fixed_clock)
@@ -387,6 +388,7 @@ def test_ratify_approve_allows_genuine_medium_once_rationale_drafted(tmp_db, fix
         actor="owner"), clock=fixed_clock)
     register.revise(conn, tid, {
         "conviction": "medium",   # deliberately kept medium - but the rationale is now real
+        "moat_evidence": "Single-integration lock-in; net revenue retention above 110%.",
         "business_model_2s": "Adyen is one global payments platform merchants integrate once.",
         "ten_year_statement": "In ten years Adyen still processes a widening share of commerce."},
         reason="owner ratification draft", actor="owner", journal_ref=je, clock=fixed_clock)
@@ -394,6 +396,54 @@ def test_ratify_approve_allows_genuine_medium_once_rationale_drafted(tmp_db, fix
     out = asks.answer(conn, ask.ask_id, choice="approve", clock=fixed_clock)
     asks.apply_consequence(conn, out, clock=fixed_clock)
     assert db.fetch_current_thesis_status(conn, tid)["status"] == "intact"   # activated
+
+
+def test_ratify_approve_refused_when_only_conviction_is_real(tmp_db, fixed_clock):
+    """RF1 (BLOCKING, FR9): supplying a real, non-'medium' conviction (e.g. 'high') does NOT
+    license activating while the Claude-drafted moat / business-model / ten-year are STILL the
+    '(draft ...)' sentinel. The earlier 'conviction == medium AND ...' conjunction let this through
+    -> the literal '(draft - pending ratification)' would surface as owner judgment in the weekly
+    ten-year alert span and the archive '## Moat' section once intact. Approve MUST refuse; the
+    thesis stays draft and UNmonitored until every qualitative field carries a real value."""
+    from agentcy import asks, backfill, journal, register
+    from agentcy.journal import EntryIn
+    conn = tmp_db
+    tid, held = _seed_draft(conn, fixed_clock)
+    je = journal.append(conn, EntryIn(
+        decision_type="thesis_revision", thesis_ref=tid,
+        reasoning_at_the_moment="owner set conviction high but left the rationale as draft",
+        actor="owner"), clock=fixed_clock)
+    register.revise(conn, tid, {"conviction": "high"},   # only conviction; sentinels untouched
+                    reason="conviction only", actor="owner", journal_ref=je, clock=fixed_clock)
+    ask = backfill.mint_ratify_ask(conn, tid, held, clock=fixed_clock)
+    out = asks.answer(conn, ask.ask_id, choice="approve", clock=fixed_clock)
+    note = asks.apply_consequence(conn, out, clock=fixed_clock)
+    assert db.fetch_current_thesis_status(conn, tid)["status"] == "draft"   # NOT activated
+    assert note is not None and "draft" in note.lower()
+
+
+def test_ratify_approve_refused_when_only_moat_evidence_left_draft(tmp_db, fixed_clock):
+    """RF1: even with a real conviction AND real business-model / ten-year text, leaving
+    moat_evidence as the '(draft ...)' sentinel must still REFUSE activation - that literal text
+    would otherwise render in the archive '## Moat' section as owner judgment (FR9)."""
+    from agentcy import asks, backfill, journal, register
+    from agentcy.journal import EntryIn
+    conn = tmp_db
+    tid, held = _seed_draft(conn, fixed_clock)
+    je = journal.append(conn, EntryIn(
+        decision_type="thesis_revision", thesis_ref=tid,
+        reasoning_at_the_moment="owner drafted business/ten-year but not the moat evidence",
+        actor="owner"), clock=fixed_clock)
+    register.revise(conn, tid, {
+        "conviction": "high",
+        "business_model_2s": "Adyen is one global payments platform merchants integrate once.",
+        "ten_year_statement": "In ten years Adyen still processes a widening share of commerce."},
+        reason="rationale minus moat", actor="owner", journal_ref=je, clock=fixed_clock)
+    ask = backfill.mint_ratify_ask(conn, tid, held, clock=fixed_clock)
+    out = asks.answer(conn, ask.ask_id, choice="approve", clock=fixed_clock)
+    note = asks.apply_consequence(conn, out, clock=fixed_clock)
+    assert db.fetch_current_thesis_status(conn, tid)["status"] == "draft"   # NOT activated
+    assert note is not None and "draft" in note.lower()
 
 
 def test_ratify_edit_keeps_draft(tmp_db, fixed_clock):
