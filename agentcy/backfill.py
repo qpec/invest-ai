@@ -12,7 +12,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from agentcy import db, gate, mirror, register
+from agentcy.clock import Clock
 from agentcy.fetch import store
+from agentcy.register import ThesisFields
 
 
 @dataclass(frozen=True)
@@ -142,3 +144,53 @@ def _triggers_form_a_thesis(specs) -> bool:
     moat-linked margin_erosion leg is absent, non-moat legs alone can NOT form a thesis: the
     onboarding is reported BOOTSTRAPPING rather than minting a moat-linkless thesis (RF5)."""
     return len(specs) >= 2 and any(s.moat_link for s in specs)
+
+
+# Documented DRAFT placeholders for the NOT-NULL qualitative fields (Plan notes). The thesis
+# stays draft (UNmonitored) until the owner ratifies via Telegram; these are placeholders, not
+# fabricated convictions - RF1 bars activating them as owner judgment.
+_DRAFT_TEXT = "(draft - pending ratification)"
+
+
+def _draft_fields(baseline: Baseline) -> ThesisFields:
+    """The NOT-NULL qualitative columns filled with explicit, documented DRAFT placeholders. The
+    owner-earnings JSON is the real pinned value from the baseline; every judgment field is a
+    neutral default the owner types over at ratification (FR9). value_at_purchase stays None -
+    create_thesis pins v1 None for every origin, so cost basis never enters the thesis."""
+    return ThesisFields(
+        business_model_2s=_DRAFT_TEXT,
+        moat_types=(_PLACEHOLDER_MOAT,),
+        moat_evidence=_DRAFT_TEXT,
+        owner_earnings_json=baseline.owner_earnings_json,
+        owner_earnings_narrative=_DRAFT_TEXT,
+        value_at_purchase=None,                 # record-keeping only; create_thesis pins v1 None
+        fair_band_low=0.0, fair_band_high=0.0,  # no price verdict for backfill (BUF-12)
+        denominator_note="P/owner-FCF",
+        conviction="medium", mgmt_trust="neutral", mgmt_trust_note=None,
+        circle_fit="edge", circle_fit_note=None,
+        ten_year_statement=_DRAFT_TEXT,
+        status_buy_flag=False, status_buy_note=None)
+
+
+def create_backfill_draft(conn, held: HeldWithoutThesis, baseline: Baseline, *,
+                          journal_ref: int, clock: Clock) -> str | None:
+    """Create the origin='backfill' DRAFT thesis anchored to the invested moment. Returns the
+    thesis_id, or None when too few triggers could be derived (reported BOOTSTRAPPING; never a
+    malformed thesis). The thesis stays draft (UNmonitored) until the owner ratifies (RF1/RF2).
+    value_at_purchase stays None at v1 - cost basis is record-keeping only and never enters
+    positions_advice (invariant 4)."""
+    specs = derive_triggers(baseline)
+    if not _triggers_form_a_thesis(specs):
+        return None
+    return register.create_thesis(conn, ticker=held.symbol, origin="backfill",
+                                  fields=_draft_fields(baseline), triggers=specs,
+                                  journal_ref=journal_ref, clock=clock)
+
+
+def entry_price(held: HeldWithoutThesis) -> float | None:
+    """RECORD-KEEPING ONLY: invested_eur / quantity, for the ratify prompt / letter. This value
+    is NEVER written to positions_advice or used by any invalidation trigger (the triggers fire
+    on the business deteriorating, never on price-vs-entry)."""
+    if held.invested_eur is None or not held.quantity:
+        return None
+    return held.invested_eur / held.quantity
