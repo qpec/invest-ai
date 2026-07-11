@@ -17,6 +17,11 @@ _QUARTER = timedelta(days=91)
 # one-element margin_series and would wrongly report BOOTSTRAPPING.
 _WINDOW_QUARTERS = {"single_observation": 1, "2_consecutive_quarters": 2, "ttm": 1}
 
+# RF2: a thesis is monitored (its armed triggers evaluate and may fire) ONLY while intact or
+# under_review. A draft thesis's triggers arm at create_thesis (retired_at IS NULL) but MUST NOT
+# be evaluated — "UNmonitored until approved". broken/retired theses are likewise not monitored.
+_MONITORED_STATUSES = frozenset({"intact", "under_review"})
+
 
 @dataclass(frozen=True)
 class CheckOutcome:
@@ -121,12 +126,30 @@ def _eval_prompted(conn, trigger_row, *, as_of: datetime) -> CheckOutcome:
     return _outcome(tid, "FIRE" if fires else "PASS")
 
 
+def _thesis_is_monitored(conn, thesis_id: str, cache: dict[str, str | None]) -> bool:
+    """RF2 status guard: True only while the thesis is intact/under_review. Result cached per run
+    so a portfolio-wide sweep reads each thesis's status once."""
+    if thesis_id not in cache:
+        st = db.fetch_current_thesis_status(conn, thesis_id)
+        cache[thesis_id] = st["status"] if st is not None else None
+    return cache[thesis_id] in _MONITORED_STATUSES
+
+
 def evaluate_armed(conn, *, cadence: str, thesis_id: str | None = None, as_of: datetime,
                    run_id: int) -> list[CheckOutcome]:
-    """Evaluate all armed triggers for the cadence and append trigger_check rows (never fires)."""
+    """Evaluate all armed triggers for the cadence and append trigger_check rows (never fires).
+
+    RF2: a trigger is evaluated only while its thesis is monitored (intact/under_review). A draft
+    backfill thesis's triggers arm at create_thesis but stay UNmonitored until the owner ratifies
+    (draft -> intact); broken/retired theses are also skipped. This gates only the evaluate/fire
+    path — fetch_armed_triggers itself is unfiltered (mint_ratify_ask still counts a draft thesis's
+    armed triggers, register/fire still look triggers up by id)."""
     outcomes = []
+    status_cache: dict[str, str | None] = {}
     for row in db.fetch_armed_triggers(conn, thesis_id):
         if row["cadence"] != cadence:
+            continue
+        if not _thesis_is_monitored(conn, row["thesis_id"], status_cache):
             continue
         out = evaluate(conn, row, as_of=as_of)
         db.append_trigger_check(conn, {
@@ -160,6 +183,13 @@ def fire(conn, outcome: CheckOutcome, *, clock: Clock, run_id: int,
     days = _config.get_int(conn, "alert_decision_days")
     deadline = db.to_iso(now + timedelta(days=days))
     status = db.fetch_current_thesis_status(conn, thesis_id)["status"]
+    # RF2 invariant guard: fire is only ever reached for a monitored thesis (evaluate_armed skips
+    # draft/broken/retired), so an unmonitored thesis here is a programming error, not a silent
+    # alert on an unratified draft. Fail loud rather than mint an alert + A-ask on a draft.
+    if status not in _MONITORED_STATUSES:
+        raise ValueError(
+            f"trigger {outcome.trigger_id} fired for thesis {thesis_id} in non-monitored "
+            f"status {status!r}; only intact/under_review theses may fire (RF2)")
     if status == "intact":
         _register.transition(conn, thesis_id, "under_review",
                              cause=f"trigger {outcome.trigger_id} fired", cause_ref=None, clock=clock)

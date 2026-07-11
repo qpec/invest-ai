@@ -193,6 +193,63 @@ def test_evaluate_armed_appends_checks(tmp_db, fixed_clock, monkeypatch, stamped
     assert cur.result == "PASS" and cur.observed_value == 14.2
 
 
+def _draft_thesis_with_trigger(tmp_db, fixed_clock):
+    """create_thesis WITHOUT activate: the thesis stays 'draft', its triggers arm (retired_at
+    IS NULL, cadence='weekly') but the thesis is NOT monitored (RF2)."""
+    from agentcy import register
+    t = register.TriggerSpec(type="growth_floor", statement="s", metric="revenue_yoy",
+                             comparator="<", threshold=10.0, moat_link=None,
+                             persistence="2_consecutive_quarters")
+    moat = register.TriggerSpec(type="margin_erosion", statement="s", metric="owner_fcf_margin",
+                                comparator="<", threshold=20.0, moat_link="switching_costs",
+                                persistence="ttm")
+    tid = register.create_thesis(tmp_db, ticker="VEEV", origin="backfill", fields=_rfields(),
+                                 triggers=[t, moat], journal_ref=1, clock=fixed_clock)
+    return db.fetch_armed_triggers(tmp_db, tid)[0], tid
+
+
+def test_evaluate_armed_skips_draft_thesis_then_evaluates_after_activate(
+        tmp_db, fixed_clock, monkeypatch, stamped):
+    """RF2 (BLOCKING): a DRAFT thesis's armed triggers are NOT evaluated (no trigger_check row,
+    no FIRE) even when the series breaches — the thesis is UNmonitored until ratified. After
+    register.activate (draft -> intact) the same breaching trigger DOES evaluate and FIRE."""
+    from agentcy import register, triggers
+    from agentcy.fetch import store
+    trig, tid = _draft_thesis_with_trigger(tmp_db, fixed_clock)
+    # a breaching series that WOULD fire if the thesis were monitored
+    monkeypatch.setattr(store, "revenue_yoy_series",
+                        lambda c, t, *, as_of: stamped([("2026-03-31", 9.1), ("2026-06-30", 8.4)]),
+                        raising=False)
+    monkeypatch.setattr(store, "margin_series",
+                        lambda c, t, *, as_of: stamped([("2026-06-30", 25.0)]), raising=False)
+    run_id = _mkrun(tmp_db, fixed_clock)
+    # while draft: nothing is evaluated, so no outcomes and no trigger_check row
+    outs = triggers.evaluate_armed(tmp_db, cadence="weekly", thesis_id=tid, as_of=AS_OF,
+                                   run_id=run_id)
+    assert outs == []
+    assert triggers.current_state(tmp_db, trig["trigger_id"]) is None
+    # ratify -> intact: now the breaching trigger evaluates and FIRES
+    register.activate(tmp_db, tid, cause="ratified", clock=fixed_clock)
+    outs = triggers.evaluate_armed(tmp_db, cadence="weekly", thesis_id=tid, as_of=AS_OF,
+                                   run_id=run_id)
+    assert "FIRE" in {o.result for o in outs}
+
+
+def test_fire_refuses_non_monitored_thesis(tmp_db, fixed_clock):
+    """RF2 defense-in-depth: fire() must never mint an alert + A-ask for a draft thesis. It is
+    only ever reached for a monitored thesis (evaluate_armed skips drafts), so a draft here is a
+    programming error and fire raises rather than silently alerting on an unratified thesis."""
+    import pytest
+    from agentcy import triggers
+    trig, tid = _draft_thesis_with_trigger(tmp_db, fixed_clock)
+    run_id = _mkrun(tmp_db, fixed_clock)
+    out = triggers.CheckOutcome(trig["trigger_id"], "FIRE", 8.4, -1.6, None, None)
+    with pytest.raises(ValueError):
+        triggers.fire(tmp_db, out, clock=fixed_clock, run_id=run_id)
+    assert db.fetch_open_alerts(tmp_db) == []
+    assert db.fetch_asks_for(tmp_db, kind="A", trigger_ref=trig["trigger_id"]) == []
+
+
 def test_fire_moves_thesis_and_mints_alert_and_ask(tmp_db, fixed_clock):
     from agentcy import register, triggers
     trig, tid = _thesis_with_trigger(tmp_db, fixed_clock, {})
