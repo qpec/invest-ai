@@ -535,7 +535,11 @@ INSERT INTO config (key, value, valid_from, journal_ref) VALUES
  ('universe_pin_sha',            '',            '2026-07-08T00:00:00Z', 1),
  ('screen_recipe',               'qv',          '2026-07-08T00:00:00Z', 1),
  ('license_exceptions',          'certifi:MPL-2.0', '2026-07-09T00:00:00Z', 2),
- ('deadman_ping_url',            '',            '2026-07-09T00:00:00Z', 4);
+ ('deadman_ping_url',            '',            '2026-07-09T00:00:00Z', 4),
+ ('populate_enabled',            'true',        '2026-07-08T00:00:00Z', 1),
+ ('populate_starter_size',       '500',         '2026-07-08T00:00:00Z', 1),
+ ('populate_nightly_minutes',    '90',          '2026-07-08T00:00:00Z', 1),
+ ('populate_dead_after_failures','3',           '2026-07-08T00:00:00Z', 1);
 
 INSERT INTO bot_state (id, last_update_id) VALUES (1, 0);
 INSERT INTO study_state (id, last_restudied_thesis_id, mental_model_index, updated_at)
