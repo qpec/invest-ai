@@ -447,12 +447,20 @@ def _startup_sweep(conn, *, clock: Clock) -> None:
     from agentcy import runlog
     from agentcy.tg import outbox
     for key in runlog.report_missing(conn, as_of=clock.now()):
-        outbox.enqueue(
-            conn, dedupe_key=f"health:{key}", kind="notice",
-            payload_html=esc(
-                f"Data-health notice: {key} was due but has not completed. "
-                "I only detect and report — I never run a job for you."),
-            clock=clock)
+        try:
+            outbox.enqueue(
+                conn, dedupe_key=f"health:{key}", kind="notice",
+                payload_html=esc(
+                    f"Data-health notice: {key} was due but has not completed. "
+                    "I only detect and report — I never run a job for you."),
+                clock=clock)
+        except ValueError:
+            # Already announced on an earlier boot: supersede-in-place applies only while
+            # the notice is still 'queued'; once 'sent'/'collapsed', enqueue raises. The R7 /
+            # tech-arch §1.3 intent ("a lingering gap is not re-announced on every boot") means
+            # skip it silently — the owner already has the notice. Without this guard the daemon
+            # crash-loops on startup whenever a health notice has already been delivered.
+            pass
     conn.commit()
 
 
