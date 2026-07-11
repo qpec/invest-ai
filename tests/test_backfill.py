@@ -520,3 +520,40 @@ def test_draft_backfill_thesis_does_not_fire_in_weekly_until_ratified(
     res2 = weekly.run_trigger_tests(conn, run_id=r2.run_id, clock=fixed_clock)
     assert res2["fired_alert_ids"]                      # monitored now: at least one alert fired
     assert db.fetch_asks_for(conn, kind="A")            # A-ask(s) minted post-ratification
+
+
+# --- Task 6: the CLI/job run_backfill (detect -> baseline -> triggers -> draft -> ratify) ---
+
+def _stub_full_baseline(monkeypatch):
+    _stub_store(monkeypatch, rev=[("2026-06-30", 14.2)], margin=[("2026-06-30", 30.0)],
+                ndte=[("2026-06-30", 1.5)], shares=1.2)
+
+
+def test_run_backfill_creates_draft_and_ratify_ask(tmp_db, fixed_clock, monkeypatch):
+    from agentcy import asks, backfill
+    conn = _seed_two_holdings(tmp_db, fixed_clock)   # ADYEN has no thesis
+    _stub_full_baseline(monkeypatch)
+    results = backfill.run_backfill(conn, ticker=None, clock=fixed_clock, as_of=AS_OF)
+    assert [r.symbol for r in results] == ["ADYEN"]
+    r = results[0]
+    assert r.thesis_id == "TH-ADYEN-001" and r.ratify_ask_id is not None
+    assert db.fetch_current_thesis_status(conn, r.thesis_id)["status"] == "draft"
+    assert [a.thesis_ref for a in asks.open_asks(conn, kind="N")] == ["TH-ADYEN-001"]
+
+
+def test_run_backfill_is_idempotent(tmp_db, fixed_clock, monkeypatch):
+    from agentcy import backfill
+    conn = _seed_two_holdings(tmp_db, fixed_clock)
+    _stub_full_baseline(monkeypatch)
+    backfill.run_backfill(conn, ticker=None, clock=fixed_clock, as_of=AS_OF)
+    again = backfill.run_backfill(conn, ticker=None, clock=fixed_clock, as_of=AS_OF)
+    assert again == []                       # ADYEN now has a draft thesis -> not re-detected
+    assert len(db.fetch_theses(conn)) == 2   # NVDA (seeded) + ADYEN (one draft), no duplicate
+
+
+def test_run_backfill_ticker_filter(tmp_db, fixed_clock, monkeypatch):
+    from agentcy import backfill
+    conn = _seed_two_holdings(tmp_db, fixed_clock)
+    _stub_full_baseline(monkeypatch)
+    results = backfill.run_backfill(conn, ticker="MISSING", clock=fixed_clock, as_of=AS_OF)
+    assert results == []                     # no thesis-less holding named MISSING

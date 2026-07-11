@@ -104,6 +104,9 @@ def build_parser() -> argparse.ArgumentParser:
     trev = tsub.add_parser("revise")
     trev.add_argument("thesis_id")
     trev.set_defaults(handler="thesis")
+    tbf = tsub.add_parser("backfill", help="onboard held positions that have no thesis (C.6)")
+    tbf.add_argument("--ticker", default=None, help="onboard only this held symbol")
+    tbf.set_defaults(handler="thesis")
 
     cfg = sub.add_parser("config", help="journaled operational config (§9)")
     csub = cfg.add_subparsers(dest="config_cmd", required=True)
@@ -536,6 +539,19 @@ def _cmd_thesis(args) -> int:
     register.revise, which enforces the goalpost guard and band re-anchor rules (A.3)."""
     conn = _open()
     reg = _register()
+    if args.thesis_cmd == "backfill":
+        from agentcy import backfill
+        clock = _clock()
+        results = backfill.run_backfill(conn, ticker=args.ticker, clock=clock,
+                                        as_of=clock.now())
+        if not results:
+            print("no thesis-less holdings to onboard.")
+            return 0
+        for r in results:
+            tid = r.thesis_id or "-"
+            print(f"{r.symbol}: {tid}  {r.note}"
+                  + (f"  ratify: {r.ratify_ask_id}" if r.ratify_ask_id else ""))
+        return 0
     if args.thesis_cmd == "show":
         row = reg.current(conn, args.thesis_id)
         if args.json:
