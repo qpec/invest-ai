@@ -12,8 +12,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from agentcy import db, gate, mirror, register
+from agentcy import journal as _journal
 from agentcy.clock import Clock
 from agentcy.fetch import store
+from agentcy.journal import EntryIn as _EntryIn
 from agentcy.register import ThesisFields
 
 
@@ -245,3 +247,41 @@ def mint_ratify_ask(conn, thesis_id: str, held: HeldWithoutThesis, *, clock: Clo
         entry=(f"{entry:.2f}" if entry is not None else "n/a"), n=n_triggers)
     return _asks.mint(conn, kind="N", prompt=prompt, options=["approve", "edit"],
                       expects_freetext=True, thesis_ref=thesis_id, clock=clock)
+
+
+@dataclass(frozen=True)
+class BackfillResult:
+    symbol: str
+    thesis_id: str | None
+    ratify_ask_id: str | None
+    note: str
+
+
+def run_backfill(conn, *, ticker: str | None, clock: Clock, as_of) -> list[BackfillResult]:
+    """detect -> baseline -> triggers -> draft thesis -> ratify ask, for one or all thesis-less
+    holdings. Idempotent: a holding with a live/draft thesis is not re-detected (detect_thesis_less
+    excludes any live thesis, so a re-run does not double-create). A holding whose baseline yields
+    too few triggers is reported BOOTSTRAPPING (no thesis, no ask). The drafts stay UNmonitored
+    until the owner ratifies via Telegram (RF1/RF2)."""
+    held = detect_thesis_less(conn, as_of=as_of)
+    if ticker is not None:
+        held = [h for h in held if h.symbol == ticker]
+    results: list[BackfillResult] = []
+    for h in held:
+        yf = h.yf_ticker or h.symbol
+        baseline = compute_baseline(conn, yf, as_of=as_of)
+        je = _journal.append(conn, _EntryIn(
+            decision_type="config_or_designation", decision_subtype="config_change",
+            ticker=h.symbol,
+            reasoning_at_the_moment=f"Backfill onboarding started for held position {h.symbol}.",
+            owner_action="no_action", actor="owner"), clock=clock)
+        tid = create_backfill_draft(conn, h, baseline, journal_ref=je, clock=clock)
+        if tid is None:
+            results.append(BackfillResult(symbol=h.symbol, thesis_id=None, ratify_ask_id=None,
+                                          note="BOOTSTRAPPING: too few triggers derivable"))
+            continue
+        ask = mint_ratify_ask(conn, tid, h, clock=clock)
+        results.append(BackfillResult(symbol=h.symbol, thesis_id=tid, ratify_ask_id=ask.ask_id,
+                                      note="draft created; ratification ask minted"))
+    conn.commit()
+    return results
