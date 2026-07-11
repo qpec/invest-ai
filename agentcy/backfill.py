@@ -91,3 +91,54 @@ def compute_baseline(conn, yf_ticker, *, as_of) -> Baseline:
     oe_json = gate._oe_json(oe) if (oe is not None and oe.usable()) else "{}"
     return Baseline(yf_ticker=yf_ticker, revenue_yoy=rev, owner_fcf_margin=margin,
                     net_debt_ebitda=ndte, shares_yoy=shares, owner_earnings_json=oe_json)
+
+
+_PLACEHOLDER_MOAT = "switching_costs"   # links margin_erosion for BUF-4 until Part B
+
+
+def derive_triggers(baseline: Baseline) -> list[register.TriggerSpec]:
+    """The four Moderate invalidation triggers, each relative to the baseline (design section
+    'Auto-derive'). A leg with no computable baseline value is OMITTED (not faked). Persistence
+    matches the Gate type defaults; data_source/cadence are resolved by register.commit_trigger."""
+    specs: list[register.TriggerSpec] = []
+    if baseline.revenue_yoy is not None:
+        floor = baseline.revenue_yoy - 10.0
+        specs.append(register.TriggerSpec(
+            type="growth_floor",
+            statement=(f"If revenue YoY falls to or below {floor:.1f}% "
+                       f"(more than 10pp under the {baseline.revenue_yoy:.1f}% baseline), "
+                       "the growth story that anchors this holding is gone."),
+            metric="revenue_yoy", comparator=">", threshold=floor, moat_link=None,
+            persistence="2_consecutive_quarters"))
+    if baseline.owner_fcf_margin is not None:
+        floor = baseline.owner_fcf_margin * 0.75
+        specs.append(register.TriggerSpec(
+            type="margin_erosion",
+            statement=(f"If owner-FCF margin TTM falls to or below {floor:.1f}% "
+                       f"(a quarter below the {baseline.owner_fcf_margin:.1f}% baseline), "
+                       "the moat is leaking."),
+            metric="owner_fcf_margin", comparator=">", threshold=floor,
+            moat_link=_PLACEHOLDER_MOAT, persistence="2_consecutive_quarters"))
+    if baseline.net_debt_ebitda is not None:
+        ceiling = min(baseline.net_debt_ebitda + 1.0, 4.0)
+        specs.append(register.TriggerSpec(
+            type="balance_sheet_safety",
+            statement=(f"If net-debt/EBITDA rises to or above {ceiling:.1f}x, "
+                       "the balance sheet is no longer the one I underwrote."),
+            metric="net_debt_ebitda", comparator="<", threshold=ceiling, moat_link=None,
+            persistence="2_consecutive_quarters"))
+    if baseline.shares_yoy is not None:
+        specs.append(register.TriggerSpec(
+            type="dilution",
+            statement=("If the share count grows 5%/yr or more, dilution is eating the "
+                       "per-share compounding."),
+            metric="shares_yoy", comparator="<", threshold=5.0, moat_link=None,
+            persistence="ttm"))
+    return specs
+
+
+def _triggers_form_a_thesis(specs) -> bool:
+    """register._validate_triggers requires 2-5 triggers with >=1 moat_link (BUF-4). When the
+    moat-linked margin_erosion leg is absent, non-moat legs alone can NOT form a thesis: the
+    onboarding is reported BOOTSTRAPPING rather than minting a moat-linkless thesis (RF5)."""
+    return len(specs) >= 2 and any(s.moat_link for s in specs)
