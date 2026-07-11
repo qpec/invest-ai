@@ -51,4 +51,4 @@ def test_set_rolls_back_journal_entry_on_config_failure(tmp_db, fixed_clock):
 
 def test_effective_returns_full_current_map(tmp_db):
     eff = config.effective(tmp_db, as_of=AFTER_SEEDS)
-    assert len(eff) == 21 and eff["benchmark"] == "SP500TR_EUR"
+    assert len(eff) == 25 and eff["benchmark"] == "SP500TR_EUR"

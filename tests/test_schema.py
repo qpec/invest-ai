@@ -25,6 +25,8 @@ CONFIG_SEED_KEYS = {
     "initial_weight_high_pct", "initial_weight_medium_pct", "initial_weight_low_pct",
     "correlation_threshold", "daily_letter_mode", "benchmark",
     "universe_pin_sha", "screen_recipe", "license_exceptions", "deadman_ping_url",
+    "populate_enabled", "populate_starter_size", "populate_nightly_minutes",
+    "populate_dead_after_failures",
 }
 
 
