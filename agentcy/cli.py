@@ -31,7 +31,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     run = sub.add_parser("run", help="scheduled jobs (systemd ExecStart surface)")
-    run.add_argument("job", choices=["daily", "weekly", "quarterly", "event"])
+    run.add_argument("job", choices=["daily", "weekly", "quarterly", "event", "populate"])
+    run.add_argument("--minutes", type=int, default=None,
+                     help="populate only: wall-clock time-box in minutes (default: config)")
+    run.add_argument("--budget", type=int, default=None,
+                     help="populate only: fetch at most N names this slice")
     run.set_defaults(handler="run")
 
     sub.add_parser("bot", help="Telegram long-poll daemon (agentcy-bot.service)").set_defaults(handler="bot")
@@ -136,9 +140,15 @@ def _cmd_run(args) -> int:
     """systemd ExecStart surface (§10). Per R1 the job's main() owns the connection,
     the due-run sweep and (for daily) the S2 dead-man ping; the CLI just forwards
     clock/state_dir and returns main()'s int (0 ok, 1 degraded/failed) verbatim.
+    `populate` additionally forwards --minutes/--budget (manual desk/SSH slices,
+    populator design 7); other jobs keep the two-arg call.
     Job exceptions propagate uncaught so OnFailure= fires (§1.3)."""
     from agentcy import db
-    return _job_module(args.job).main(clock=_clock(), state_dir=db.state_dir())
+    mod = _job_module(args.job)
+    if args.job == "populate":
+        return mod.main(clock=_clock(), state_dir=db.state_dir(),
+                        minutes=args.minutes, budget=args.budget)
+    return mod.main(clock=_clock(), state_dir=db.state_dir())
 
 
 def _daemon():
