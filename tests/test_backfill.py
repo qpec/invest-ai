@@ -475,3 +475,48 @@ def test_ratify_edit_records_owner_text_verbatim(tmp_db, fixed_clock):
                if e["thesis_ref"] == tid and e["ask_ref"] == ask.ask_id]
     assert entries and entries[-1]["reasoning_at_the_moment"] == text
     assert db.fetch_current_thesis_status(conn, tid)["status"] == "draft"
+
+
+def test_draft_backfill_thesis_does_not_fire_in_weekly_until_ratified(
+        tmp_db, fixed_clock, monkeypatch, stamped):
+    """RF2 (BLOCKING) end-to-end: the weekly run_trigger_tests sweep must NOT fire an alert +
+    A-ask on a DRAFT backfill thesis whose auto-derived triggers breach the baseline — it is
+    UNmonitored until the owner ratifies. After approve (draft -> intact) the SAME breaching
+    baseline fires on the next weekly sweep."""
+    from agentcy import asks, backfill, runlog, triggers
+    from agentcy.fetch import store
+    from agentcy.jobs import weekly
+    conn = tmp_db
+    tid, held = _seed_draft(conn, fixed_clock)          # origin='backfill', status='draft', 4 armed
+
+    # every derived leg breaches its threshold (would fire if the thesis were monitored)
+    monkeypatch.setattr(store, "revenue_yoy_series",
+                        lambda c, t, *, as_of: stamped([("2026-03-31", 1.0), ("2026-06-30", 0.5)]),
+                        raising=False)
+    monkeypatch.setattr(store, "margin_series",
+                        lambda c, t, *, as_of: stamped([("2026-03-31", 5.0), ("2026-06-30", 4.0)]),
+                        raising=False)
+    monkeypatch.setattr(store, "balance_safety_series",
+                        lambda c, t, *, as_of: stamped([("2026-03-31", 8.0), ("2026-06-30", 9.0)]),
+                        raising=False)
+    monkeypatch.setattr(store, "shares_yoy",
+                        lambda c, t, *, as_of: stamped(20.0), raising=False)
+
+    r1 = runlog.start(conn, "weekly", "2026-07-11", clock=fixed_clock)
+    res = weekly.run_trigger_tests(conn, run_id=r1.run_id, clock=fixed_clock)
+    assert res["fired_alert_ids"] == []                 # NOT monitored: nothing fired
+    assert db.fetch_open_alerts(conn) == []
+    assert db.fetch_asks_for(conn, kind="A") == []      # no A-ask on an unratified draft
+
+    # owner ratifies: real qualitative values (RF1) then approve -> intact + monitored
+    _apply_real_ratification(conn, tid, fixed_clock, conviction="high")
+    ask = backfill.mint_ratify_ask(conn, tid, held, clock=fixed_clock)
+    out = asks.answer(conn, ask.ask_id, choice="approve", clock=fixed_clock)
+    asks.apply_consequence(conn, out, clock=fixed_clock)
+    assert db.fetch_current_thesis_status(conn, tid)["status"] == "intact"
+
+    # same breaching baseline now DOES fire on the weekly sweep
+    r2 = runlog.start(conn, "weekly", "2026-07-18", clock=fixed_clock)
+    res2 = weekly.run_trigger_tests(conn, run_id=r2.run_id, clock=fixed_clock)
+    assert res2["fired_alert_ids"]                      # monitored now: at least one alert fired
+    assert db.fetch_asks_for(conn, kind="A")            # A-ask(s) minted post-ratification
