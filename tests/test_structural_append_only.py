@@ -101,6 +101,10 @@ CASES = [
      f" VALUES ('MSFT', 'owner', 'earnings', '{T}')",
      "UPDATE event SET note = 'x'"),
     ("schema_migration", None, "UPDATE schema_migration SET sha256 = 'x'"),
+    ("scout_shortlist_verdict",
+     f"INSERT INTO scout_shortlist_verdict (ticker, axis, value, reason, recorded_at)"
+     f" VALUES ('MSFT', 'moat', 'confirmed', 'switching costs', '{T}')",
+     "UPDATE scout_shortlist_verdict SET value = 'not-evident'"),
 ]
 
 
