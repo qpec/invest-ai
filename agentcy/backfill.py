@@ -194,3 +194,44 @@ def entry_price(held: HeldWithoutThesis) -> float | None:
     if held.invested_eur is None or not held.quantity:
         return None
     return held.invested_eur / held.quantity
+
+
+def is_placeholder_draft(version) -> bool:
+    """RF1 (FR9) guard: True while the RF1-named qualitative fields are STILL the deterministic
+    placeholders — the neutral 'medium' conviction default together with the unmistakable
+    '(draft ...)' sentinel in the business-model / ten-year statement. A thesis version in this
+    state is NOT owner judgment: approve must REFUSE to activate it (rendering system-chosen
+    placeholders as the owner's conviction/rationale is exactly what FR9 forbids, and it is the
+    exact untouched v1 state create_backfill_draft mints). Once the owner + Claude have drafted
+    real values (via register.revise at the desk / Part B — replacing the '(draft ...)' text and,
+    typically, the conviction), this returns False and approve may activate. The conjunction lets
+    a genuine 'medium' conviction through once the rationale text has been drafted; the
+    '(draft ...)' sentinel is never a legitimate owner value."""
+    if version is None:
+        return True
+    return (version["conviction"] == "medium"
+            and (version["business_model_2s"] == _DRAFT_TEXT
+                 or version["ten_year_statement"] == _DRAFT_TEXT))
+
+
+_RATIFY_PROMPT = (
+    "Ratify the backfill thesis for {sym} ({tid}). I anchored it to your invested moment "
+    "(opened {opened}, entry approx {entry}) and auto-derived {n} Moderate invalidation "
+    "triggers from the fundamentals baseline. Tap APPROVE to make it intact and monitored, or "
+    "reply with your edits (conviction, triggers, rationale) to keep drafting. Cost basis is "
+    "record-keeping only and plays no part in the triggers.")
+
+
+def mint_ratify_ask(conn, thesis_id: str, held: HeldWithoutThesis, *, clock: Clock):
+    """One ratification ask per drafted backfill thesis: approve -> intact + armed (only once the
+    owner's real conviction/qualitative values are on the thesis, RF1); edit reply -> stays draft
+    (records the owner's text for the drafting round, RF4). The ask expects free text, so the
+    owner's edit reply is always captured; a bare approve tap carries no fabricated edit."""
+    from agentcy import asks as _asks
+    n_triggers = len(db.fetch_armed_triggers(conn, thesis_id))
+    entry = entry_price(held)
+    prompt = _RATIFY_PROMPT.format(
+        sym=held.symbol, tid=thesis_id, opened=(held.opened_at or "unknown"),
+        entry=(f"{entry:.2f}" if entry is not None else "n/a"), n=n_triggers)
+    return _asks.mint(conn, kind="N", prompt=prompt, options=["approve", "edit"],
+                      expects_freetext=True, thesis_ref=thesis_id, clock=clock)

@@ -149,6 +149,11 @@ def apply_consequence(conn, outcome: AnswerOutcome, *, clock: Clock,
     if cons.startswith("recon."):
         return _apply_reconciliation(conn, outcome.ask, cons[len("recon."):],
                                      clock=clock, evidence=evidence, run_id=run_id)
+    if cons == "note.approve":
+        return _apply_backfill_approve(conn, outcome.ask, clock=clock, run_id=run_id)
+    if cons == "note.edit":
+        return _apply_backfill_edit(conn, outcome.ask, clock=clock, evidence=evidence,
+                                    run_id=run_id)
     return None                                            # F/N notes: the answered row IS the record
 
 
@@ -357,6 +362,72 @@ def _apply_reconciliation(conn, ask: Ask, choice: str, *, clock: Clock,
             inputs_ref=run_id, ask_ref=ask.ask_id, actor="owner"), clock=clock)
         return f"Recorded: {choice} on {symbol}."
     return None
+
+
+def _apply_backfill_approve(conn, ask: Ask, *, clock: Clock, run_id: int | None) -> str | None:
+    """Ratify a backfill DRAFT thesis: draft -> intact (arms the auto-derived triggers for the
+    Watchdog). A no-op unless thesis_ref names a draft origin='backfill' thesis (so an ordinary
+    N-note approve never activates anything).
+
+    RF1 (BLOCKING, FR9): NEVER activate a thesis whose qualitative fields are still the
+    deterministic placeholders. If approve is attempted while conviction is still 'medium' and
+    the business-model / ten-year statement are still the draft placeholders (i.e. the owner +
+    Claude never supplied real values via register.revise at the desk / Part B), REFUSE — the
+    thesis stays draft and UNmonitored. Only real, owner-supplied judgment goes intact."""
+    from agentcy import backfill, journal, register
+    from agentcy.journal import EntryIn
+    thesis_id = ask.thesis_ref
+    if thesis_id is None:
+        return None
+    th = db.fetch_thesis(conn, thesis_id)
+    st = db.fetch_current_thesis_status(conn, thesis_id)
+    if th is None or th["origin"] != "backfill" or st is None or st["status"] != "draft":
+        return None
+    version = db.fetch_current_thesis_version(conn, thesis_id)
+    if backfill.is_placeholder_draft(version):             # RF1: no owner judgment yet -> refuse
+        journal.append(conn, EntryIn(
+            decision_type="config_or_designation", decision_subtype="config_change",
+            ticker=th["ticker"], thesis_ref=thesis_id,
+            system_recommendation="approve refused: qualitative fields are still placeholders (FR9)",
+            owner_action="no_action",
+            reasoning_at_the_moment=("Owner tapped approve while the backfill thesis still carried "
+                                     "system-chosen placeholder judgment (conviction/business-model/"
+                                     "ten-year). Not activated (FR9); it stays draft until the real "
+                                     "conviction and rationale are drafted."),
+            inputs_ref=run_id, ask_ref=ask.ask_id, actor="owner"), clock=clock)
+        return (f"{th['ticker']}: not ratified. The conviction and rationale are still "
+                "placeholders — the backfill thesis stays draft (unmonitored) until you draft the "
+                "real judgment. Reply with your edits, or draft it at the desk, then approve.")
+    je = journal.append(conn, EntryIn(
+        decision_type="config_or_designation", decision_subtype="config_change",
+        ticker=th["ticker"], thesis_ref=thesis_id,
+        system_recommendation="backfill thesis ratified -> intact + triggers armed",
+        owner_action="followed",
+        reasoning_at_the_moment="Owner ratified the backfill thesis (FR9 owner judgment).",
+        inputs_ref=run_id, ask_ref=ask.ask_id, actor="owner"), clock=clock)
+    register.activate(conn, thesis_id, cause="owner ratified backfill thesis", clock=clock)
+    return f"{th['ticker']}: backfill thesis {thesis_id} ratified. Intact and monitored."
+
+
+def _apply_backfill_edit(conn, ask: Ask, *, clock: Clock, evidence: str | None,
+                         run_id: int | None) -> str | None:
+    """Owner replied edits instead of approving: journal the text verbatim; the thesis stays
+    draft (UNmonitored). The text feeds the Part-B drafting round; no field is mutated here."""
+    from agentcy import journal
+    from agentcy.journal import EntryIn
+    thesis_id = ask.thesis_ref
+    th = db.fetch_thesis(conn, thesis_id) if thesis_id else None
+    if th is None or th["origin"] != "backfill":
+        return None
+    text = (evidence or (ask.answer or {}).get("text") or "").strip()
+    journal.append(conn, EntryIn(
+        decision_type="config_or_designation", decision_subtype="config_change",
+        ticker=th["ticker"], thesis_ref=thesis_id,
+        reasoning_at_the_moment=(text or "Owner requested edits to the backfill draft."),
+        owner_action="no_action", inputs_ref=run_id, ask_ref=ask.ask_id, actor="owner"),
+        clock=clock)
+    return (f"{th['ticker']}: edits recorded; the backfill thesis stays draft (unmonitored) "
+            "until you approve.")
 
 
 def reprompt(conn, ask_id: str, *, clock: Clock) -> Ask:
