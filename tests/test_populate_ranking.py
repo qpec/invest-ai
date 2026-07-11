@@ -25,6 +25,22 @@ def test_band_match_is_case_and_whitespace_insensitive():
     assert populate.rank_universe(uni) == ["A", "B"]
 
 
+def test_real_financedatabase_band_labels_rank_correctly():
+    """The live FinanceDatabase equities.bz2 uses title-case, space-separated bands
+    ('Mega Cap', 'Large Cap', 'Mid Cap', 'Small Cap', 'Micro Cap', 'Nano Cap') - NOT the
+    underscore form the test fixtures used. Normalization must map both to the same key,
+    else every real name falls to unknown and the liquidity ordering collapses."""
+    uni = _uni([
+        ("SMALL", "Small Cap"),
+        ("MEGA", "Mega Cap"),
+        ("MICRO", "Micro Cap"),   # below the >=$300M floor -> unknown bucket, last
+        ("LARGE", "Large Cap"),
+        ("MID", "Mid Cap"),
+        ("NANO", "Nano Cap"),     # unknown bucket, last (tie-broken by symbol)
+    ])
+    assert populate.rank_universe(uni) == ["MEGA", "LARGE", "MID", "SMALL", "MICRO", "NANO"]
+
+
 def test_unknown_or_missing_band_sorts_last_stable_by_symbol():
     uni = _uni([
         ("Z", "mega_cap"),

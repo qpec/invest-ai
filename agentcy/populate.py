@@ -20,10 +20,12 @@ _UNKNOWN_RANK = len(_BAND_ORDER)  # every non-canonical/missing band shares this
 
 
 def _band_key(value) -> int:
-    """Canonical band -> its liquidity rank; anything else (None/''/unknown) -> lowest."""
+    """Canonical band -> its liquidity rank; anything else (None/''/unknown) -> lowest.
+    Normalizes both the underscore form (``mega_cap``) and the real FinanceDatabase form
+    (``Mega Cap``, title-case with a space) to the same key."""
     if value is None:
         return _UNKNOWN_RANK
-    return _BAND_RANK.get(str(value).strip().lower(), _UNKNOWN_RANK)
+    return _BAND_RANK.get(str(value).strip().lower().replace(" ", "_"), _UNKNOWN_RANK)
 
 
 def rank_universe(universe: pd.DataFrame) -> list[str]:
