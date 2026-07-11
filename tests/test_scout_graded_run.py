@@ -116,3 +116,21 @@ def test_cli_scout_run_grade_prints(tmp_db, tmp_path, monkeypatch, capsys,
     out = capsys.readouterr().out
     assert rc == 0
     assert "Core" in out and "promises nothing" in out.lower()
+
+
+def test_run_graded_assembles_market_data_from_archive_when_none(
+        tmp_db, tmp_path, yf_statements, yf_series):
+    """market_data=None -> run_graded assembles it from the archive (populator design 5).
+    A fully-seeded name (statements+shares+price) grades to a real letter, not INSUFFICIENT."""
+    path, sha = _universe(tmp_path)
+    config.set(tmp_db, "universe_pin_sha", sha, reason="t", actor="owner",
+               clock=ck.SystemClock())
+    for sym in ("MSFT", "VEEV"):
+        _seed(tmp_db, sym, yf_statements, yf_series)
+        pf = pd.DataFrame({"close": [500.0], "adj_close": [500.0], "dividend": [0.0],
+                           "currency": ["USD"]}, index=pd.to_datetime(["2026-07-07"]))
+        store.store_price_bars(tmp_db, sym, pf, run_id=None, fetched_at="2026-07-07T00:00:00Z")
+    result = scout.run_graded(tmp_db, universe_path=path, market_data=None, as_of=AS_OF)
+    by_sym = {g.symbol: g for g in result.graded}
+    assert by_sym["MSFT"].grade in ("A", "B", "C", "D", "F")
+    assert by_sym["MSFT"].composite is not None

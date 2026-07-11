@@ -21,6 +21,15 @@ _GRADE_FRAMING = (
     "lead to investigate, never a decision."
 )
 
+# REVIEW FIX B1 (populator design 5, wired-but-dormant currency guard): the statement
+# reporting currency has no rule-compliant source, so the guard does not fire and design
+# section 5 is NOT enforced. Print the honest cross-currency caveat alongside the grade.
+_CURRENCY_CAVEAT = (
+    "Cross-currency caveat: cross-currency names (mainly US-listed ADRs of foreign filers) "
+    "may mis-rank on p_owner_fcf until a reporting-currency source lands; owner_fcf_yield is "
+    "currency-agnostic and unaffected."
+)
+
 
 @dataclass(frozen=True)
 class ScoutGradedContext:
@@ -83,6 +92,8 @@ def _segments(ctx: ScoutGradedContext):
         segs.append(("text", "  (none this run)"))
     segs.append(("text", ""))
     segs.append(("text", _GRADE_FRAMING))
+    segs.append(("text", ""))
+    segs.append(("text", _CURRENCY_CAVEAT))
     segs.append(("text", ""))
     segs.append(("text", ctx.evidence_note))
     return segs

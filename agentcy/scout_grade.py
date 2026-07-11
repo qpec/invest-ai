@@ -594,6 +594,44 @@ def _dig(d, path):
     return d
 
 
+def _market_data_from_archive(conn, tickers, *, as_of, statement_currency=None) -> dict:
+    """Design 5 grade-time market_data: {market_cap, total_debt, cash} per ticker from the
+    APPEND-ONLY archive (never a live fetch, never a market_cap table — design 1/9).
+
+    market_cap = latest v_price close x latest shares observation (native price currency).
+    total_debt/cash = latest archived balance-sheet period. Any missing input -> that key
+    None -> grade_universe emits INSUFFICIENT (RF5), never a silent grade.
+
+    Currency guard (design 5/9, plan note 2, REVIEW FIX B1): when ``statement_currency`` gives
+    a ticker's reporting currency AND it differs from the latest price bar's currency, the
+    ticker is OMITTED (-> grade_universe's `market_data.get(sym) is None` path -> INSUFFICIENT).
+    The map defaults to None so the guard is DORMANT — there is no rule-compliant reporting-
+    currency source under the fast_info-only rule, so design section 5 is NOT enforced by this
+    build; the mechanism is present and ready for the FX follow-on. No FX conversion here."""
+    out: dict[str, dict] = {}
+    stmt_ccy = statement_currency or {}
+    for t in tickers:
+        price = store.latest_close(conn, t, as_of=as_of)
+        shares = store.shares_history(conn, t, as_of=as_of)
+        # currency guard: price currency vs declared statement currency (when known)
+        if price is not None and t in stmt_ccy:
+            if str(price.value.currency).upper() != str(stmt_ccy[t]).upper():
+                continue  # mismatch -> omit -> INSUFFICIENT (no FX)
+        market_cap = None
+        if price is not None and len(shares.value):
+            at_or_before = shares.value[shares.value.index <= pd.Timestamp(as_of.date())]
+            if len(at_or_before):
+                market_cap = float(price.value.close) * float(at_or_before.iloc[-1])
+        bal = _latest_payloads(conn, t, "balance", as_of)
+        total_debt = cash = None
+        if bal:
+            latest_bal = bal[max(bal)]
+            total_debt = latest_bal.get("Total Debt")
+            cash = latest_bal.get("Cash And Cash Equivalents")
+        out[t] = {"market_cap": market_cap, "total_debt": total_debt, "cash": cash}
+    return out
+
+
 def grade_universe(conn, universe, *, market_data, as_of) -> list[GradedName]:
     """Design §4 Stage-1 deterministic pass. Two-phase: (1) collect raw metrics per name,
     integrity-suspend any name with a None REQUIRED metric (RF5 — never a None into

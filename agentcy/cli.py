@@ -227,7 +227,7 @@ def _cmd_scout(args) -> int:
         from agentcy.render.scout import ScoutGradedContext, render_scout_graded
         from agentcy.render import common as cm
         as_of = _clock().now()
-        result = scout.run_graded(conn, universe_path=None, market_data={}, as_of=as_of)
+        result = scout.run_graded(conn, universe_path=None, market_data=None, as_of=as_of)
         ctx = ScoutGradedContext(as_of_label=cm.ams_date_label(as_of),
                                  graded=result.graded, evidence_note=result.evidence_note)
         print(render_scout_graded(ctx).markdown)
