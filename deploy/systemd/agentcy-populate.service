@@ -1,0 +1,17 @@
+[Unit]
+Description=stock-agentcy fundamentals-archive populator (paced background fetch -> archive)
+Wants=network-online.target
+After=network-online.target
+OnFailure=agentcy-fail@%n.service
+
+[Service]
+Type=oneshot
+User=agentcy
+TimeoutStartSec=120min
+EnvironmentFile=/etc/stock-agentcy/agentcy.env
+Environment=MPLBACKEND=Agg
+ExecStart=/opt/stock-agentcy/.venv/bin/agentcy run populate
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/stock-agentcy
+PrivateTmp=true

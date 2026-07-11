@@ -9,6 +9,7 @@ UNITS = [
     "agentcy-weekly.service", "agentcy-weekly.timer", "agentcy-quarterly.service",
     "agentcy-quarterly.timer", "agentcy-backup.service", "agentcy-backup.timer",
     "agentcy-event.service", "agentcy-event.path", "agentcy-fail@.service",
+    "agentcy-populate.service", "agentcy-populate.timer",
 ]
 
 
@@ -79,3 +80,18 @@ def test_fail_notifier_is_templated_and_calls_the_script():
     s = _read("agentcy-fail@.service")
     assert "ExecStart=/opt/stock-agentcy/.venv/bin/python /opt/stock-agentcy/tools/fail_notify.py %i" in s
     assert "EnvironmentFile=/etc/stock-agentcy/agentcy.env" in s
+
+
+def test_populate_service_is_oneshot_timeboxed_and_calls_run_populate():
+    s = _read("agentcy-populate.service")
+    assert "Type=oneshot" in s
+    assert "TimeoutStartSec=" in s                                          # time-boxed job
+    assert "OnFailure=agentcy-fail@%n.service" in s
+    assert "ExecStart=/opt/stock-agentcy/.venv/bin/agentcy run populate" in s
+    assert "ProtectSystem=strict" in s and "ReadWritePaths=/var/lib/stock-agentcy" in s
+
+
+def test_populate_timer_runs_after_the_daily_letter():
+    t = _read("agentcy-populate.timer")
+    assert "OnCalendar=*-*-* 01:30:00 Europe/Amsterdam" in t
+    assert "Persistent=true" in t

@@ -76,6 +76,21 @@ box in manual-snapshot mode.
 - **Test manually** — `agentcy snapshot etoro --dry-run` prints the resolved holdings
   and writes nothing.
 
+## 7. Fundamentals populator (background, set-and-forget)
+The `agentcy-populate.timer` fires nightly at 01:30 Amsterdam and time-boxes a paced walk of
+the universe (`populate_nightly_minutes`, default 90), filling the append-only archive so
+`agentcy scout run grade` grades from cache. The starter set (top `populate_starter_size`
+liquidity names, default 500) completes on night 1; the first full pass takes ~11 nights.
+One Telegram note marks starter-set-ready and one marks first-full-pass-complete; sustained
+rate-limiting stops the night early (DEGRADED) and the cursor resumes the next night.
+
+- **Manual slice:** `agentcy run populate --minutes 30` or `--budget 100` (desk/SSH).
+- **Progress:** the `universe_fetch` table logs one row per attempt; `v_universe_fetch` is the
+  latest outcome per ticker. Delisted/data-thin names dead-list after
+  `populate_dead_after_failures` (default 3) failures, retried after a 90-day backstop.
+- **Disable:** `agentcy config set populate_enabled false --reason "..."` (advisory flag) and
+  `systemctl disable --now agentcy-populate.timer`.
+
 ## LTS obligation (dated)
 Ubuntu Pro ESM covers to May 2034; the 10-year clock runs to mid-2036, so the LTS hop is
 a scheduled obligation — ~2030 recommended, May 2034 at the latest, unless Legacy is paid.
