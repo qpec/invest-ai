@@ -111,6 +111,6 @@ install -m 0644 "$CODE"/deploy/systemd/*.service "$CODE"/deploy/systemd/*.timer 
 systemd-analyze verify /etc/systemd/system/agentcy-*.service /etc/systemd/system/agentcy-*.timer /etc/systemd/system/agentcy-*.path
 systemctl daemon-reload
 systemctl enable --now agentcy-bot.service
-systemctl enable --now agentcy-daily.timer agentcy-weekly.timer agentcy-quarterly.timer agentcy-backup.timer
+systemctl enable --now agentcy-daily.timer agentcy-weekly.timer agentcy-quarterly.timer agentcy-backup.timer agentcy-populate.timer
 systemctl enable --now agentcy-event.path
 echo ">>> install complete. Verify: systemctl status 'agentcy-*'  —  runbook: docs/runbook.md"
