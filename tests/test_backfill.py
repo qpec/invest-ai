@@ -66,3 +66,48 @@ def test_detect_skips_cash(tmp_db, fixed_clock):
     # a cash position is never onboarded
     snap = db.fetch_latest_snapshot(conn)
     assert all(h.instrument_type != "cash" for h in backfill.detect_thesis_less(conn, as_of=AS_OF))
+
+
+def _stub_store(monkeypatch, *, rev=None, margin=None, ndte=None, shares=None, oe_json=None):
+    from agentcy.fetch import store
+    from agentcy.freshness import Stamped, DataState
+
+    def _stamped(value, state="fresh"):
+        return Stamped(value=value, fetched_at=AS_OF, state=DataState(state), note=None)
+
+    monkeypatch.setattr(store, "revenue_yoy_series",
+                        lambda c, t, *, as_of: (_stamped(rev) if rev is not None else None),
+                        raising=False)
+    monkeypatch.setattr(store, "margin_series",
+                        lambda c, t, *, as_of: (_stamped(margin) if margin is not None else None),
+                        raising=False)
+    monkeypatch.setattr(store, "balance_safety_series",
+                        lambda c, t, *, as_of: (_stamped(ndte) if ndte is not None else None),
+                        raising=False)
+    monkeypatch.setattr(store, "shares_yoy",
+                        lambda c, t, *, as_of: (_stamped(shares) if shares is not None else None),
+                        raising=False)
+
+    class _OE:
+        def usable(self): return oe_json is not None
+    monkeypatch.setattr(store, "owner_fcf_ttm",
+                        lambda c, t, *, as_of: (object() if False else None), raising=False)
+
+
+def test_baseline_full(tmp_db, fixed_clock, monkeypatch):
+    from agentcy import backfill
+    _stub_store(monkeypatch,
+                rev=[("2026-06-30", 14.2)], margin=[("2026-06-30", 30.0)],
+                ndte=[("2026-06-30", 1.5)], shares=1.2)
+    b = backfill.compute_baseline(tmp_db, "ADYEN", as_of=AS_OF)
+    assert b.revenue_yoy == 14.2 and b.owner_fcf_margin == 30.0
+    assert b.net_debt_ebitda == 1.5 and b.shares_yoy == 1.2
+    assert b.owner_earnings_json == "{}"
+
+
+def test_baseline_thin_legs_are_none(tmp_db, fixed_clock, monkeypatch):
+    from agentcy import backfill
+    _stub_store(monkeypatch, rev=None, margin=[("2026-06-30", 25.0)], ndte=None, shares=None)
+    b = backfill.compute_baseline(tmp_db, "ADYEN", as_of=AS_OF)
+    assert b.revenue_yoy is None and b.owner_fcf_margin == 25.0
+    assert b.net_debt_ebitda is None and b.shares_yoy is None
