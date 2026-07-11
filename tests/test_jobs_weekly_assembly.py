@@ -72,3 +72,54 @@ def test_build_weekly_context_totals_and_sections(seeded_portfolio, monkeypatch)
     assert ctx.celebrated is True                        # nothing fired, nothing waiting
     assert "MSFT shares: fetch failed" in ctx.data_health
     assert ctx.study.circle_note_ask_id is not None
+
+
+def test_build_weekly_context_draft_backfill_row_blanks_placeholder_judgment(
+        seeded_portfolio, fixed_clock, monkeypatch):
+    """A DRAFT (unratified) backfill thesis carries placeholder qualitative fields
+    (conviction='medium', fair_band 0.0/0.0). Those placeholders must NOT surface in the
+    weekly portfolio TABLE as owner judgment (RF1): the draft row's Conv/Band are blanked
+    (None -> rendered '-'), never the misleading 'medium'/'0–0×'."""
+    from agentcy import backfill, db, journal, runlog
+    from agentcy.journal import EntryIn
+    from agentcy.jobs import weekly
+    conn = seeded_portfolio["conn"]
+    _stub_everything(monkeypatch)
+    now = db.to_iso(fixed_clock.now())
+    je = journal.append(conn, EntryIn(
+        decision_type="config_or_designation", decision_subtype="config_change",
+        reasoning_at_the_moment="backfill seed", actor="owner"), clock=fixed_clock)
+    # A new snapshot carrying MSFT (framework) + ADYEN (no thesis yet) + cash.
+    snap_id = db.append_snapshot(conn, as_of="2026-07-10T20:00:00Z", source="manual_export",
+                                 cash_balance_eur=8000.0, created_at=now)
+    db.append_positions(conn, snap_id, [
+        dict(symbol="MSFT", yf_ticker="MSFT", instrument_type="stock", quantity=20.0,
+             avg_open_price=300.0, native_currency="USD", mv_native=10000.0, mv_eur=8500.0,
+             weight=0.40, leverage=1.0),
+        dict(symbol="ADYEN", yf_ticker="ADYEN", instrument_type="stock", quantity=5.0,
+             avg_open_price=600.0, native_currency="EUR", mv_native=4000.0, mv_eur=4000.0,
+             weight=0.19, leverage=1.0)])
+    db.append_symbol_map(conn, symbol="ADYEN", yf_ticker="ADYEN", valid_from=now, journal_ref=je)
+    # Create the origin='backfill' DRAFT thesis for ADYEN (stays draft / UNmonitored).
+    held = backfill.HeldWithoutThesis(symbol="ADYEN", yf_ticker="ADYEN",
+                                      instrument_type="stock", quantity=5.0,
+                                      opened_at="2024-01-15T00:00:00Z", invested_eur=3000.0)
+    base = backfill.Baseline(yf_ticker="ADYEN", revenue_yoy=14.2, owner_fcf_margin=30.0,
+                             net_debt_ebitda=1.5, shares_yoy=1.2, owner_earnings_json="{}")
+    tid = backfill.create_backfill_draft(conn, held, base, journal_ref=je, clock=fixed_clock)
+    assert db.fetch_current_thesis_status(conn, tid)["status"] == "draft"   # UNmonitored
+    tv = db.fetch_current_thesis_version(conn, tid)
+    assert tv["conviction"] == "medium" and tv["fair_band_low"] == 0.0      # placeholders in v1
+    conn.commit()
+
+    rh = runlog.start(conn, "weekly", "2026-07-11", clock=SAT)
+    ctx = weekly.build_weekly_context(conn, as_of=SAT.now(), clock=SAT, run_id=rh.run_id,
+                                      refresh_notes=[])
+    row = next(r for r in ctx.portfolio if r.ticker == "ADYEN")
+    assert row.thesis_status == "draft"
+    # The placeholder judgment must NOT leak into the owner-facing table.
+    assert row.conviction is None                        # renders '-' not 'medium'
+    assert row.band_low is None and row.band_high is None  # renders '-' not '0–0×'
+    # The intact framework thesis (MSFT) still shows its real judgment.
+    msft = next(r for r in ctx.portfolio if r.ticker == "MSFT")
+    assert msft.conviction == "high" and msft.band_low == 25.0

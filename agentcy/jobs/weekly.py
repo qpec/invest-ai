@@ -398,15 +398,22 @@ def build_weekly_context(conn, *, as_of, clock: Clock, run_id: int,
         n_pass = sum(1 for t in armed
                      if (c := db.fetch_latest_trigger_check(conn, t["trigger_id"]))
                      and c["result"] == "PASS")
+        # A DRAFT (unratified) thesis carries system-chosen placeholder qualitative fields
+        # (e.g. a backfill draft's conviction='medium', fair_band 0.0/0.0). Those placeholders
+        # are NOT owner judgment yet, so they must not surface in the owner-facing portfolio
+        # table (RF1): blank Conv/Band for draft rows (-> rendered '-'), never the misleading
+        # 'medium'/'0–0×'. The FR9 ratification ask is the gate before anything goes intact.
+        is_draft = bool(st and st["status"] == "draft")
         rows.append(contexts.PortfolioRow(
             ticker=p.symbol, weight_pct=round(p.weight * 100, 1), mv_eur=p.mv_eur,
             framework_status=(des["framework_status"] if des else "backfill_pending"),
             thesis_status=(st["status"] if st else None),
             thesis_version=(tv["version"] if tv else None),
-            conviction=(tv["conviction"] if tv else None), sector_label=None,
+            conviction=(None if is_draft else (tv["conviction"] if tv else None)),
+            sector_label=None,
             anchor_multiple=None,
-            band_low=(tv["fair_band_low"] if tv else None),
-            band_high=(tv["fair_band_high"] if tv else None),
+            band_low=(None if is_draft else (tv["fair_band_low"] if tv else None)),
+            band_high=(None if is_draft else (tv["fair_band_high"] if tv else None)),
             trigger_scorecard=f"{n_pass}/{n_armed} pass"))
     returns, weights = _returns_frame(conn, positions)
     bal = mirror.balance(conn, as_of=as_of, returns_local=returns)   # populates n_eff (§E.5)
