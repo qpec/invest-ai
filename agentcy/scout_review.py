@@ -103,3 +103,51 @@ class DeskReviewer(QualitativeReviewer):
 
     def review(self, ticker: str) -> Verdict:
         return self._recorded.get(ticker, Verdict())
+
+
+# --- The bounded one-band adjustment (Task 4) ----------------------------------
+# Letter mirror of scout_grade._GRADE_BANDS (frozen + guarded Stage-1 grade table:
+# ((80,"A"),(65,"B"),(50,"C"),(35,"D")), F implicit below 35), ordered low -> high so
+# one band = one index step. Kept in sync deliberately: if the Stage-1 bands ever change,
+# this tuple must change with them (RF4 anti-drift note).
+_BANDS = ("F", "D", "C", "B", "A")            # low -> high; one band = one index step
+
+
+def _shift_band(grade: str, step: int) -> str:
+    """Move `grade` `step` bands (negative = toward F, positive = toward A), clamped."""
+    i = _BANDS.index(grade)
+    return _BANDS[max(0, min(len(_BANDS) - 1, i + step))]
+
+
+def adjust_grade(graded: sg.GradedName, verdict: Verdict) -> tuple[str, str]:
+    """Design Part A bounded one-band adjustment, from the badges. Demote one band on a fad
+    flag OR a management red-flag; promote one band ONLY if all four axes are the good value
+    AND min(V,Q,G,D,M) >= 50; otherwise unchanged. Demotion beats promotion. The COMPOSITE is
+    never moved - only the letter, one band, always reason-printed (never silent). Pending
+    axes never promote and (being never a flag value) never demote.
+
+    Pillar gate note: the live model has FIVE scored pillars (V/Q/G/D/M; weights
+    0.25/0.25/0.20/0.15/0.15). The design's 'no pillar < 50' rule predates the Stage-1.5
+    Growth pillar and named only V/Q/D/M; RF1 corrects the gate to the full 5-pillar
+    min(V,Q,G,D,M) >= 50 so a weak Growth pillar can block a promotion."""
+    grade = graded.grade
+    # Demotion (takes precedence): a fad flag or a management red-flag.
+    if verdict.fad == "flag" or verdict.mgmt == "red-flag":
+        cause = "fad flag" if verdict.fad == "flag" else "management red-flag"
+        final = _shift_band(grade, -1)
+        why = f" ({verdict.reason})" if verdict.reason else ""
+        return final, f"demote one band ({grade} -> {final}): {cause}{why}"
+    # Promotion: all four good AND no scored pillar (V/Q/G/D/M) below 50.
+    all_good = (verdict.moat == "confirmed" and verdict.mgmt == "aligned"
+                and verdict.fad == "clear" and verdict.tier == "ok")
+    if all_good:
+        pillars = [graded.v, graded.q, graded.g, graded.d, graded.m]
+        scored = [p for p in pillars if p is not None]
+        worst = min(scored) if scored else 0.0
+        if worst >= 50.0:
+            final = _shift_band(grade, +1)
+            why = f" ({verdict.reason})" if verdict.reason else ""
+            return final, f"promote one band ({grade} -> {final}): all four axes clear, no pillar < 50{why}"
+        return grade, (f"no qualitative adjustment: all four axes clear but a pillar is "
+                       f"below 50 ({worst:.0f}) - promotion gated")
+    return grade, "no qualitative adjustment (axes pending or mixed; grade unchanged)"
