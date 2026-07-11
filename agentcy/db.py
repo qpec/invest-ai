@@ -177,6 +177,18 @@ def append_universe_fetch(conn, *, yf_ticker: str, outcome: str, attempted_at: s
          "run_id": run_id}, _UNIVERSE_FETCH_COLS, "universe_fetch"))
 
 
+_SCOUT_VERDICT_COLS = frozenset({"ticker", "axis", "value", "reason", "recorded_at"})
+
+def append_scout_verdict(conn, *, ticker: str, axis: str, value: str,
+                         reason: str | None, recorded_at: str) -> int:
+    """Append one Stage-2 review-artifact verdict row (design 2026-07-11 Part A). Append-only;
+    a re-badge appends a superseding row (v_scout_shortlist_verdict resolves latest). NOT
+    monitoring state - never read on a schedule."""
+    return _insert(conn, "scout_shortlist_verdict", _checked(
+        {"ticker": ticker, "axis": axis, "value": value, "reason": reason,
+         "recorded_at": recorded_at}, _SCOUT_VERDICT_COLS, "scout_shortlist_verdict"))
+
+
 def append_fundamentals_period(conn, *, yf_ticker: str, statement_type: str,
                                period_end: str, payload_json: str, fingerprint: str,
                                fetched_at: str, run_id: int | None) -> bool:
@@ -382,6 +394,16 @@ def fetch_v_price(conn, yf_ticker: str, *, start: str | None = None,
         sql += " AND bar_date <= ?"
         params.append(end)
     return conn.execute(sql + " ORDER BY bar_date", params).fetchall()
+
+
+def fetch_scout_verdicts_current(conn, ticker: str | None = None) -> list[Row]:
+    """Latest verdict per (ticker, axis) from v_scout_shortlist_verdict, optionally one ticker."""
+    sql = "SELECT * FROM v_scout_shortlist_verdict"
+    params: list = []
+    if ticker is not None:
+        sql += " WHERE ticker = ?"
+        params.append(ticker)
+    return conn.execute(sql + " ORDER BY ticker, axis", params).fetchall()
 
 
 def fetch_statement_periods(conn, yf_ticker: str, statement_type: str) -> list[Row]:
