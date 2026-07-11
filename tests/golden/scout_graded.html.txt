@@ -20,4 +20,6 @@ Outside-tier A-grades (circle-expansion candidates):
 
 This grade is quantitative evidence, not a thesis verdict: moat durability, management candor, and fad-risk are Stage-2 judgments still pending. A computed A is a strong lead to investigate, never a decision.
 
+Cross-currency caveat: cross-currency names (mainly US-listed ADRs of foreign filers) may mis-rank on p_owner_fcf until a reporting-currency source lands; owner_fcf_yield is currency-agnostic and unaffected.
+
 Honest evidence note: independent replications put quality-value screening at roughly 3-6%/yr gross outperformance with multi-year losing stretches - not the book's 30%. This screen surfaces cheap, capital-productive businesses; it promises nothing. Every candidate still passes the full Gate, and second-guessing the screen's valuation call destroys the edge - the Gate judges the framework, not price timing.
