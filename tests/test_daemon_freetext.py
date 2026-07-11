@@ -72,3 +72,32 @@ def test_empty_reply_triggers_single_reprompt(tmp_db, fixed_clock):
     daemon.handle(tmp_db, _msg("   ", reply_to=ask.ask_id), client=client, clock=fixed_clock,
                   owner_chat_id=555)
     assert db.fetch_ask(tmp_db, ask.ask_id)["status"] == "reprompted"
+
+
+def test_backfill_ratify_freetext_reply_binds_to_edit_and_stays_draft(tmp_db, fixed_clock):
+    """RF4: a free-text reply to the backfill ratify N-ask binds to choice='edit', so the owner's
+    edit text is journaled verbatim and the thesis stays draft (never a fabricated empty edit,
+    never an activation)."""
+    from agentcy import backfill, journal
+    from agentcy.journal import EntryIn
+    je = journal.append(tmp_db, EntryIn(
+        decision_type="config_or_designation", decision_subtype="config_change",
+        reasoning_at_the_moment="seed", actor="owner"), clock=fixed_clock)
+    held = backfill.HeldWithoutThesis(symbol="ADYEN", yf_ticker="ADYEN", instrument_type="stock",
+                                      quantity=5.0, opened_at="2024-01-15T00:00:00Z",
+                                      invested_eur=3000.0)
+    baseline = backfill.Baseline(yf_ticker="ADYEN", revenue_yoy=14.2, owner_fcf_margin=30.0,
+                                 net_debt_ebitda=1.5, shares_yoy=1.2, owner_earnings_json="{}")
+    tid = backfill.create_backfill_draft(tmp_db, held, baseline, journal_ref=je, clock=fixed_clock)
+    ask = backfill.mint_ratify_ask(tmp_db, tid, held, clock=fixed_clock)
+    db.update_ask_state(tmp_db, ask.ask_id, status="open")
+    client = _Client()
+    text = "conviction is high; add an owner-attested CEO-departure trigger"
+    daemon.handle(tmp_db, _msg(text, reply_to=ask.ask_id), client=client, clock=fixed_clock,
+                  owner_chat_id=555)
+    assert (db.fetch_ask(tmp_db, ask.ask_id)["answer_json"] is not None
+            and '"choice": "edit"' in db.fetch_ask(tmp_db, ask.ask_id)["answer_json"])
+    edits = [e for e in db.fetch_journal_entries(tmp_db, decision_type="config_or_designation")
+             if e["thesis_ref"] == tid and e["ask_ref"] == ask.ask_id]
+    assert edits and edits[-1]["reasoning_at_the_moment"] == text
+    assert db.fetch_current_thesis_status(tmp_db, tid)["status"] == "draft"  # not monitored

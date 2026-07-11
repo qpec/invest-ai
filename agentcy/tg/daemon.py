@@ -426,11 +426,17 @@ def _handle_freetext(conn, message, text, *, client, clock, owner_chat_id) -> No
         return
 
     # An A-ask carrying the refute affordance binds its evidence to choice='refute' (B.3.2)
-    # so the dispatcher journals trigger_resolution[refuted] with the text VERBATIM and
-    # re-arms; any other free-text ask records the text as its answer.
-    refute = ask.kind == "A" and "refute" in ask.options
-    outcome = asks.answer(conn, ask.ask_id, choice="refute" if refute else None,
-                          text=text, clock=clock)
+    # so the dispatcher journals trigger_resolution[refuted] with the text VERBATIM and re-arms.
+    # A backfill ratify N-ask carrying the edit affordance binds a free-text reply to
+    # choice='edit' (RF4) so the dispatcher journals the owner's edit text VERBATIM and the
+    # thesis stays draft. Any other free-text ask records the text as its answer.
+    if ask.kind == "A" and "refute" in ask.options:
+        bound_choice = "refute"
+    elif ask.kind == "N" and "edit" in ask.options:
+        bound_choice = "edit"
+    else:
+        bound_choice = None
+    outcome = asks.answer(conn, ask.ask_id, choice=bound_choice, text=text, clock=clock)
     note = asks.apply_consequence(conn, outcome, clock=clock, evidence=text)
     echo = text[:60] + ("…" if len(text) > 60 else "")
     tail = f" {note}" if note else ""

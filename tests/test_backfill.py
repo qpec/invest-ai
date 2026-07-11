@@ -303,3 +303,125 @@ def test_create_backfill_draft_bootstrapping_when_no_triggers(tmp_db, fixed_cloc
     tid = backfill.create_backfill_draft(conn, held, baseline, journal_ref=je, clock=fixed_clock)
     assert tid is None
     assert db.fetch_theses(conn) == []
+
+
+# --- Task 5: the Telegram ratification ask (approve/edit -> intact/draft) ------------
+
+def _seed_draft(conn, fixed_clock):
+    """Create the origin='backfill' DRAFT thesis with the documented placeholder qualitative
+    fields (the deterministic scaffolding; conviction='medium', business/moat/ten-year draft)."""
+    from agentcy import backfill, journal
+    from agentcy.journal import EntryIn
+    je = journal.append(conn, EntryIn(
+        decision_type="config_or_designation", decision_subtype="config_change",
+        reasoning_at_the_moment="seed", actor="owner"), clock=fixed_clock)
+    held = backfill.HeldWithoutThesis(symbol="ADYEN", yf_ticker="ADYEN", instrument_type="stock",
+                                      quantity=5.0, opened_at="2024-01-15T00:00:00Z",
+                                      invested_eur=3000.0)
+    baseline = backfill.Baseline(yf_ticker="ADYEN", revenue_yoy=14.2, owner_fcf_margin=30.0,
+                                 net_debt_ebitda=1.5, shares_yoy=1.2, owner_earnings_json="{}")
+    tid = backfill.create_backfill_draft(conn, held, baseline, journal_ref=je, clock=fixed_clock)
+    return tid, held
+
+
+def _apply_real_ratification(conn, tid, fixed_clock, *, conviction="high"):
+    """Simulate the claudeclaw qualitative draft + owner ratification (RF1): register.revise
+    the placeholder qualitative fields to REAL owner values BEFORE approve. This is what the
+    Part-B drafting round / desk supplies so approve is not activating placeholders as judgment."""
+    from agentcy import journal, register
+    from agentcy.journal import EntryIn
+    je = journal.append(conn, EntryIn(
+        decision_type="thesis_revision", thesis_ref=tid,
+        reasoning_at_the_moment="owner + Claude drafted the qualitative thesis", actor="owner"),
+        clock=fixed_clock)
+    register.revise(conn, tid, {
+        "conviction": conviction,
+        "moat_types": ("network_effects", "switching_costs"),
+        "business_model_2s": "Adyen is a single global payments platform. Merchants integrate once.",
+        "ten_year_statement": "In ten years Adyen still processes a widening share of global commerce.",
+    }, reason="owner ratification draft", actor="owner", journal_ref=je, clock=fixed_clock)
+
+
+def test_ratify_approve_activates_and_arms(tmp_db, fixed_clock):
+    from agentcy import asks, backfill
+    conn = tmp_db
+    tid, held = _seed_draft(conn, fixed_clock)
+    ask = backfill.mint_ratify_ask(conn, tid, held, clock=fixed_clock)
+    assert ask.kind == "N" and ask.options == ("approve", "edit") and ask.thesis_ref == tid
+    # RF1: the owner supplies real conviction/qualitative values (the claudeclaw draft) BEFORE
+    # approve; only then does approve promote the thesis to intact.
+    _apply_real_ratification(conn, tid, fixed_clock, conviction="high")
+    out = asks.answer(conn, ask.ask_id, choice="approve", clock=fixed_clock)
+    assert out.consequence == "note.approve"
+    asks.apply_consequence(conn, out, clock=fixed_clock)
+    assert db.fetch_current_thesis_status(conn, tid)["status"] == "intact"   # monitored now
+    assert len(db.fetch_armed_triggers(conn, tid)) == 4
+
+
+def test_ratify_approve_with_placeholder_still_in_place_is_refused(tmp_db, fixed_clock):
+    """RF1 (BLOCKING, FR9): approve while conviction is still the 'medium' placeholder AND no
+    real conviction/qualitative values were supplied is REFUSED — the thesis stays draft and
+    UNmonitored. Never render system-chosen placeholders as the owner's judgment."""
+    from agentcy import asks, backfill
+    conn = tmp_db
+    tid, held = _seed_draft(conn, fixed_clock)
+    ask = backfill.mint_ratify_ask(conn, tid, held, clock=fixed_clock)
+    out = asks.answer(conn, ask.ask_id, choice="approve", clock=fixed_clock)
+    note = asks.apply_consequence(conn, out, clock=fixed_clock)
+    assert db.fetch_current_thesis_status(conn, tid)["status"] == "draft"   # NOT activated
+    assert db.fetch_current_thesis_version(conn, tid)["version"] == 1        # not revised
+    assert note is not None and "draft" in note.lower()
+
+
+def test_ratify_approve_allows_genuine_medium_once_rationale_drafted(tmp_db, fixed_clock):
+    """RF1 conjunction: a genuine 'medium' conviction is NOT a placeholder once the owner has
+    drafted the real business-model / ten-year rationale (the '(draft ...)' sentinel is gone).
+    Approve then activates - a real 'medium' is owner judgment, not the neutral default."""
+    from agentcy import asks, backfill, journal, register
+    from agentcy.journal import EntryIn
+    conn = tmp_db
+    tid, held = _seed_draft(conn, fixed_clock)
+    je = journal.append(conn, EntryIn(
+        decision_type="thesis_revision", thesis_ref=tid,
+        reasoning_at_the_moment="owner drafted the rationale, kept conviction medium",
+        actor="owner"), clock=fixed_clock)
+    register.revise(conn, tid, {
+        "conviction": "medium",   # deliberately kept medium - but the rationale is now real
+        "business_model_2s": "Adyen is one global payments platform merchants integrate once.",
+        "ten_year_statement": "In ten years Adyen still processes a widening share of commerce."},
+        reason="owner ratification draft", actor="owner", journal_ref=je, clock=fixed_clock)
+    ask = backfill.mint_ratify_ask(conn, tid, held, clock=fixed_clock)
+    out = asks.answer(conn, ask.ask_id, choice="approve", clock=fixed_clock)
+    asks.apply_consequence(conn, out, clock=fixed_clock)
+    assert db.fetch_current_thesis_status(conn, tid)["status"] == "intact"   # activated
+
+
+def test_ratify_edit_keeps_draft(tmp_db, fixed_clock):
+    from agentcy import asks, backfill
+    conn = tmp_db
+    tid, held = _seed_draft(conn, fixed_clock)
+    ask = backfill.mint_ratify_ask(conn, tid, held, clock=fixed_clock)
+    out = asks.answer(conn, ask.ask_id, choice="edit",
+                      text="conviction should be high; add an owner-attested CEO trigger",
+                      clock=fixed_clock)
+    assert out.consequence == "note.edit"
+    asks.apply_consequence(conn, out, clock=fixed_clock, evidence=out.ask.answer.get("text"))
+    assert db.fetch_current_thesis_status(conn, tid)["status"] == "draft"   # still not monitored
+
+
+def test_ratify_edit_records_owner_text_verbatim(tmp_db, fixed_clock):
+    """RF4: the owner's edit text is captured (via the free-text reply / ForceReply), journaled
+    verbatim, so the Part-B drafting round has it. A bare tap that carried no text never fabricates
+    an empty edit into an activation."""
+    from agentcy import asks, backfill
+    conn = tmp_db
+    tid, held = _seed_draft(conn, fixed_clock)
+    ask = backfill.mint_ratify_ask(conn, tid, held, clock=fixed_clock)
+    text = "raise conviction to high and add a regulatory-barrier moat leg"
+    out = asks.answer(conn, ask.ask_id, choice="edit", text=text, clock=fixed_clock)
+    asks.apply_consequence(conn, out, clock=fixed_clock, evidence=out.ask.answer.get("text"))
+    th = db.fetch_thesis(conn, tid)
+    entries = [e for e in db.fetch_journal_entries(conn, decision_type="config_or_designation")
+               if e["thesis_ref"] == tid and e["ask_ref"] == ask.ask_id]
+    assert entries and entries[-1]["reasoning_at_the_moment"] == text
+    assert db.fetch_current_thesis_status(conn, tid)["status"] == "draft"
