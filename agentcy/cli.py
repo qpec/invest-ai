@@ -54,6 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     srun = ssub.add_parser("run")
     srun.add_argument("recipe", choices=["qv", "grade"])
     srun.set_defaults(handler="scout")
+    ssub.add_parser("shortlist", help="Stage-2 review dossier for the shortlist").set_defaults(handler="scout")
 
     wl = sub.add_parser("watchlist", help="C.1 watchlist")
     wsub = wl.add_subparsers(dest="wl_cmd", required=True)
@@ -229,10 +230,21 @@ def _cmd_render(args) -> int:
 
 
 def _cmd_scout(args) -> int:
-    """agentcy scout run {qv|grade} (R6, design §4/§6). Prints the ScreenResult for human
-    reading; H forbids storing it — no DB write here."""
+    """agentcy scout run {qv|grade} / shortlist (R6, design §4/§6). Prints for human reading;
+    H forbids storing screen/shortlist output — no monitoring-state write here. RF2: the run
+    body is guarded by `args.scout_cmd == "run"` BEFORE reading args.recipe (which only exists
+    on the run subparser), and conn = _open() stays reachable for every subcommand branch."""
     scout = _scout()
     conn = _open()
+    if args.scout_cmd == "shortlist":
+        from agentcy import scout_review
+        as_of = _clock().now()
+        result = scout.run_graded(conn, universe_path=None, market_data=None, as_of=as_of)
+        shortlist = scout_review.select_shortlist(result.graded)
+        print(scout_review.dossier_text(shortlist))
+        print()
+        print(scout.HONEST_EVIDENCE_NOTE)
+        return 0
     if args.recipe == "grade":
         from agentcy.render.scout import ScoutGradedContext, render_scout_graded
         from agentcy.render import common as cm

@@ -46,6 +46,47 @@ def select_shortlist(graded, *, per_tier: int = SHORTLIST_PER_TIER) -> list[sg.G
     return sorted(picked.values(), key=_order_key)
 
 
+# --- The review dossier (Task 6) -----------------------------------------------
+# Human-readable AND claudeclaw-parseable: the deterministic grade context + the four
+# Constitution questions + a doc pointer. Numbers stop at the grade context (design Part A:
+# the deterministic layer owns all numbers; the reviewer reads prose only).
+_FOUR_QUESTIONS = (
+    "1. Moat + 10-year test (Buffett): durable advantage (network effects / switching costs / "
+    "cost advantage / brand-trust / regulatory) that plausibly survives a decade? "
+    "-> moat: confirmed <name it> | not-evident <name the disruption risk>",
+    "2. Management (Munger): owner-operator alignment, candid capital allocation, no "
+    "promotional/evasive tone or related-party red flags? -> mgmt: aligned | neutral | red-flag",
+    "3. Fad-vs-trend (Munger): durable trend or a fad dressed as one (esp. AI-branded)? "
+    "-> fad: clear | flag",
+    "4. Tier / circle (Naval): is the deterministic Core/Adjacent/Outside tier right for what "
+    "the business actually does? -> tier: ok | correction:<Core|Adjacent|Outside>",
+)
+_DOC_POINTER = ("Read the latest 10-K MD&A + business description + earnings-call transcript "
+                "(prose only - the deterministic layer owns all numbers).")
+
+
+def _fmt(x) -> str:
+    return "n/a" if x is None else f"{x:.1f}"
+
+
+def dossier_text(shortlist) -> str:
+    """Human-readable AND claudeclaw-parseable Stage-2 dossier. Per name: a stable header line
+    `TICKER | grade G | tier T | V.. Q.. G.. D.. M..`, the four Constitution questions, and the
+    doc pointer. No numbers beyond the grade context (design Part A)."""
+    lines = [f"Scout Stage-2 shortlist - {len(shortlist)} name(s) for qualitative review", ""]
+    for g in shortlist:
+        lines.append(
+            f"{g.symbol} | grade {g.grade} | tier {g.tier} | "
+            f"V {_fmt(g.v)} Q {_fmt(g.q)} G {_fmt(g.g)} D {_fmt(g.d)} M {_fmt(g.m)}")
+        lines.append(f"  {_DOC_POINTER}")
+        for q in _FOUR_QUESTIONS:
+            lines.append(f"  {q}")
+        lines.append("  Record verdicts with: agentcy scout badge "
+                     f"{g.symbol} --moat ... --mgmt ... --fad ... --tier ... --reason \"...\"")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
 # --- The qualitative review seam (Task 2) --------------------------------------
 # The four Constitution-grounded axes (design "four questions"). Each verdict axis is
 # nullable = pending; a pending axis is never faked into a call (FR9).
