@@ -75,3 +75,22 @@ def test_startup_sweep_reports_only_never_runs_a_job(tmp_db, fixed_clock):
     notices = [r for r in db.fetch_outbox_queued(tmp_db) if r["kind"] == "notice"]
     assert len(notices) == len(missing)
     assert tmp_db.execute("SELECT COUNT(*) FROM run_log").fetchone()[0] == 0
+
+
+def test_startup_sweep_survives_already_sent_health_notice(tmp_db, fixed_clock):
+    """Regression (prod crash-loop): once a health notice has been DELIVERED (status
+    'sent'), outbox.enqueue raises ValueError on that dedupe_key (supersede-in-place
+    applies only while 'queued'). The sweep must SKIP it, not crash the daemon on boot,
+    and must not re-announce it — matching the documented 'not re-announced on every
+    boot' intent (tech-arch §1.3 / R7)."""
+    from agentcy import runlog
+    missing = runlog.report_missing(tmp_db, as_of=fixed_clock.now())
+    assert missing
+    daemon._startup_sweep(tmp_db, clock=fixed_clock)
+    # simulate delivery of every queued health notice
+    tmp_db.execute("UPDATE outbox SET status='sent' WHERE kind='notice'")
+    tmp_db.commit()
+    # a later boot's sweep must NOT raise and must NOT re-enqueue the already-sent notice
+    daemon._startup_sweep(tmp_db, clock=fixed_clock)
+    requeued = [r for r in db.fetch_outbox_queued(tmp_db) if r["kind"] == "notice"]
+    assert requeued == []
