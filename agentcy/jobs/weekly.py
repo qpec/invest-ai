@@ -318,7 +318,10 @@ def broken_but_held(conn, *, as_of) -> tuple[str, ...]:
 
 
 def revalidation_lines(conn, *, as_of) -> tuple[str, ...]:
-    """D.2 check 3: per holding one line — status, version, headroom scorecard."""
+    """D.2 check 3: per holding one line — status, version, headroom scorecard. A non-cash
+    holding with no live thesis is reported honestly (outside-framework by design, else awaiting
+    thesis ratification), never silently skipped (backfill onboarding). A DRAFT thesis already
+    prints via its status ('draft'); the skip fixed here is only the thesis-less case."""
     snap = db.fetch_latest_snapshot(conn)
     out = []
     for p in (mirror.advice_positions(conn, snap["snapshot_id"]) if snap else []):
@@ -326,6 +329,11 @@ def revalidation_lines(conn, *, as_of) -> tuple[str, ...]:
             continue
         tid = register.live_thesis_for(conn, p.symbol)
         if tid is None:
+            if mirror.framework_status(conn, p.symbol, as_of=as_of) == "outside_framework":
+                out.append(f"{p.symbol} — outside framework (no thesis by design)")
+            else:
+                out.append(f"{p.symbol} — awaiting thesis ratification "
+                           "(no live thesis; run `agentcy thesis backfill`)")
             continue
         st = db.fetch_current_thesis_status(conn, tid)
         tv = db.fetch_current_thesis_version(conn, tid)
