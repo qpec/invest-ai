@@ -117,11 +117,11 @@ def run_graded(conn, *, universe_path=None, market_data=None, as_of) -> GradedSc
     market_data=None (the CLI default) -> assemble it from the append-only archive (populator
     design 5): market_cap = latest price close x latest shares, total_debt/cash from the latest
     balance sheet. An explicit dict is still honored (tests/injection)."""
-    from agentcy import scout_grade
+    from agentcy import populate, scout_grade
     pin = config.get(conn, "universe_pin_sha")
     if universe_path is None:
         universe_path = Path(db.state_dir()) / "universe" / "equities.bz2"
-    universe = load_universe(universe_path, expect_sha=pin)
+    universe = populate.filter_us_eu(load_universe(universe_path, expect_sha=pin))  # US+EU (design 2)
     if market_data is None:
         market_data = scout_grade._market_data_from_archive(
             conn, [str(s) for s in universe["symbol"]], as_of=as_of)
