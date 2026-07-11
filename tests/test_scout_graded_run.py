@@ -134,3 +134,33 @@ def test_run_graded_assembles_market_data_from_archive_when_none(
     by_sym = {g.symbol: g for g in result.graded}
     assert by_sym["MSFT"].grade in ("A", "B", "C", "D", "F")
     assert by_sym["MSFT"].composite is not None
+
+
+def test_run_graded_absent_balance_sheet_degrades_to_insufficient_not_crash(
+        tmp_db, tmp_path, yf_statements, yf_series):
+    """market_data=None + a name whose balance sheet lacks Total Debt / Cash (realistic:
+    banks, insurers, many ADRs) must degrade to INSUFFICIENT, never crash the whole run.
+    The assembler emits total_debt/cash=None; value_metrics must return None (-> INSUFFICIENT)
+    rather than raise on `ev = market_cap + total_debt - cash`."""
+    path, sha = _universe(tmp_path)
+    config.set(tmp_db, "universe_pin_sha", sha, reason="t", actor="owner",
+               clock=ck.SystemClock())
+    # MSFT: fully seeded, grades to a real letter. VEEV: balance sheet stripped of the two
+    # market_data line items -> assembler yields market_cap present but total_debt/cash None.
+    _seed(tmp_db, "MSFT", yf_statements, yf_series)
+    pack = yf_statements("msft_statements")
+    pack["balance"] = pack["balance"].drop(
+        index=["Total Debt", "Cash And Cash Equivalents"])
+    store.store_statements(tmp_db, "VEEV", pack, run_id=None, fetched_at="2026-07-01T00:00:00Z")
+    store.store_shares(tmp_db, "VEEV", yf_series("msft_shares_full"),
+                       fetched_at="2026-07-01T00:00:00Z")
+    for sym in ("MSFT", "VEEV"):
+        pf = pd.DataFrame({"close": [500.0], "adj_close": [500.0], "dividend": [0.0],
+                           "currency": ["USD"]}, index=pd.to_datetime(["2026-07-07"]))
+        store.store_price_bars(tmp_db, sym, pf, run_id=None, fetched_at="2026-07-07T00:00:00Z")
+
+    # must NOT raise TypeError; the balance-less name degrades, the whole run survives
+    result = scout.run_graded(tmp_db, universe_path=path, market_data=None, as_of=AS_OF)
+    by_sym = {g.symbol: g for g in result.graded}
+    assert by_sym["VEEV"].grade == "INSUFFICIENT"
+    assert by_sym["MSFT"].grade in ("A", "B", "C", "D", "F")

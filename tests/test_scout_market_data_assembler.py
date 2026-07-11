@@ -47,3 +47,18 @@ def test_currency_mismatch_omits_the_ticker(tmp_db, yf_statements, yf_series):
     md = sg._market_data_from_archive(tmp_db, ["SAP"], as_of=AS_OF,
                                       statement_currency={"SAP": "USD"})
     assert "SAP" not in md
+
+
+def test_value_metrics_none_leg_returns_none_not_crash(tmp_db, yf_statements, yf_series):
+    """A computable name (owner-FCF present) but a None market_cap/total_debt/cash leg must
+    degrade to None (-> INSUFFICIENT), never raise on `ev = market_cap + total_debt - cash`.
+    Realistic: banks/insurers/ADRs whose balance sheet lacks Total Debt/Cash, or a name with
+    statements but no price/shares. Sibling durability_metrics already None-guards these keys."""
+    _seed(tmp_db, "MSFT", yf_statements, yf_series)  # owner-FCF is computable from the archive
+    # each None leg individually degrades to None, none raises
+    assert sg.value_metrics(tmp_db, "MSFT", market_cap=None, total_debt=59e9,
+                            cash=84e9, as_of=AS_OF) is None          # price/shares missing
+    assert sg.value_metrics(tmp_db, "MSFT", market_cap=2.8e12, total_debt=None,
+                            cash=84e9, as_of=AS_OF) is None          # balance lacks Total Debt
+    assert sg.value_metrics(tmp_db, "MSFT", market_cap=2.8e12, total_debt=59e9,
+                            cash=None, as_of=AS_OF) is None          # balance lacks Cash

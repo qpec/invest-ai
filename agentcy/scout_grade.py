@@ -80,9 +80,15 @@ def value_metrics(conn, yf_ticker: str, *, market_cap: float, total_debt: float,
                   cash: float, as_of: datetime) -> dict | None:
     """Pillar V raw metrics (design Pillar V + Stage-1.5 change 1): owner-FCF yield on EV and
     the P/owner-FCF display companion, both on the NORMALIZED owner-FCF figure. None when
-    normalized owner-FCF is not computable at all; owner_fcf_yield None when EV <= 0 (RF5)."""
+    normalized owner-FCF is not computable at all OR any EV input (market_cap / total_debt /
+    cash) is absent (RF5 — integrity-suspend, never a silent grade); owner_fcf_yield None
+    when EV <= 0. The archive assembler can emit a None leg (no price/shares, or a balance
+    sheet lacking Total Debt / Cash — banks, insurers, many ADRs); guard it here so the name
+    degrades to INSUFFICIENT rather than crashing the whole run (mirrors durability_metrics)."""
     oe = normalized_owner_fcf_ttm(conn, yf_ticker, as_of=as_of)
     if oe is None:
+        return None
+    if None in (market_cap, total_debt, cash):
         return None
     owner_fcf = oe.owner_fcf_ttm
     ev = market_cap + total_debt - cash
