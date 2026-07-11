@@ -105,6 +105,32 @@ class DeskReviewer(QualitativeReviewer):
         return self._recorded.get(ticker, Verdict())
 
 
+# --- Axis badges (Task 5) ------------------------------------------------------
+# ASCII badges (Plan note): [+] good, [~] soft, [x] flag, [t] tier-correction. ASCII-only so a
+# badge never trips the render lint's red-glyph ban. Design glyph names map here.
+_BADGE = {
+    ("moat", "confirmed"): "[+]", ("moat", "not-evident"): "[~]",
+    ("mgmt", "aligned"): "[+]", ("mgmt", "neutral"): "[~]", ("mgmt", "red-flag"): "[x]",
+    ("fad", "clear"): "[+]", ("fad", "flag"): "[x]",
+    ("tier", "ok"): "[+]",
+}
+
+
+def badges(verdict: Verdict) -> dict[str, str]:
+    """Map each PRESENT axis to its ASCII badge; pending axes are omitted. A tier correction
+    (any 'correction:*') badges as '[t]' (design tier-correction)."""
+    out: dict[str, str] = {}
+    for axis in ("moat", "mgmt", "fad", "tier"):
+        value = getattr(verdict, axis)
+        if value is None:
+            continue
+        if axis == "tier" and value.startswith("correction:"):
+            out[axis] = "[t]"
+        else:
+            out[axis] = _BADGE[(axis, value)]
+    return out
+
+
 # --- The bounded one-band adjustment (Task 4) ----------------------------------
 # Letter mirror of scout_grade._GRADE_BANDS (frozen + guarded Stage-1 grade table:
 # ((80,"A"),(65,"B"),(50,"C"),(35,"D")), F implicit below 35), ordered low -> high so
