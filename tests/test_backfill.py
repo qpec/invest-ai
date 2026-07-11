@@ -263,3 +263,43 @@ def test_derived_triggers_fire_on_deterioration_and_pass_when_healthy(
     assert triggers.evaluate(tmp_db, armed["dilution"], as_of=AS_OF).result == "FIRE"
     _set("shares_yoy", 1.0)                                                    # 1%/yr, healthy
     assert triggers.evaluate(tmp_db, armed["dilution"], as_of=AS_OF).result == "PASS"
+
+
+def test_create_backfill_draft_origin_and_status(tmp_db, fixed_clock):
+    from agentcy import backfill
+    from agentcy import journal
+    from agentcy.journal import EntryIn
+    conn = tmp_db
+    je = journal.append(conn, EntryIn(
+        decision_type="config_or_designation", decision_subtype="config_change",
+        reasoning_at_the_moment="seed", actor="owner"), clock=fixed_clock)
+    held = backfill.HeldWithoutThesis(symbol="ADYEN", yf_ticker="ADYEN",
+                                      instrument_type="stock", quantity=5.0,
+                                      opened_at="2024-01-15T00:00:00Z", invested_eur=3000.0)
+    baseline = backfill.Baseline(yf_ticker="ADYEN", revenue_yoy=14.2, owner_fcf_margin=30.0,
+                                 net_debt_ebitda=1.5, shares_yoy=1.2, owner_earnings_json="{}")
+    tid = backfill.create_backfill_draft(conn, held, baseline, journal_ref=je, clock=fixed_clock)
+    assert tid == "TH-ADYEN-001"
+    assert db.fetch_thesis(conn, tid)["origin"] == "backfill"
+    assert db.fetch_current_thesis_status(conn, tid)["status"] == "draft"   # NOT monitored
+    assert len(db.fetch_armed_triggers(conn, tid)) == 4
+    tv = db.fetch_current_thesis_version(conn, tid)
+    assert tv["value_at_purchase"] is None                  # cost basis quarantined at v1
+    assert "(draft - pending ratification)" in tv["business_model_2s"]
+
+
+def test_create_backfill_draft_bootstrapping_when_no_triggers(tmp_db, fixed_clock):
+    from agentcy import backfill, journal
+    from agentcy.journal import EntryIn
+    conn = tmp_db
+    je = journal.append(conn, EntryIn(
+        decision_type="config_or_designation", decision_subtype="config_change",
+        reasoning_at_the_moment="seed", actor="owner"), clock=fixed_clock)
+    held = backfill.HeldWithoutThesis(symbol="THIN", yf_ticker="THIN", instrument_type="stock",
+                                      quantity=1.0, opened_at=None, invested_eur=None)
+    # only a growth_floor leg computable -> 1 trigger, no moat link -> cannot form a thesis
+    baseline = backfill.Baseline(yf_ticker="THIN", revenue_yoy=14.2, owner_fcf_margin=None,
+                                 net_debt_ebitda=None, shares_yoy=None, owner_earnings_json="{}")
+    tid = backfill.create_backfill_draft(conn, held, baseline, journal_ref=je, clock=fixed_clock)
+    assert tid is None
+    assert db.fetch_theses(conn) == []
