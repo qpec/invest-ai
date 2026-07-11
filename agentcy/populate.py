@@ -43,33 +43,51 @@ def starter_set(universe: pd.DataFrame, *, size: int) -> list[str]:
     return rank_universe(universe)[:size]
 
 
-# US + Europe (design 2 chose universe-B: "US + EU"). Matched case-insensitively against the
-# FinanceDatabase `country` column. Europe = EU-27 + EEA/EFTA + UK + the European microstates
-# that appear in the data. Deliberately EXCLUDES Canada (not US/EU) and offshore-incorporation
-# havens (Cayman Islands, Bermuda, British Virgin Islands, Jersey, Guernsey, Isle of Man,
-# Gibraltar, Bahamas, Marshall Islands, Panama) — those are mostly non-European companies using
-# an offshore domicile (e.g. Chinese ADRs), not genuine US/EU businesses.
-US_EU_COUNTRIES = frozenset({
-    "united states",
-    # EU-27
-    "germany", "france", "italy", "netherlands", "spain", "belgium", "ireland",
-    "luxembourg", "austria", "finland", "portugal", "greece", "poland", "denmark",
-    "sweden", "czech republic", "hungary", "lithuania", "estonia", "latvia", "malta",
-    "cyprus", "romania", "slovakia", "slovenia", "croatia", "bulgaria",
-    # EEA / EFTA / UK / European microstates
-    "united kingdom", "switzerland", "norway", "iceland", "liechtenstein", "monaco",
-})
+# Company home-country -> its primary exchange code(s) (FinanceDatabase/yfinance `exchange`
+# codes). design 2 chose universe-B ("US + EU"). The FinanceDatabase file is a GLOBAL
+# listing-level dump: every company appears once per exchange it lists on (AAPL, AAPL.MI on
+# Milan, AAPL.VI on Vienna, ...). Keeping ONLY a company's HOME-country exchange yields one
+# clean primary listing per company, in its home currency, and drops the pervasive foreign
+# cross-listings that would otherwise duplicate the screen and mis-rank under the dormant
+# currency guard (price currency != reporting currency). Country match against the exact
+# FinanceDatabase title-case value; exchange codes are upper-case. Canada, offshore havens,
+# and non-US/EU domiciles are simply absent from this map, so they are excluded.
+HOME_EXCHANGES = {
+    "United States": {"NMS", "NYQ", "NGM", "NCM", "ASE", "PCX", "BATS", "NYS"},
+    "United Kingdom": {"LSE"},
+    "Germany": {"GER"},          # XETRA (regional STU/FRA/MUN/DUS/BER are cross-listings)
+    "France": {"PAR"},
+    "Netherlands": {"AMS"},
+    "Switzerland": {"EBS", "VTX"},
+    "Italy": {"MIL"},
+    "Spain": {"MCE"},
+    "Sweden": {"STO"},
+    "Denmark": {"CPH"},
+    "Finland": {"HEL"},
+    "Norway": {"OSL"},
+    "Belgium": {"BRU"},
+    "Ireland": {"ISE", "DUB"},
+    "Portugal": {"LIS"},
+    "Austria": {"VIE"},
+    "Poland": {"WSE"},
+    "Greece": {"ATH"},
+    "Iceland": {"ICE"},
+    "Luxembourg": {"LUX"},
+}
 
 
 def filter_us_eu(universe: pd.DataFrame) -> pd.DataFrame:
-    """Restrict the universe to US + European domiciles (design 2 universe-B), matched
-    case-insensitively on the FinanceDatabase `country` column. A universe without a
-    `country` column (e.g. a small test fixture) passes through unchanged, so callers that
-    hand-build a universe are unaffected."""
-    if "country" not in universe.columns:
+    """Restrict to US + EU companies on their HOME exchange (design 2 universe-B). The global
+    listing-level FinanceDatabase file lists every company once per exchange; keeping only the
+    home-country exchange gives one clean primary listing per company in its home currency and
+    drops foreign cross-listings (AAPL.MI, 4AB.DE, ...). A universe lacking the `country` or
+    `exchange` column (a hand-built test fixture) passes through unchanged."""
+    if "country" not in universe.columns or "exchange" not in universe.columns:
         return universe
-    keep = universe["country"].astype(str).str.strip().str.lower().isin(US_EU_COUNTRIES)
-    return universe[keep]
+    ctry = universe["country"].astype(str).str.strip()
+    exch = universe["exchange"].astype(str).str.strip()
+    keep = [e in HOME_EXCHANGES.get(c, ()) for c, e in zip(ctry, exch)]
+    return universe[pd.Series(keep, index=universe.index)]
 
 
 _STATEMENT_TYPES = ("income", "balance", "cashflow")

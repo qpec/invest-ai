@@ -52,25 +52,27 @@ def test_unknown_or_missing_band_sorts_last_stable_by_symbol():
     assert populate.rank_universe(uni) == ["Z", "A", "K", "M"]
 
 
-def test_filter_us_eu_keeps_us_and_europe_drops_the_rest():
+def test_filter_us_eu_keeps_home_listings_drops_cross_listings_and_non_us_eu():
+    """US+EU companies are kept ONLY on their home exchange; foreign cross-listings of the same
+    company (AAPL.MI on Milan, ASML on NMS) and non-US/EU domiciles are dropped."""
     uni = pd.DataFrame(
-        [("AAPL", "United States"), ("SAP.DE", "Germany"), ("ASML.AS", "Netherlands"),
-         ("SHEL.L", "United Kingdom"), ("NESN.SW", "Switzerland"),
-         ("SHOP.TO", "Canada"), ("005930.KS", "South Korea"), ("0700.HK", "Hong Kong"),
-         ("BABA", "Cayman Islands")],
-        columns=["symbol", "country"])
+        [("AAPL", "United States", "NMS"),        # US home -> keep
+         ("AAPL.MI", "United States", "MIL"),      # Apple cross-listed on Milan -> drop
+         ("SAP.DE", "Germany", "GER"),             # German home (XETRA) -> keep
+         ("SAP.F", "Germany", "FRA"),              # SAP on Frankfurt regional -> drop
+         ("ASML.AS", "Netherlands", "AMS"),        # Dutch home -> keep
+         ("ASML", "Netherlands", "NMS"),           # ASML US listing -> drop (not home)
+         ("MC.PA", "France", "PAR"),               # French home -> keep
+         ("SHOP.TO", "Canada", "TOR"),             # Canada -> drop (not US/EU)
+         ("005930.KS", "South Korea", "KSC")],     # Korea -> drop
+        columns=["symbol", "country", "exchange"])
     kept = set(populate.filter_us_eu(uni)["symbol"])
-    assert kept == {"AAPL", "SAP.DE", "ASML.AS", "SHEL.L", "NESN.SW"}
+    assert kept == {"AAPL", "SAP.DE", "ASML.AS", "MC.PA"}
 
 
-def test_filter_us_eu_is_case_insensitive():
-    uni = pd.DataFrame([("A", " united states "), ("B", "GERMANY")], columns=["symbol", "country"])
-    assert set(populate.filter_us_eu(uni)["symbol"]) == {"A", "B"}
-
-
-def test_filter_us_eu_passes_through_when_no_country_column():
-    """Hand-built universes (test fixtures, the tier tests) have no country column and must
-    pass through unchanged so grading/ranking on them is unaffected."""
+def test_filter_us_eu_passes_through_when_columns_absent():
+    """Hand-built universes (grading tests, the tier tests) lack country/exchange columns and
+    must pass through unchanged so grading/ranking on them is unaffected."""
     uni = _uni([("A", "mega_cap"), ("B", "small_cap")])
     assert list(populate.filter_us_eu(uni)["symbol"]) == ["A", "B"]
 
