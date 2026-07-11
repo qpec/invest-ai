@@ -108,7 +108,7 @@ def derive_triggers(baseline: Baseline) -> list[register.TriggerSpec]:
             statement=(f"If revenue YoY falls to or below {floor:.1f}% "
                        f"(more than 10pp under the {baseline.revenue_yoy:.1f}% baseline), "
                        "the growth story that anchors this holding is gone."),
-            metric="revenue_yoy", comparator=">", threshold=floor, moat_link=None,
+            metric="revenue_yoy", comparator="<", threshold=floor, moat_link=None,
             persistence="2_consecutive_quarters"))
     if baseline.owner_fcf_margin is not None:
         floor = baseline.owner_fcf_margin * 0.75
@@ -117,7 +117,7 @@ def derive_triggers(baseline: Baseline) -> list[register.TriggerSpec]:
             statement=(f"If owner-FCF margin TTM falls to or below {floor:.1f}% "
                        f"(a quarter below the {baseline.owner_fcf_margin:.1f}% baseline), "
                        "the moat is leaking."),
-            metric="owner_fcf_margin", comparator=">", threshold=floor,
+            metric="owner_fcf_margin", comparator="<", threshold=floor,
             moat_link=_PLACEHOLDER_MOAT, persistence="2_consecutive_quarters"))
     if baseline.net_debt_ebitda is not None:
         ceiling = min(baseline.net_debt_ebitda + 1.0, 4.0)
@@ -125,14 +125,14 @@ def derive_triggers(baseline: Baseline) -> list[register.TriggerSpec]:
             type="balance_sheet_safety",
             statement=(f"If net-debt/EBITDA rises to or above {ceiling:.1f}x, "
                        "the balance sheet is no longer the one I underwrote."),
-            metric="net_debt_ebitda", comparator="<", threshold=ceiling, moat_link=None,
+            metric="net_debt_ebitda", comparator=">", threshold=ceiling, moat_link=None,
             persistence="2_consecutive_quarters"))
     if baseline.shares_yoy is not None:
         specs.append(register.TriggerSpec(
             type="dilution",
             statement=("If the share count grows 5%/yr or more, dilution is eating the "
                        "per-share compounding."),
-            metric="shares_yoy", comparator="<", threshold=5.0, moat_link=None,
+            metric="shares_yoy", comparator=">", threshold=5.0, moat_link=None,
             persistence="ttm"))
     return specs
 
