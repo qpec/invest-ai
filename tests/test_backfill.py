@@ -68,7 +68,7 @@ def test_detect_skips_cash(tmp_db, fixed_clock):
     assert all(h.instrument_type != "cash" for h in backfill.detect_thesis_less(conn, as_of=AS_OF))
 
 
-def _stub_store(monkeypatch, *, rev=None, margin=None, ndte=None, shares=None, oe_json=None):
+def _stub_store(monkeypatch, *, rev=None, margin=None, ndte=None, shares=None, oe=None):
     from agentcy.fetch import store
     from agentcy.freshness import Stamped, DataState
 
@@ -87,11 +87,9 @@ def _stub_store(monkeypatch, *, rev=None, margin=None, ndte=None, shares=None, o
     monkeypatch.setattr(store, "shares_yoy",
                         lambda c, t, *, as_of: (_stamped(shares) if shares is not None else None),
                         raising=False)
-
-    class _OE:
-        def usable(self): return oe_json is not None
     monkeypatch.setattr(store, "owner_fcf_ttm",
-                        lambda c, t, *, as_of: (object() if False else None), raising=False)
+                        lambda c, t, *, as_of: (_stamped(oe) if oe is not None else None),
+                        raising=False)
 
 
 def test_baseline_full(tmp_db, fixed_clock, monkeypatch):
@@ -111,3 +109,31 @@ def test_baseline_thin_legs_are_none(tmp_db, fixed_clock, monkeypatch):
     b = backfill.compute_baseline(tmp_db, "ADYEN", as_of=AS_OF)
     assert b.revenue_yoy is None and b.owner_fcf_margin == 25.0
     assert b.net_debt_ebitda is None and b.shares_yoy is None
+
+
+def test_baseline_owner_earnings_json_is_pinned_with_provenance(tmp_db, fixed_clock, monkeypatch):
+    """A usable owner-earnings Stamped serializes via the Gate's canonical helper, so the
+    backfill JSON carries the six pinned fields PLUS the fetched_at provenance stamp
+    (MA-11) - identical to a gate-origin thesis, never provenance-stripped."""
+    import json
+
+    from agentcy import backfill, gate
+    from agentcy.fetch.store import OwnerEarnings
+    oe = OwnerEarnings(
+        fcf_ttm=1000.0, sbc_ttm=200.0, owner_fcf_ttm=800.0,
+        owner_fcf_per_share_ttm=8.0, owner_fcf_margin_ttm=32.0,
+        periods_used=("2026-03-31", "2025-12-31", "2025-09-30", "2025-06-30"))
+    _stub_store(monkeypatch, rev=[("2026-06-30", 14.2)], oe=oe)
+    b = backfill.compute_baseline(tmp_db, "ADYEN", as_of=AS_OF)
+    payload = json.loads(b.owner_earnings_json)
+    assert payload["fcf_ttm"] == 1000.0 and payload["sbc_ttm"] == 200.0
+    assert payload["owner_fcf_ttm"] == 800.0
+    assert payload["owner_fcf_per_share_ttm"] == 8.0
+    assert payload["owner_fcf_margin_ttm"] == 32.0
+    assert payload["periods_used"] == list(oe.periods_used)
+    # the provenance stamp the hand-rolled dict omitted; Z-suffixed like the gate path
+    assert payload["fetched_at"] == "2026-07-08T05:00:00Z"
+    # byte-identical to what the Gate would emit for the same Stamped -> no drift
+    from agentcy.freshness import Stamped, DataState
+    stamped = Stamped(value=oe, fetched_at=AS_OF, state=DataState("fresh"), note=None)
+    assert b.owner_earnings_json == gate._oe_json(stamped)
