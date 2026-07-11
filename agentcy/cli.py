@@ -55,6 +55,14 @@ def build_parser() -> argparse.ArgumentParser:
     srun.add_argument("recipe", choices=["qv", "grade"])
     srun.set_defaults(handler="scout")
     ssub.add_parser("shortlist", help="Stage-2 review dossier for the shortlist").set_defaults(handler="scout")
+    sbadge = ssub.add_parser("badge", help="record a Stage-2 qualitative verdict axis (review artifact)")
+    sbadge.add_argument("ticker")
+    sbadge.add_argument("--moat", choices=["confirmed", "not-evident"], default=None)
+    sbadge.add_argument("--mgmt", choices=["aligned", "neutral", "red-flag"], default=None)
+    sbadge.add_argument("--fad", choices=["clear", "flag"], default=None)
+    sbadge.add_argument("--tier", default=None, help="ok | correction:<Core|Adjacent|Outside>")
+    sbadge.add_argument("--reason", default=None)
+    sbadge.set_defaults(handler="scout")
 
     wl = sub.add_parser("watchlist", help="C.1 watchlist")
     wsub = wl.add_subparsers(dest="wl_cmd", required=True)
@@ -230,10 +238,13 @@ def _cmd_render(args) -> int:
 
 
 def _cmd_scout(args) -> int:
-    """agentcy scout run {qv|grade} / shortlist (R6, design §4/§6). Prints for human reading;
-    H forbids storing screen/shortlist output — no monitoring-state write here. RF2: the run
-    body is guarded by `args.scout_cmd == "run"` BEFORE reading args.recipe (which only exists
-    on the run subparser), and conn = _open() stays reachable for every subcommand branch."""
+    """agentcy scout run {qv|grade} / shortlist / badge (R6, design §4/§6). Prints for human
+    reading; H forbids storing screen/shortlist output — the ONLY write here is the badge
+    branch's Stage-2 review artifact (append-only, not monitoring state). RF2: the shortlist
+    and badge branches are guarded by their `args.scout_cmd` value BEFORE reading args.recipe
+    (which only exists on the run subparser), and conn = _open() stays reachable for every
+    subcommand branch. badge validates axis vocab via scout_review.Verdict, then appends one
+    row per PROVIDED axis (omitted axis = pending = no row, never faked FR9)."""
     scout = _scout()
     conn = _open()
     if args.scout_cmd == "shortlist":
@@ -244,6 +255,26 @@ def _cmd_scout(args) -> int:
         print(scout_review.dossier_text(shortlist))
         print()
         print(scout.HONEST_EVIDENCE_NOTE)
+        return 0
+    if args.scout_cmd == "badge":
+        from agentcy import db, scout_review
+        verdict = scout_review.Verdict(moat=args.moat, mgmt=args.mgmt, fad=args.fad,
+                                       tier=args.tier, reason=args.reason)  # validates axis vocab
+        recorded_at = db.to_iso(_clock().now())
+        axes = {"moat": verdict.moat, "mgmt": verdict.mgmt,
+                "fad": verdict.fad, "tier": verdict.tier}
+        written = []
+        for axis, value in axes.items():
+            if value is None:
+                continue                                  # omitted = pending, never faked (FR9)
+            db.append_scout_verdict(conn, ticker=args.ticker, axis=axis, value=value,
+                                    reason=verdict.reason, recorded_at=recorded_at)
+            written.append(axis)
+        conn.commit()
+        if not written:
+            print(f"{args.ticker}: no axes given; nothing recorded (all pending).")
+            return 0
+        print(f"{args.ticker}: recorded {', '.join(written)} (Stage-2 review artifact).")
         return 0
     if args.recipe == "grade":
         from agentcy.render.scout import ScoutGradedContext, render_scout_graded
