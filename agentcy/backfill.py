@@ -9,9 +9,11 @@ DRAFT placeholders and the thesis stays draft (UNmonitored) until ratified. Cost
 RECORD-KEEPING only and never enters positions_advice (invariant 4)."""
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 from agentcy import db, mirror, register
+from agentcy.fetch import store
 
 
 @dataclass(frozen=True)
@@ -45,3 +47,53 @@ def detect_thesis_less(conn, *, as_of) -> list[HeldWithoutThesis]:
             opened_at=(d["opened_at"] if d else None),
             invested_eur=(d["invested_eur"] if d else None)))
     return out
+
+
+@dataclass(frozen=True)
+class Baseline:
+    """The invested-moment fundamentals anchor for a backfill thesis. Every leg is None when
+    its underlying series/scalar is absent/stale/thin -> that leg is skipped downstream
+    (BOOTSTRAPPING), never faked."""
+    yf_ticker: str
+    revenue_yoy: float | None
+    owner_fcf_margin: float | None
+    net_debt_ebitda: float | None
+    shares_yoy: float | None
+    owner_earnings_json: str
+
+
+def _last_series_value(stamped) -> float | None:
+    """Last (period_end, value) value of a usable series Stamped, else None."""
+    if stamped is None or not stamped.usable():
+        return None
+    series = stamped.value
+    if not series:
+        return None
+    return series[-1][1]
+
+
+def _scalar_value(stamped) -> float | None:
+    """Scalar of a usable Stamped (None value / stale / absent -> None)."""
+    if stamped is None or not stamped.usable():
+        return None
+    return stamped.value
+
+
+def compute_baseline(conn, yf_ticker, *, as_of) -> Baseline:
+    """The invested-moment fundamentals anchor. Every leg is None-safe: a leg with no
+    computable/usable series is None (skipped / BOOTSTRAPPING downstream, never faked)."""
+    rev = _last_series_value(store.revenue_yoy_series(conn, yf_ticker, as_of=as_of))
+    margin = _last_series_value(store.margin_series(conn, yf_ticker, as_of=as_of))
+    ndte = _last_series_value(store.balance_safety_series(conn, yf_ticker, as_of=as_of))
+    shares = _scalar_value(store.shares_yoy(conn, yf_ticker, as_of=as_of))
+    oe = store.owner_fcf_ttm(conn, yf_ticker, as_of=as_of)
+    oe_json = "{}"
+    if oe is not None and oe.usable():
+        v = oe.value
+        oe_json = json.dumps({
+            "fcf_ttm": v.fcf_ttm, "sbc_ttm": v.sbc_ttm, "owner_fcf_ttm": v.owner_fcf_ttm,
+            "owner_fcf_per_share_ttm": v.owner_fcf_per_share_ttm,
+            "owner_fcf_margin_ttm": v.owner_fcf_margin_ttm,
+            "periods_used": list(v.periods_used)})
+    return Baseline(yf_ticker=yf_ticker, revenue_yoy=rev, owner_fcf_margin=margin,
+                    net_debt_ebitda=ndte, shares_yoy=shares, owner_earnings_json=oe_json)
