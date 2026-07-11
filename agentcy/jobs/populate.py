@@ -60,6 +60,7 @@ def _run(conn, *, clock, state_dir, budget, minutes) -> int:
 
     pin = config_mod.get(conn, "universe_pin_sha")
     universe = load_universe(Path(state_dir) / "universe" / "equities.bz2", expect_sha=pin)
+    universe = populate.filter_us_eu(universe)          # design 2: US+EU only, not global
     ranked = populate.rank_universe(universe)
 
     # A generous budget cap so the time-box is the real limiter when minutes is set.

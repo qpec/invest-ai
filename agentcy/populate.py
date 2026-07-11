@@ -43,6 +43,35 @@ def starter_set(universe: pd.DataFrame, *, size: int) -> list[str]:
     return rank_universe(universe)[:size]
 
 
+# US + Europe (design 2 chose universe-B: "US + EU"). Matched case-insensitively against the
+# FinanceDatabase `country` column. Europe = EU-27 + EEA/EFTA + UK + the European microstates
+# that appear in the data. Deliberately EXCLUDES Canada (not US/EU) and offshore-incorporation
+# havens (Cayman Islands, Bermuda, British Virgin Islands, Jersey, Guernsey, Isle of Man,
+# Gibraltar, Bahamas, Marshall Islands, Panama) — those are mostly non-European companies using
+# an offshore domicile (e.g. Chinese ADRs), not genuine US/EU businesses.
+US_EU_COUNTRIES = frozenset({
+    "united states",
+    # EU-27
+    "germany", "france", "italy", "netherlands", "spain", "belgium", "ireland",
+    "luxembourg", "austria", "finland", "portugal", "greece", "poland", "denmark",
+    "sweden", "czech republic", "hungary", "lithuania", "estonia", "latvia", "malta",
+    "cyprus", "romania", "slovakia", "slovenia", "croatia", "bulgaria",
+    # EEA / EFTA / UK / European microstates
+    "united kingdom", "switzerland", "norway", "iceland", "liechtenstein", "monaco",
+})
+
+
+def filter_us_eu(universe: pd.DataFrame) -> pd.DataFrame:
+    """Restrict the universe to US + European domiciles (design 2 universe-B), matched
+    case-insensitively on the FinanceDatabase `country` column. A universe without a
+    `country` column (e.g. a small test fixture) passes through unchanged, so callers that
+    hand-build a universe are unaffected."""
+    if "country" not in universe.columns:
+        return universe
+    keep = universe["country"].astype(str).str.strip().str.lower().isin(US_EU_COUNTRIES)
+    return universe[keep]
+
+
 _STATEMENT_TYPES = ("income", "balance", "cashflow")
 _MIN_PERIODS = 4         # >=4 quarterly periods per statement (design 4)
 _DEAD_RETRY_DAYS = 90    # dead-list backstop (design 6, plan note 5)

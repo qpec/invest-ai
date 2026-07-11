@@ -52,6 +52,29 @@ def test_unknown_or_missing_band_sorts_last_stable_by_symbol():
     assert populate.rank_universe(uni) == ["Z", "A", "K", "M"]
 
 
+def test_filter_us_eu_keeps_us_and_europe_drops_the_rest():
+    uni = pd.DataFrame(
+        [("AAPL", "United States"), ("SAP.DE", "Germany"), ("ASML.AS", "Netherlands"),
+         ("SHEL.L", "United Kingdom"), ("NESN.SW", "Switzerland"),
+         ("SHOP.TO", "Canada"), ("005930.KS", "South Korea"), ("0700.HK", "Hong Kong"),
+         ("BABA", "Cayman Islands")],
+        columns=["symbol", "country"])
+    kept = set(populate.filter_us_eu(uni)["symbol"])
+    assert kept == {"AAPL", "SAP.DE", "ASML.AS", "SHEL.L", "NESN.SW"}
+
+
+def test_filter_us_eu_is_case_insensitive():
+    uni = pd.DataFrame([("A", " united states "), ("B", "GERMANY")], columns=["symbol", "country"])
+    assert set(populate.filter_us_eu(uni)["symbol"]) == {"A", "B"}
+
+
+def test_filter_us_eu_passes_through_when_no_country_column():
+    """Hand-built universes (test fixtures, the tier tests) have no country column and must
+    pass through unchanged so grading/ranking on them is unaffected."""
+    uni = _uni([("A", "mega_cap"), ("B", "small_cap")])
+    assert list(populate.filter_us_eu(uni)["symbol"]) == ["A", "B"]
+
+
 def test_starter_set_cuts_top_n_of_the_ranking():
     uni = _uni([(s, "large_cap") for s in ["D", "C", "B", "A", "E"]])
     assert populate.starter_set(uni, size=3) == ["A", "B", "C"]
