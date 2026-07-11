@@ -9,10 +9,9 @@ DRAFT placeholders and the thesis stays draft (UNmonitored) until ratified. Cost
 RECORD-KEEPING only and never enters positions_advice (invariant 4)."""
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 
-from agentcy import db, mirror, register
+from agentcy import db, gate, mirror, register
 from agentcy.fetch import store
 
 
@@ -87,13 +86,8 @@ def compute_baseline(conn, yf_ticker, *, as_of) -> Baseline:
     ndte = _last_series_value(store.balance_safety_series(conn, yf_ticker, as_of=as_of))
     shares = _scalar_value(store.shares_yoy(conn, yf_ticker, as_of=as_of))
     oe = store.owner_fcf_ttm(conn, yf_ticker, as_of=as_of)
-    oe_json = "{}"
-    if oe is not None and oe.usable():
-        v = oe.value
-        oe_json = json.dumps({
-            "fcf_ttm": v.fcf_ttm, "sbc_ttm": v.sbc_ttm, "owner_fcf_ttm": v.owner_fcf_ttm,
-            "owner_fcf_per_share_ttm": v.owner_fcf_per_share_ttm,
-            "owner_fcf_margin_ttm": v.owner_fcf_margin_ttm,
-            "periods_used": list(v.periods_used)})
+    # Reuse the Gate's canonical serializer so both origins emit the identical six fields
+    # PLUS the fetched_at provenance stamp (MA-11; "a value never sheds provenance").
+    oe_json = gate._oe_json(oe) if (oe is not None and oe.usable()) else "{}"
     return Baseline(yf_ticker=yf_ticker, revenue_yoy=rev, owner_fcf_margin=margin,
                     net_debt_ebitda=ndte, shares_yoy=shares, owner_earnings_json=oe_json)
