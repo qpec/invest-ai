@@ -1,306 +1,281 @@
-"""Task 4: pure-function tests for the eToro adapter.
+"""Pure-function + adapter tests for the eToro client against the REAL API contract.
 
-instrument-type mapping + per-symbol lot aggregation. No I/O, no network.
+instrument-type mapping (numeric instrumentTypeID), per-instrument lot aggregation,
+and fetch_etoro_snapshot driven by a sanitized recorded fixture. No I/O, no network:
+a FakeClient replays the fixture JSON so the real parser runs offline.
 """
 import json
+from pathlib import Path
 
 import pytest
 
 from agentcy.fetch import etoro
+
+FIXTURES = Path(__file__).parent / "fixtures" / "etoro"
+
+
+def _load(name: str):
+    return json.loads((FIXTURES / f"{name}.json").read_text(encoding="utf-8"))
 
 
 # fake FX: USD->EUR at 0.9, everything else 1:1. Deterministic, no network.
 _FX = lambda amount, ccy: amount * 0.9 if ccy == "USD" else amount
 
 
-# -- map_instrument_type -----------------------------------------------------
-@pytest.mark.parametrize(
-    "raw,expected",
-    [
-        ("Stocks", "stock"),
-        ("stock", "stock"),
-        ("STOCK", "stock"),
-        ("ETF", "etf"),
-        ("etfs", "etf"),
-        ("Crypto", "crypto"),
-        ("cryptocurrencies", "crypto"),
-        ("CryptoCurrency", "crypto"),
-        ("CopyPortfolio", "copyportfolio"),
-        ("copyportfolios", "copyportfolio"),
-        ("  Stocks  ", "stock"),  # trimmed
-    ],
-)
-def test_map_instrument_type_maps_taxonomy(raw, expected):
-    assert etoro.map_instrument_type(raw) == expected
+class FixtureClient:
+    """Replays the sanitized portfolio.json / instruments.json fixtures.
+
+    Mirrors the real EtoroClient surface (get_portfolio / get_instruments) so the
+    real fetch_etoro_snapshot parser runs against recorded field names offline.
+    """
+
+    def __init__(self, portfolio=None, instruments=None):
+        self._portfolio = portfolio if portfolio is not None else _load("portfolio")
+        self._instruments = instruments if instruments is not None else _load("instruments")
+        self.instrument_calls = []
+
+    def get_portfolio(self):
+        return self._portfolio
+
+    def get_instruments(self, ids):
+        self.instrument_calls.append(list(ids))
+        wanted = {int(i) for i in ids}
+        return [row for row in self._instruments["instrumentDisplayDatas"]
+                if row["instrumentID"] in wanted]
 
 
-def test_map_instrument_type_unknown_raises():
-    with pytest.raises(etoro.EtoroError) as exc:
-        etoro.map_instrument_type("bond")
-    assert "unknown eToro instrument type" in str(exc.value)
-    assert "'bond'" in str(exc.value)
+# -- map_instrument_type (numeric instrumentTypeID) --------------------------
+@pytest.mark.parametrize("type_id,expected", [
+    (5, "stock"),
+    (6, "etf"),
+    ("5", "stock"),
+    ("6", "etf"),
+])
+def test_map_instrument_type_maps_known_ids(type_id, expected):
+    assert etoro.map_instrument_type(type_id) == expected
 
 
-def test_map_instrument_type_empty_raises():
-    with pytest.raises(etoro.EtoroError):
-        etoro.map_instrument_type("")
-    with pytest.raises(etoro.EtoroError):
-        etoro.map_instrument_type("   ")
+@pytest.mark.parametrize("type_id", [7, 99, None, "", "bond"])
+def test_map_instrument_type_unknown_defaults_to_stock(type_id):
+    # Best-effort default: an unknown/missing instrumentTypeID must not crash the pull.
+    assert etoro.map_instrument_type(type_id) == "stock"
 
 
-# -- aggregate_lots ----------------------------------------------------------
-def test_aggregate_lots_collapses_symbol():
+# -- aggregate_lots (real position-object field names) -----------------------
+def _lot(**kw):
+    base = {"units": 1.0, "amount": 100.0, "openRate": 100.0,
+            "openDateTime": "2024-01-01T00:00:00.000Z", "isBuy": True, "leverage": 1.0}
+    base.update(kw)
+    return base
+
+
+def test_aggregate_lots_collapses_instrument():
     lots = [
-        {"units": 2.0, "invested": 400.0, "open_rate": 200.0, "open_date": "2024-06-01",
-         "mv_native": 500.0, "pnl_native": 100.0, "leverage": 1.0},
-        {"units": 1.0, "invested": 210.0, "open_rate": 210.0, "open_date": "2023-01-15",
-         "mv_native": 250.0, "pnl_native": 40.0, "leverage": 1.0},
+        _lot(units=2.0, amount=400.0, openDateTime="2024-06-01T00:00:00.000Z"),
+        _lot(units=1.0, amount=210.0, openDateTime="2023-01-15T00:00:00.000Z"),
     ]
     agg = etoro.aggregate_lots("AAPL", lots)
     assert agg["symbol"] == "AAPL"
     assert agg["quantity"] == 3.0
     assert agg["invested_native"] == 610.0
-    assert agg["opened_at"] == "2023-01-15"
+    assert agg["mv_native"] == 610.0                 # no live MV -> invested is the native value
+    assert agg["opened_at"] == "2023-01-15T00:00:00.000Z"
     assert agg["lot_count"] == 2
     assert round(agg["avg_open_price"], 6) == round(610.0 / 3.0, 6)
-    assert agg["mv_native"] == 750.0
-    assert agg["pnl_native"] == 140.0
     assert agg["leverage"] == 1.0
-
-
-def test_aggregate_lots_single_lot():
-    lots = [
-        {"units": 5.0, "invested": 1000.0, "open_rate": 200.0, "open_date": "2025-03-10",
-         "mv_native": 1100.0, "pnl_native": 100.0, "leverage": 1.0},
-    ]
-    agg = etoro.aggregate_lots("MSFT", lots)
-    assert agg["symbol"] == "MSFT"
-    assert agg["quantity"] == 5.0
-    assert agg["invested_native"] == 1000.0
-    assert agg["opened_at"] == "2025-03-10"
-    assert agg["lot_count"] == 1
-    assert agg["avg_open_price"] == 200.0
-    assert agg["mv_native"] == 1100.0
-    assert agg["pnl_native"] == 100.0
-    assert agg["leverage"] == 1.0
+    assert agg["direction"] == "buy"
 
 
 def test_aggregate_lots_opened_at_is_earliest_regardless_of_order():
     lots = [
-        {"units": 1.0, "invested": 100.0, "open_rate": 100.0, "open_date": "2025-03-10",
-         "mv_native": 110.0, "pnl_native": 10.0, "leverage": 1.0},
-        {"units": 1.0, "invested": 100.0, "open_rate": 100.0, "open_date": "2022-11-01",
-         "mv_native": 120.0, "pnl_native": 20.0, "leverage": 1.0},   # earliest, in the middle
-        {"units": 1.0, "invested": 100.0, "open_rate": 100.0, "open_date": "2024-07-22",
-         "mv_native": 130.0, "pnl_native": 30.0, "leverage": 1.0},
+        _lot(openDateTime="2025-03-10T00:00:00.000Z"),
+        _lot(openDateTime="2022-11-01T00:00:00.000Z"),   # earliest, in the middle
+        _lot(openDateTime="2024-07-22T00:00:00.000Z"),
     ]
     agg = etoro.aggregate_lots("MSFT", lots)
-    assert agg["opened_at"] == "2022-11-01"
+    assert agg["opened_at"] == "2022-11-01T00:00:00.000Z"
     assert agg["lot_count"] == 3
 
 
 def test_aggregate_lots_leverage_is_max():
-    lots = [
-        {"units": 1.0, "invested": 100.0, "open_rate": 100.0, "open_date": "2024-01-01",
-         "mv_native": 120.0, "pnl_native": 20.0, "leverage": 1.0},
-        {"units": 1.0, "invested": 100.0, "open_rate": 100.0, "open_date": "2024-02-01",
-         "mv_native": 130.0, "pnl_native": 30.0, "leverage": 2.0},
-    ]
-    agg = etoro.aggregate_lots("TSLA", lots)
-    assert agg["leverage"] == 2.0
+    lots = [_lot(leverage=1.0), _lot(leverage=2.0)]
+    assert etoro.aggregate_lots("TSLA", lots)["leverage"] == 2.0
 
 
 def test_aggregate_lots_leverage_defaults_to_one():
-    lots = [
-        {"units": 1.0, "invested": 100.0, "open_rate": 100.0, "open_date": "2024-01-01",
-         "mv_native": 120.0, "pnl_native": 20.0},  # no leverage key
-    ]
-    agg = etoro.aggregate_lots("NVDA", lots)
-    assert agg["leverage"] == 1.0
+    lot = _lot()
+    del lot["leverage"]
+    assert etoro.aggregate_lots("NVDA", [lot])["leverage"] == 1.0
 
 
 def test_aggregate_lots_zero_quantity_avg_price_none():
-    lots = [
-        {"units": 0.0, "invested": 0.0, "open_rate": 0.0, "open_date": "2024-01-01",
-         "mv_native": 0.0, "pnl_native": 0.0, "leverage": 1.0},
-    ]
-    agg = etoro.aggregate_lots("ZERO", lots)
+    agg = etoro.aggregate_lots("ZERO", [_lot(units=0.0, amount=0.0)])
     assert agg["quantity"] == 0.0
     assert agg["avg_open_price"] is None
 
 
-# -- fetch_etoro_snapshot (Task 5) -------------------------------------------
-def test_fetch_etoro_snapshot_builds_snapshotin_and_details():
-    class FakeClient:
-        def get_positions(self):
-            return [{"symbol": "AAPL", "type": "Stocks", "units": 3.0, "invested": 600.0,
-                     "open_rate": 200.0, "open_date": "2023-01-15", "mv_native": 750.0,
-                     "pnl_native": 150.0, "leverage": 1.0, "currency": "USD"}]
-        def get_balances(self):
-            return {"cash": 100.0, "currency": "USD"}
-    snap = etoro.fetch_etoro_snapshot(FakeClient(), fx=_FX, as_of="2026-07-10")
-    assert snap.source == "api_pull"
-    assert snap.cash_balance_eur == 90.0
-    (p,) = snap.positions
-    assert p.symbol == "AAPL" and p.instrument_type == "stock" and p.quantity == 3.0
-    assert p.mv_eur == 675.0 and p.native_currency == "USD"
-    assert p.yf_ticker == "AAPL"
-    assert p.weight == 1.0  # single position => whole invested MV
-    (d,) = snap.details
-    assert d.symbol == "AAPL" and d.opened_at == "2023-01-15" and d.lot_count == 1
-    assert d.invested_eur == 540.0
-    assert d.invested_native == 600.0
-    assert d.unrealized_pnl_native == 150.0
-    assert d.unrealized_pnl_pct == pytest.approx(25.0)  # 150/600*100
-    # raw_json round-trips the original lot dicts for the symbol
-    assert json.loads(d.raw_json)[0]["symbol"] == "AAPL"
+def test_aggregate_lots_direction_from_is_buy():
+    assert etoro.aggregate_lots("SHRT", [_lot(isBuy=False)])["direction"] == "sell"
 
 
-def test_fetch_etoro_snapshot_multi_lot_collapses_to_one():
-    class FakeClient:
-        def get_positions(self):
-            return [
-                {"symbol": "MSFT", "type": "Stocks", "units": 2.0, "invested": 400.0,
-                 "open_rate": 200.0, "open_date": "2024-06-01", "mv_native": 500.0,
-                 "pnl_native": 100.0, "leverage": 1.0, "currency": "EUR"},
-                {"symbol": "MSFT", "type": "Stocks", "units": 1.0, "invested": 210.0,
-                 "open_rate": 210.0, "open_date": "2023-01-15", "mv_native": 250.0,
-                 "pnl_native": 40.0, "leverage": 1.0, "currency": "EUR"},
-            ]
-        def get_balances(self):
-            return {"cash": 0.0, "currency": "EUR"}
-    snap = etoro.fetch_etoro_snapshot(FakeClient(), fx=_FX, as_of="2026-07-10")
-    (p,) = snap.positions
-    assert p.symbol == "MSFT" and p.quantity == 3.0
-    assert p.mv_native == 750.0 and p.mv_eur == 750.0  # EUR: 1:1
-    (d,) = snap.details
-    assert d.lot_count == 2
-    assert d.opened_at == "2023-01-15"  # earliest lot
-    assert d.invested_native == 610.0
-    assert len(json.loads(d.raw_json)) == 2
-
-
-def test_fetch_etoro_snapshot_folds_cash_position():
-    class FakeClient:
-        def get_positions(self):
-            return [
-                {"symbol": "AAPL", "type": "Stocks", "units": 1.0, "invested": 100.0,
-                 "open_rate": 100.0, "open_date": "2024-01-01", "mv_native": 110.0,
-                 "pnl_native": 10.0, "leverage": 1.0, "currency": "EUR"},
-                {"symbol": "CASH", "type": "cash", "units": 0.0, "invested": 0.0,
-                 "open_rate": 0.0, "open_date": "2024-01-01", "mv_native": 50.0,
-                 "pnl_native": 0.0, "leverage": 1.0, "currency": "EUR"},
-            ]
-        def get_balances(self):
-            return {"cash": 50.0, "currency": "EUR"}
-    snap = etoro.fetch_etoro_snapshot(FakeClient(), fx=_FX, as_of="2026-07-10")
-    # the cash entry is NOT an instrument
-    assert [p.symbol for p in snap.positions] == ["AAPL"]
-    assert [d.symbol for d in snap.details] == ["AAPL"]
-    # cash comes from balances, not the folded position
-    assert snap.cash_balance_eur == 50.0
-
-
-def test_fetch_etoro_snapshot_shape_guard_rejects_non_list():
-    class FakeClient:
-        def get_positions(self):
-            return {"unexpected": "dict body"}
-        def get_balances(self):
-            return {"cash": 0.0, "currency": "EUR"}
-    with pytest.raises(etoro.EtoroError) as exc:
-        etoro.fetch_etoro_snapshot(FakeClient(), fx=_FX, as_of="2026-07-10")
-    assert "expected a list of positions" in str(exc.value)
-    assert "dict" in str(exc.value)
-
-
-def test_fetch_etoro_snapshot_shape_guard_rejects_non_dict_element():
-    class FakeClient:
-        def get_positions(self):
-            return ["AAPL"]  # str, not a dict
-        def get_balances(self):
-            return {"cash": 0.0, "currency": "EUR"}
-    with pytest.raises(etoro.EtoroError):
-        etoro.fetch_etoro_snapshot(FakeClient(), fx=_FX, as_of="2026-07-10")
-
-
-def test_fetch_etoro_snapshot_unknown_type_propagates():
-    class FakeClient:
-        def get_positions(self):
-            return [{"symbol": "GOLD", "type": "Commodities", "units": 1.0, "invested": 100.0,
-                     "open_rate": 100.0, "open_date": "2024-01-01", "mv_native": 110.0,
-                     "pnl_native": 10.0, "leverage": 1.0, "currency": "USD"}]
-        def get_balances(self):
-            return {"cash": 0.0, "currency": "EUR"}
-    with pytest.raises(etoro.EtoroError) as exc:
-        etoro.fetch_etoro_snapshot(FakeClient(), fx=_FX, as_of="2026-07-10")
-    assert "unknown eToro instrument type" in str(exc.value)
-
-
-def test_fetch_etoro_snapshot_captures_optional_detail_fields():
-    class FakeClient:
-        def get_positions(self):
-            return [{"symbol": "AAPL", "type": "Stocks", "units": 1.0, "invested": 100.0,
-                     "open_rate": 100.0, "open_date": "2024-01-01", "mv_native": 120.0,
-                     "pnl_native": 20.0, "leverage": 1.0, "currency": "USD",
-                     "current_rate": 120.0, "direction": "buy"}]
-        def get_balances(self):
-            return {"cash": 0.0, "currency": "EUR"}
-    snap = etoro.fetch_etoro_snapshot(FakeClient(), fx=_FX, as_of="2026-07-10")
-    (d,) = snap.details
-    assert d.current_rate == 120.0
-    assert d.direction == "buy"
-
-
-def test_fetch_etoro_snapshot_converts_per_symbol_currency():
-    # Two symbols in different native currencies: USD must be crossed (×0.9),
-    # EUR must pass through untouched. Guards against per-symbol FX crosswiring.
-    class FakeClient:
-        def get_positions(self):
-            return [
-                {"symbol": "AAPL", "type": "Stocks", "units": 1.0, "invested": 100.0,
-                 "open_rate": 100.0, "open_date": "2024-01-01", "mv_native": 200.0,
-                 "pnl_native": 100.0, "leverage": 1.0, "currency": "USD"},
-                {"symbol": "ASML", "type": "Stocks", "units": 1.0, "invested": 100.0,
-                 "open_rate": 100.0, "open_date": "2024-01-01", "mv_native": 300.0,
-                 "pnl_native": 200.0, "leverage": 1.0, "currency": "EUR"},
-            ]
-        def get_balances(self):
-            return {"cash": 0.0, "currency": "EUR"}
-    snap = etoro.fetch_etoro_snapshot(FakeClient(), fx=_FX, as_of="2026-07-10")
+# -- fetch_etoro_snapshot (fixture-driven) -----------------------------------
+def test_snapshot_maps_instrument_ids_to_tickers_and_types():
+    snap = etoro.fetch_etoro_snapshot(FixtureClient(), fx=_FX, as_of="2026-07-13")
     by_symbol = {p.symbol: p for p in snap.positions}
-    assert by_symbol["AAPL"].native_currency == "USD"
-    assert by_symbol["AAPL"].mv_eur == 180.0  # 200 × 0.9
-    assert by_symbol["ASML"].native_currency == "EUR"
-    assert by_symbol["ASML"].mv_eur == 300.0  # EUR: unchanged
+    assert set(by_symbol) == {"SPY", "SHOP"}
+    assert by_symbol["SPY"].instrument_type == "etf"       # instrumentTypeID 6
+    assert by_symbol["SHOP"].instrument_type == "stock"    # instrumentTypeID 5
+    assert by_symbol["SPY"].yf_ticker == "SPY"
+    assert by_symbol["SHOP"].yf_ticker == "SHOP"
 
 
-def test_fetch_etoro_snapshot_zero_invested_none_branches():
-    # A closed-to-zero remnant: units and invested both 0 reaches the adapter.
-    # Covers BOTH None branches through fetch_etoro_snapshot (not aggregate_lots
-    # directly): avg_open_price None (units==0) and unrealized_pnl_pct None
-    # (invested_native==0).
-    class FakeClient:
-        def get_positions(self):
-            return [{"symbol": "AAPL", "type": "Stocks", "units": 0.0, "invested": 0.0,
-                     "open_rate": 0.0, "open_date": "2024-01-01", "mv_native": 0.0,
-                     "pnl_native": 0.0, "leverage": 1.0, "currency": "USD"}]
-        def get_balances(self):
-            return {"cash": 0.0, "currency": "EUR"}
-    snap = etoro.fetch_etoro_snapshot(FakeClient(), fx=_FX, as_of="2026-07-10")
-    (p,) = snap.positions
-    assert p.avg_open_price is None
-    (d,) = snap.details
-    assert d.unrealized_pnl_pct is None
+def test_snapshot_collapses_three_spy_lots_to_one_position():
+    snap = etoro.fetch_etoro_snapshot(FixtureClient(), fx=_FX, as_of="2026-07-13")
+    by_symbol = {p.symbol: p for p in snap.positions}
+    spy = by_symbol["SPY"]
+    # 3 SPY lots: units 0.274449 + 0.5 + 0.1 ; amount 200.9 + 350.0 + 75.0
+    assert spy.quantity == pytest.approx(0.874449)
+    assert spy.mv_native == pytest.approx(625.9)           # sum of amounts (native USD)
+    assert spy.mv_eur == pytest.approx(625.9 * 0.9)        # crossed to EUR
+    assert spy.native_currency == "USD"
+    details = {d.symbol: d for d in snap.details}
+    d = details["SPY"]
+    assert d.lot_count == 3
+    assert d.opened_at == "2026-03-02T10:15:00.000Z"       # earliest of the 3 lots
+    assert d.invested_native == pytest.approx(625.9)
+    assert d.invested_eur == pytest.approx(625.9 * 0.9)
+    assert d.direction == "buy"
+    assert len(json.loads(d.raw_json)) == 3
 
 
-def test_fetch_etoro_snapshot_missing_symbol_raises():
-    class FakeClient:
-        def get_positions(self):
-            return [{"type": "Stocks", "units": 1.0, "invested": 100.0,
-                     "open_rate": 100.0, "open_date": "2024-01-01", "mv_native": 120.0,
-                     "pnl_native": 20.0, "leverage": 1.0, "currency": "USD"}]  # no symbol
-        def get_balances(self):
-            return {"cash": 0.0, "currency": "EUR"}
+def test_snapshot_single_shop_lot():
+    snap = etoro.fetch_etoro_snapshot(FixtureClient(), fx=_FX, as_of="2026-07-13")
+    shop = {p.symbol: p for p in snap.positions}["SHOP"]
+    assert shop.quantity == 4.0
+    assert shop.mv_native == pytest.approx(250.0)
+    assert shop.avg_open_price == pytest.approx(62.5)      # 250 / 4
+    d = {d.symbol: d for d in snap.details}["SHOP"]
+    assert d.lot_count == 1
+    assert d.opened_at == "2026-04-11T13:45:12.000Z"
+
+
+def test_snapshot_cash_from_credit():
+    snap = etoro.fetch_etoro_snapshot(FixtureClient(), fx=_FX, as_of="2026-07-13")
+    # clientPortfolio.credit 2857.0 USD * 0.9 -> EUR
+    assert snap.cash_balance_eur == pytest.approx(2857.0 * 0.9)
+    assert snap.source == "api_pull"
+
+
+def test_snapshot_pnl_fields_are_none_no_live_mv_in_payload():
+    snap = etoro.fetch_etoro_snapshot(FixtureClient(), fx=_FX, as_of="2026-07-13")
+    for d in snap.details:
+        assert d.unrealized_pnl_native is None
+        assert d.unrealized_pnl_pct is None
+
+
+def test_snapshot_fetches_metadata_for_distinct_instrument_ids_once():
+    client = FixtureClient()
+    etoro.fetch_etoro_snapshot(client, fx=_FX, as_of="2026-07-13")
+    # exactly one get_instruments call, for the two distinct ids
+    assert len(client.instrument_calls) == 1
+    assert sorted(client.instrument_calls[0]) == [3000, 4148]
+
+
+def test_snapshot_direction_short_from_is_buy_false():
+    portfolio = {"clientPortfolio": {"credit": 0.0, "positions": [
+        {"instrumentID": 3000, "units": 1.0, "amount": 100.0, "openRate": 100.0,
+         "openDateTime": "2024-01-01T00:00:00.000Z", "isBuy": False, "leverage": 1.0}]}}
+    snap = etoro.fetch_etoro_snapshot(FixtureClient(portfolio=portfolio), fx=_FX, as_of="2026-07-13")
+    assert snap.details[0].direction == "sell"
+
+
+def test_snapshot_leveraged_lot_flows_through():
+    portfolio = {"clientPortfolio": {"credit": 0.0, "positions": [
+        {"instrumentID": 3000, "units": 1.0, "amount": 100.0, "openRate": 100.0,
+         "openDateTime": "2024-01-01T00:00:00.000Z", "isBuy": True, "leverage": 2.0}]}}
+    snap = etoro.fetch_etoro_snapshot(FixtureClient(portfolio=portfolio), fx=_FX, as_of="2026-07-13")
+    assert snap.positions[0].leverage == 2.0
+
+
+# -- shape guards ------------------------------------------------------------
+def test_snapshot_rejects_non_dict_portfolio():
+    class C:
+        def get_portfolio(self):
+            return ["not a dict"]
+        def get_instruments(self, ids):
+            return []
     with pytest.raises(etoro.EtoroError) as exc:
-        etoro.fetch_etoro_snapshot(FakeClient(), fx=_FX, as_of="2026-07-10")
-    assert "position missing symbol" in str(exc.value)
+        etoro.fetch_etoro_snapshot(C(), fx=_FX, as_of="2026-07-13")
+    assert "portfolio object" in str(exc.value)
+
+
+def test_snapshot_rejects_missing_client_portfolio():
+    class C:
+        def get_portfolio(self):
+            return {"somethingElse": {}}
+        def get_instruments(self, ids):
+            return []
+    with pytest.raises(etoro.EtoroError) as exc:
+        etoro.fetch_etoro_snapshot(C(), fx=_FX, as_of="2026-07-13")
+    assert "clientPortfolio" in str(exc.value)
+
+
+def test_snapshot_rejects_non_list_positions():
+    portfolio = {"clientPortfolio": {"positions": {"bad": 1}, "credit": 0.0}}
+    with pytest.raises(etoro.EtoroError) as exc:
+        etoro.fetch_etoro_snapshot(FixtureClient(portfolio=portfolio), fx=_FX, as_of="2026-07-13")
+    assert "list of positions" in str(exc.value)
+
+
+def test_snapshot_rejects_non_dict_position_element():
+    portfolio = {"clientPortfolio": {"positions": ["nope"], "credit": 0.0}}
+    with pytest.raises(etoro.EtoroError):
+        etoro.fetch_etoro_snapshot(FixtureClient(portfolio=portfolio), fx=_FX, as_of="2026-07-13")
+
+
+def test_snapshot_rejects_position_missing_instrument_id():
+    portfolio = {"clientPortfolio": {"credit": 0.0, "positions": [
+        {"units": 1.0, "amount": 100.0, "openDateTime": "2024-01-01T00:00:00.000Z"}]}}
+    with pytest.raises(etoro.EtoroError) as exc:
+        etoro.fetch_etoro_snapshot(FixtureClient(portfolio=portfolio), fx=_FX, as_of="2026-07-13")
+    assert "instrumentID" in str(exc.value)
+
+
+def test_snapshot_raises_when_metadata_missing_for_an_instrument():
+    # portfolio references instrumentID 9999 but metadata resolves nothing for it
+    portfolio = {"clientPortfolio": {"credit": 0.0, "positions": [
+        {"instrumentID": 9999, "units": 1.0, "amount": 100.0, "openRate": 100.0,
+         "openDateTime": "2024-01-01T00:00:00.000Z", "isBuy": True, "leverage": 1.0}]}}
+    with pytest.raises(etoro.EtoroError) as exc:
+        etoro.fetch_etoro_snapshot(FixtureClient(portfolio=portfolio), fx=_FX, as_of="2026-07-13")
+    assert "metadata unavailable" in str(exc.value)
+
+
+def test_snapshot_raises_when_instrument_has_no_symbol():
+    portfolio = {"clientPortfolio": {"credit": 0.0, "positions": [
+        {"instrumentID": 3000, "units": 1.0, "amount": 100.0, "openRate": 100.0,
+         "openDateTime": "2024-01-01T00:00:00.000Z", "isBuy": True, "leverage": 1.0}]}}
+    instruments = {"instrumentDisplayDatas": [
+        {"instrumentID": 3000, "symbolFull": "", "instrumentTypeID": 6}]}
+    with pytest.raises(etoro.EtoroError) as exc:
+        etoro.fetch_etoro_snapshot(
+            FixtureClient(portfolio=portfolio, instruments=instruments), fx=_FX, as_of="2026-07-13")
+    assert "symbolFull" in str(exc.value)
+
+
+# -- end-to-end: the fixture snapshot ingests via mirror.ingest_snapshot -----
+def test_snapshot_ingests_via_mirror(tmp_db):
+    from agentcy import db, mirror
+    from agentcy.clock import SystemClock
+    snap = etoro.fetch_etoro_snapshot(FixtureClient(), fx=_FX, as_of="2026-07-13")
+    snapshot_id, deltas = mirror.ingest_snapshot(tmp_db, snap, clock=SystemClock())
+    row = db.fetch_latest_snapshot(tmp_db)
+    assert row["source"] == "api_pull"
+    # two positions land (SPY collapsed from 3 lots, SHOP from 1)
+    assert {p["symbol"] for p in db.fetch_positions_records(tmp_db, snapshot_id)} == {"SPY", "SHOP"}
+    details = db.fetch_position_details(tmp_db, snapshot_id)
+    by_symbol = {d["symbol"]: d for d in details}
+    assert by_symbol["SPY"]["lot_count"] == 3
+    assert by_symbol["SHOP"]["lot_count"] == 1
+    # baseline snapshot: no leverage violations in the sanitized fixture
+    assert [d.kind for d in deltas] == []

@@ -19,7 +19,15 @@ from typing import Any, Callable
 from agentcy import mirror  # mirror does not import etoro -> no circular import
 from agentcy.fetch import store
 
-_DEFAULT_HOST = "https://api.etoro.com"  # base host; exact endpoint paths TBD vs api-portal docs
+_DEFAULT_HOST = "https://public-api.etoro.com"  # eToro public API host (verified live)
+
+# Cloudflare in front of the public API returns HTTP 403 "Error 1010
+# browser_signature_banned" for the default urllib User-Agent. A browser UA is
+# REQUIRED on every request — this is a confirmed, real blocker, not cosmetic.
+_BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+)
 
 
 class EtoroError(Exception):
@@ -52,13 +60,21 @@ class EtoroClient:
 
     # -- transport -----------------------------------------------------------
     def _get(self, path: str) -> Any:
-        """GET one path with the three auth headers; a fresh uuid4 per request."""
+        """GET one path with all four required headers; a fresh uuid4 per request.
+
+        Headers (verified against the live eToro public API):
+          - x-api-key    : the short "Public API Key" (env AGENTCY_ETORO_API_KEY)
+          - x-user-key   : the base64 JSON "User Key"  (env AGENTCY_ETORO_USER_KEY)
+          - x-request-id : a fresh uuid4 per request
+          - user-agent   : a browser UA — REQUIRED, or Cloudflare 403s (Error 1010)
+        """
         req = urllib.request.Request(
             f"{self._base}/{path.lstrip('/')}", method="GET",
             headers={
                 "x-request-id": str(uuid.uuid4()),
                 "x-api-key": self._api_key,
                 "x-user-key": self._user_key,
+                "user-agent": _BROWSER_UA,
                 "Accept": "application/json",
             })
         try:
@@ -78,101 +94,122 @@ class EtoroClient:
             raise EtoroError(f"transport error: {reason}") from e
 
     # -- READ methods only ---------------------------------------------------
-    # Endpoint path strings are placeholders; exact eToro paths get reconciled
-    # against api-portal.etoro.com at wiring time. No mutating method exists here.
-    def get_positions(self) -> list[dict]:
-        return list(self._get("api/v1/user/positions") or [])
-
+    # Only the two real eToro public-API GET endpoints. No mutating method
+    # exists here by construction (the "never executes trades" charter).
     def get_portfolio(self) -> dict:
-        return self._get("api/v1/user/portfolio") or {}
+        """GET /api/v1/trading/info/portfolio -> the raw JSON body.
 
-    def get_balances(self) -> dict:
-        return self._get("api/v1/user/balances") or {}
+        The body wraps the holdings under "clientPortfolio": {positions, credit, ...}.
+        """
+        return self._get("api/v1/trading/info/portfolio") or {}
+
+    def get_instruments(self, instrument_ids) -> list[dict]:
+        """GET /api/v1/market-data/instruments?instrumentIDs=id1,id2,... -> the
+        list under "instrumentDisplayDatas" (instrumentID -> symbolFull + type).
+
+        `instrument_ids` is an iterable of ints/strings; an empty set short-circuits
+        (no network) to []."""
+        ids = [str(i) for i in instrument_ids]
+        if not ids:
+            return []
+        joined = ",".join(ids)
+        body = self._get(f"api/v1/market-data/instruments?instrumentIDs={joined}")
+        if isinstance(body, dict):
+            return list(body.get("instrumentDisplayDatas") or [])
+        return []
 
 
-# -- pure transforms (Task 4) ------------------------------------------------
+# -- pure transforms ---------------------------------------------------------
 # No I/O, no network: instrument-type mapping onto the schema taxonomy and
-# per-symbol lot aggregation (canonical `position` PK is (snapshot_id, symbol),
-# so a symbol's multiple open lots must collapse to ONE row).
+# per-instrument lot aggregation (canonical `position` PK is (snapshot_id, symbol),
+# so an instrument's multiple open lots must collapse to ONE row).
 
-_TYPE_MAP = {
-    "stocks": "stock", "stock": "stock",
-    "etf": "etf", "etfs": "etf",
-    "crypto": "crypto", "cryptocurrencies": "crypto", "cryptocurrency": "crypto",
-    "copyportfolio": "copyportfolio", "copyportfolios": "copyportfolio",
-}
+# eToro's real portfolio has no per-position native currency field; amounts are
+# settled/quoted in USD ("initialAmountInDollars"). USD is the native currency and
+# the FX seam crosses it to EUR downstream.
+_NATIVE_CCY = "USD"
+
+# instrumentTypeID -> schema taxonomy. 5 = stock, 6 = ETF are the confirmed live
+# values; anything else is best-effort-defaulted (the existing 'stock' default).
+_TYPE_ID_MAP = {5: "stock", 6: "etf"}
+_DEFAULT_TYPE = "stock"
 
 
-def map_instrument_type(raw: str) -> str:
-    """Map an eToro instrument-type label onto the schema taxonomy.
+def map_instrument_type(type_id) -> str:
+    """Map an eToro numeric ``instrumentTypeID`` onto the schema taxonomy.
 
-    Case-insensitive and trimmed. Unknown labels raise EtoroError rather than
-    silently mis-mapping — mapping to the wrong taxonomy is a correctness bug.
+    5 -> 'stock', 6 -> 'etf'. Any other (or missing) id maps best-effort to the
+    existing default ('stock') rather than raising — the taxonomy only gates
+    balance/outside-framework accounting, and an unknown eToro instrument type
+    must not crash the whole pull.
     """
-    key = (raw or "").strip().lower()
-    if key not in _TYPE_MAP:
-        raise EtoroError(f"unknown eToro instrument type: {raw!r}")
-    return _TYPE_MAP[key]
+    try:
+        key = int(type_id)
+    except (TypeError, ValueError):
+        return _DEFAULT_TYPE
+    return _TYPE_ID_MAP.get(key, _DEFAULT_TYPE)
 
 
 def aggregate_lots(symbol: str, lots: list[dict]) -> dict:
-    """Collapse a symbol's open lots into one aggregate position row.
+    """Collapse an instrument's open lots (real eToro position objects) into one
+    aggregate position row.
 
-    quantity/invested/mv/pnl sum; opened_at = earliest lot; leverage = max
-    (so any leveraged lot trips the tripwire); avg_open_price is cost basis
-    per unit (None when quantity is zero).
+    Real position objects carry only ENTRY data — there is NO current-market-value
+    or unrealized-PnL field — so we map what is present:
+      quantity      = sum(units)
+      invested/mv   = sum(amount)   (invested-native; current MV comes from yfinance)
+      opened_at     = min(openDateTime)   (the invested moment; earliest lot)
+      avg_open_price= sum(amount)/sum(units)   (None when quantity is zero)
+      leverage      = max(leverage)   (any leveraged lot trips the Hell-No tripwire)
+      direction     = 'buy' if the first lot isBuy else 'sell'
     """
     units = sum(lot["units"] for lot in lots)
-    invested = sum(lot["invested"] for lot in lots)
+    invested = sum(lot["amount"] for lot in lots)
     return {
         "symbol": symbol,
         "quantity": units,
         "invested_native": invested,
         "avg_open_price": (invested / units) if units else None,
-        "opened_at": min(lot["open_date"] for lot in lots),  # ISO-8601 dates: lexicographic min == chronological earliest
-        "mv_native": sum(lot["mv_native"] for lot in lots),
-        "pnl_native": sum(lot["pnl_native"] for lot in lots),
+        # openDateTime is ISO-8601 with a trailing Z: lexicographic min == earliest.
+        "opened_at": min(lot["openDateTime"] for lot in lots),
+        "mv_native": invested,          # no live MV in the payload; invested is the native value
         "leverage": max(lot.get("leverage", 1.0) for lot in lots),
         "lot_count": len(lots),
+        "direction": "buy" if lots[0].get("isBuy", True) else "sell",
     }
 
 
-# -- snapshot adapter (Task 5) ----------------------------------------------
-# Turns the client's raw positions/balances into the canonical SnapshotIn, capturing
-# rich per-position detail. FX is an INJECTABLE seam (callable) so tests are deterministic
+# -- snapshot adapter --------------------------------------------------------
+# Turns the client's raw portfolio into the canonical SnapshotIn, capturing rich
+# per-position detail. FX is an INJECTABLE seam (callable) so tests are deterministic
 # and no network is needed. mirror does not import etoro, so this import is not circular.
-# eToro lot dict -> the keys aggregate_lots expects. The eToro field names are
-# placeholders reconciled at wiring time; we normalize from the input keys here.
-_LOT_KEYS = ("units", "invested", "open_rate", "open_date", "mv_native", "pnl_native", "leverage")
-
-
-def _is_cash(pos: dict) -> bool:
-    """A cash entry is not an instrument — it is folded/skipped (cash comes from balances)."""
-    if str(pos.get("symbol", "")).strip().upper() == "CASH":
-        return True
-    return str(pos.get("type", "")).strip().lower() == "cash"
-
-
-def _normalize_lot(pos: dict) -> dict:
-    """Project a raw eToro position dict onto the keys aggregate_lots consumes."""
-    lot = {k: pos[k] for k in _LOT_KEYS if k in pos}
-    lot.setdefault("leverage", 1.0)
-    return lot
 
 
 def fetch_etoro_snapshot(
     client, *, fx: Callable[[float, str], float], as_of: str
 ) -> "mirror.SnapshotIn":
-    """Adapt the eToro client's data into a canonical SnapshotIn + per-position details.
+    """Adapt the eToro public-API portfolio into a canonical SnapshotIn + details.
 
-    `fx(amount, currency) -> eur` converts native amounts to EUR (injectable seam).
-    `as_of` is an ISO date string. Cash entries in positions are folded/skipped; cash
-    comes from get_balances(). Multiple lots per symbol collapse to one PositionIn +
-    one PositionDetailIn (canonical position PK is (snapshot_id, symbol)).
+    Contract:
+      - client.get_portfolio() -> {"clientPortfolio": {"positions": [...], "credit": N}}
+      - client.get_instruments(ids) -> [{"instrumentID", "symbolFull", "instrumentTypeID"}]
+
+    `fx(amount, currency) -> eur` converts native (USD) amounts to EUR (injectable seam).
+    `as_of` is an ISO date string. Lots are grouped by ``instrumentID``, each id is
+    resolved to its ``symbolFull`` ticker + type, multiple lots per instrument collapse
+    to one PositionIn + one PositionDetailIn, and cash comes from ``clientPortfolio.credit``.
     """
-    raw_positions = client.get_positions()
-    # SHAPE GUARD: a malformed API body may be coerced to dict-keys; reject anything
-    # that is not a list of dicts so a bad payload can't silently corrupt the snapshot.
+    portfolio = client.get_portfolio()
+    if not isinstance(portfolio, dict):
+        raise EtoroError(
+            f"expected a portfolio object, got {type(portfolio).__name__}")
+    client_portfolio = portfolio.get("clientPortfolio")
+    if not isinstance(client_portfolio, dict):
+        raise EtoroError(
+            "eToro portfolio body missing 'clientPortfolio' object")
+    raw_positions = client_portfolio.get("positions", [])
+    # SHAPE GUARD: reject anything that is not a list of dicts so a bad payload
+    # can't silently corrupt the snapshot.
     if not isinstance(raw_positions, list):
         raise EtoroError(
             f"expected a list of positions, got {type(raw_positions).__name__}")
@@ -181,41 +218,42 @@ def fetch_etoro_snapshot(
             raise EtoroError(
                 f"expected each position to be a dict, got {type(element).__name__}")
 
-    # Partition out cash; group the rest by symbol (order-preserving on first sight).
-    groups: dict[str, list[dict]] = {}
+    # Group lots by instrumentID (order-preserving on first sight).
+    groups: dict[int, list[dict]] = {}
     for pos in raw_positions:
-        if _is_cash(pos):
-            continue
-        # The shape guard only guarantees dicts, not a `symbol` key; raise a typed
-        # error (not a bare KeyError) consistent with the rest of the shape-guarding.
-        if not pos.get("symbol"):
-            raise EtoroError(f"position missing symbol: {pos!r}")
-        groups.setdefault(pos["symbol"], []).append(pos)
+        iid = pos.get("instrumentID")
+        if iid is None:
+            raise EtoroError(f"position missing instrumentID: {pos!r}")
+        groups.setdefault(iid, []).append(pos)
+
+    # One metadata call for the distinct instrumentIDs -> symbolFull + type.
+    meta = _resolve_instruments(client, list(groups.keys()))
 
     position_ins: list[mirror.PositionIn] = []
     detail_ins: list[mirror.PositionDetailIn] = []
-    for symbol, lots in groups.items():
-        agg = aggregate_lots(symbol, [_normalize_lot(p) for p in lots])
-        itype = map_instrument_type(lots[0].get("type", ""))
-        native_ccy = lots[0].get("currency", "EUR")
-        mv_eur = fx(agg["mv_native"], native_ccy)
+    for iid, lots in groups.items():
+        info = meta.get(iid)
+        if info is None:
+            raise EtoroError(f"instrument metadata unavailable for instrumentID {iid}")
+        symbol = info["symbol"]
+        itype = info["instrument_type"]
+        agg = aggregate_lots(symbol, lots)
+        mv_native = agg["mv_native"]
+        mv_eur = fx(mv_native, _NATIVE_CCY)
         invested_native = agg["invested_native"]
-        invested_eur = fx(invested_native, native_ccy)
-        # group-level fields (currency, type, direction, current_rate) taken from the
-        # first lot — all lots of a symbol are assumed to share these; revisit if
-        # hedged/mixed-direction positions appear.
+        invested_eur = fx(invested_native, _NATIVE_CCY)
         first = lots[0]
         position_ins.append(mirror.PositionIn(
             symbol=symbol, yf_ticker=mirror._yf_for(symbol, itype), instrument_type=itype,
             quantity=agg["quantity"], avg_open_price=agg["avg_open_price"],
-            native_currency=native_ccy, mv_native=agg["mv_native"], mv_eur=mv_eur,
+            native_currency=_NATIVE_CCY, mv_native=mv_native, mv_eur=mv_eur,
             weight=0.0, leverage=agg["leverage"]))  # weight filled after totals
         detail_ins.append(mirror.PositionDetailIn(
             symbol=symbol, opened_at=agg["opened_at"], invested_native=invested_native,
-            invested_eur=invested_eur, unrealized_pnl_native=agg["pnl_native"],
-            unrealized_pnl_pct=(agg["pnl_native"] / invested_native * 100)
-            if invested_native else None,
-            current_rate=first.get("current_rate"), direction=first.get("direction"),
+            invested_eur=invested_eur,
+            # no unrealized-PnL data in the portfolio payload (entry-only)
+            unrealized_pnl_native=None, unrealized_pnl_pct=None,
+            current_rate=first.get("openRate"), direction=agg["direction"],
             lot_count=agg["lot_count"], raw_json=json.dumps(lots, default=str)))
 
     # weight = fraction of invested MV (mirror the CSV/manual adapters); ingest recomputes
@@ -224,14 +262,35 @@ def fetch_etoro_snapshot(
     position_ins = [
         dataclasses.replace(p, weight=p.mv_eur / total) for p in position_ins]
 
-    balances = client.get_balances()
-    cash_native = balances.get("cash", 0.0)
-    cash_ccy = balances.get("currency", "EUR")
-    cash_balance_eur = fx(cash_native, cash_ccy)
+    # Available cash balance is clientPortfolio.credit (native ~USD).
+    cash_native = client_portfolio.get("credit", 0.0) or 0.0
+    cash_balance_eur = fx(cash_native, _NATIVE_CCY)
 
     return mirror.SnapshotIn(
         as_of=as_of, source="api_pull", cash_balance_eur=cash_balance_eur,
         positions=tuple(position_ins), details=tuple(detail_ins))
+
+
+def _resolve_instruments(client, instrument_ids: list) -> dict:
+    """One get_instruments call -> {instrumentID: {'symbol', 'instrument_type'}}.
+
+    Fails loud (EtoroError) if a resolved row is missing its symbolFull — a
+    position we cannot name must not silently vanish from the snapshot."""
+    out: dict = {}
+    for row in client.get_instruments(instrument_ids):
+        if not isinstance(row, dict):
+            continue
+        iid = row.get("instrumentID")
+        symbol = row.get("symbolFull")
+        if iid is None:
+            continue
+        if not symbol:
+            raise EtoroError(f"instrument {iid} has no symbolFull ticker")
+        out[iid] = {
+            "symbol": symbol,
+            "instrument_type": map_instrument_type(row.get("instrumentTypeID")),
+        }
+    return out
 
 
 # -- default FX factory (Task 7) --------------------------------------------
