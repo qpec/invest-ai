@@ -14,17 +14,15 @@ _FX = lambda amount, ccy: amount * 0.9 if ccy == "USD" else amount
 
 def _fake_client():
     class FakeClient:
-        def get_positions(self):
-            return [
-                {"symbol": "AAPL", "type": "Stocks", "units": 2.0, "invested": 400.0,
-                 "open_rate": 200.0, "open_date": "2024-06-01", "mv_native": 500.0,
-                 "pnl_native": 100.0, "leverage": 1.0, "currency": "USD"},
-                {"symbol": "AAPL", "type": "Stocks", "units": 1.0, "invested": 200.0,
-                 "open_rate": 200.0, "open_date": "2023-01-15", "mv_native": 250.0,
-                 "pnl_native": 50.0, "leverage": 1.0, "currency": "USD"},
-            ]
-        def get_balances(self):
-            return {"cash": 100.0, "currency": "USD"}
+        def get_portfolio(self):
+            return {"clientPortfolio": {"credit": 100.0, "positions": [
+                {"instrumentID": 4148, "units": 2.0, "amount": 400.0, "openRate": 200.0,
+                 "openDateTime": "2024-06-01T00:00:00.000Z", "isBuy": True, "leverage": 1.0},
+                {"instrumentID": 4148, "units": 1.0, "amount": 200.0, "openRate": 200.0,
+                 "openDateTime": "2023-01-15T00:00:00.000Z", "isBuy": True, "leverage": 1.0},
+            ]}}
+        def get_instruments(self, ids):
+            return [{"instrumentID": 4148, "symbolFull": "AAPL", "instrumentTypeID": 5}]
     return FakeClient()
 
 
@@ -35,7 +33,7 @@ def test_ingest_persists_position_detail_rows(tmp_db):
     assert len(rows) == 1                        # two AAPL lots collapse to one detail row
     (row,) = rows
     assert row["symbol"] == "AAPL"
-    assert row["opened_at"] == "2023-01-15"      # earliest lot
+    assert row["opened_at"] == "2023-01-15T00:00:00.000Z"   # earliest lot (invested moment)
     assert row["lot_count"] == 2
     assert row["invested_eur"] == 540.0          # (400+200) native USD * 0.9
 
@@ -63,16 +61,15 @@ def test_manual_snapshot_writes_zero_detail_rows(tmp_db):
 
 
 def _leveraged_client():
-    """A FakeClient with ONE leveraged (2x) SPY stock lot — trips the Hell-No tripwire."""
+    """A FakeClient with ONE leveraged (2x) SPY lot — trips the Hell-No tripwire."""
     class FakeClient:
-        def get_positions(self):
-            return [
-                {"symbol": "SPY", "type": "Stocks", "units": 3.0, "invested": 600.0,
-                 "open_rate": 200.0, "open_date": "2024-06-01", "mv_native": 720.0,
-                 "pnl_native": 120.0, "leverage": 2.0, "currency": "USD"},
-            ]
-        def get_balances(self):
-            return {"cash": 100.0, "currency": "USD"}
+        def get_portfolio(self):
+            return {"clientPortfolio": {"credit": 100.0, "positions": [
+                {"instrumentID": 3000, "units": 3.0, "amount": 600.0, "openRate": 200.0,
+                 "openDateTime": "2024-06-01T00:00:00.000Z", "isBuy": True, "leverage": 2.0},
+            ]}}
+        def get_instruments(self, ids):
+            return [{"instrumentID": 3000, "symbolFull": "SPY", "instrumentTypeID": 6}]
     return FakeClient()
 
 

@@ -18,15 +18,14 @@ def _wire(monkeypatch, tmp_db, fixed_clock):
 
 
 class _FakeClient:
-    def get_positions(self):
-        return [
-            {"symbol": "AAPL", "type": "Stocks", "units": 2.0, "invested": 400.0,
-             "open_rate": 200.0, "open_date": "2024-06-01", "mv_native": 500.0,
-             "pnl_native": 100.0, "leverage": 1.0, "currency": "USD"},
-        ]
+    def get_portfolio(self):
+        return {"clientPortfolio": {"credit": 100.0, "positions": [
+            {"instrumentID": 4148, "units": 2.0, "amount": 400.0, "openRate": 200.0,
+             "openDateTime": "2024-06-01T00:00:00.000Z", "isBuy": True, "leverage": 1.0},
+        ]}}
 
-    def get_balances(self):
-        return {"cash": 100.0, "currency": "USD"}
+    def get_instruments(self, ids):
+        return [{"instrumentID": 4148, "symbolFull": "AAPL", "instrumentTypeID": 5}]
 
 
 def _stub_fx_and_client(monkeypatch, cli):

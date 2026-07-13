@@ -1,0 +1,20 @@
+{
+  "instrumentDisplayDatas": [
+    {
+      "instrumentID": 3000,
+      "instrumentDisplayName": "State Street SPDR S&P 500 ETF",
+      "instrumentTypeID": 6,
+      "symbolFull": "SPY",
+      "exchangeID": 5,
+      "priceSource": "NASDAQ"
+    },
+    {
+      "instrumentID": 4148,
+      "instrumentDisplayName": "Shopify Inc.",
+      "instrumentTypeID": 5,
+      "symbolFull": "SHOP",
+      "exchangeID": 4,
+      "priceSource": "NASDAQ"
+    }
+  ]
+}

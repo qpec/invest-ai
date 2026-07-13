@@ -1,0 +1,71 @@
+{
+  "clientPortfolio": {
+    "positions": [
+      {
+        "positionID": 1000000001,
+        "CID": 111,
+        "instrumentID": 3000,
+        "openDateTime": "2026-05-06T14:59:25.403Z",
+        "openRate": 732.01,
+        "isBuy": true,
+        "units": 0.274449,
+        "amount": 200.9,
+        "initialAmountInDollars": 200.9,
+        "initialUnits": 0.274449,
+        "leverage": 1,
+        "totalFees": -0.44,
+        "lotCount": 0.274449
+      },
+      {
+        "positionID": 1000000002,
+        "CID": 111,
+        "instrumentID": 3000,
+        "openDateTime": "2026-03-02T10:15:00.000Z",
+        "openRate": 700.0,
+        "isBuy": true,
+        "units": 0.5,
+        "amount": 350.0,
+        "initialAmountInDollars": 350.0,
+        "initialUnits": 0.5,
+        "leverage": 1,
+        "totalFees": -0.7,
+        "lotCount": 0.5
+      },
+      {
+        "positionID": 1000000003,
+        "CID": 111,
+        "instrumentID": 3000,
+        "openDateTime": "2026-06-20T09:30:00.000Z",
+        "openRate": 750.0,
+        "isBuy": true,
+        "units": 0.1,
+        "amount": 75.0,
+        "initialAmountInDollars": 75.0,
+        "initialUnits": 0.1,
+        "leverage": 1,
+        "totalFees": -0.15,
+        "lotCount": 0.1
+      },
+      {
+        "positionID": 1000000004,
+        "CID": 111,
+        "instrumentID": 4148,
+        "openDateTime": "2026-04-11T13:45:12.000Z",
+        "openRate": 62.5,
+        "isBuy": true,
+        "units": 4.0,
+        "amount": 250.0,
+        "initialAmountInDollars": 250.0,
+        "initialUnits": 4.0,
+        "leverage": 1,
+        "totalFees": -0.5,
+        "lotCount": 4.0
+      }
+    ],
+    "credit": 2857.0,
+    "bonusCredit": 0.0,
+    "orders": [],
+    "mirrors": [],
+    "stockOrders": []
+  }
+}
