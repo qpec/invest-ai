@@ -253,6 +253,73 @@ def test_html_first_card_open_and_evidence_tables(built_html):
     assert "prefers-color-scheme" in built_html    # light+dark theme
 
 
+# --------------------------------------------- percent vs fraction units (§3.3)
+
+def test_pct_never_guesses_units_from_magnitude():
+    # ev.gap_pct is stored in PERCENT, mos.mos_pct as a FRACTION — the two overlap
+    # exactly where a magnitude guess breaks (|x| around 1.5).
+    assert datasheet._pct(1.2, stored="percent") == "1.2%"          # not 120.0%
+    assert datasheet._pct(1.5, stored="percent") == "1.5%"          # the old boundary
+    assert datasheet._pct(-0.8, stored="percent") == "-0.8%"
+    assert datasheet._pct(23.5, stored="percent") == "23.5%"
+    assert datasheet._pct(1.8, stored="fraction", signed=True) == "+180.0%"   # not +1.8%
+    assert datasheet._pct(0.214, stored="fraction", signed=True) == "+21.4%"
+    assert datasheet._pct(None, stored="fraction") == "—"
+    with pytest.raises(ValueError):
+        datasheet._pct(0.5, stored="maybe")                          # no guessing allowed
+
+
+def test_html_renders_small_ev_gap_and_large_mos_correctly(workdir, tmp_path):
+    grades = _grades()
+    row = grades["names"][0]
+    row["ev"] = {"own": 8.9e9, "yahoo": 8.79e9, "gap_pct": 1.2}      # percent: 1.2%
+    row["mos"]["mos_pct"] = 1.8                                      # fraction: +180%
+    path = tmp_path / "boundary-grades.json"
+    path.write_text(json.dumps(grades), encoding="utf-8")
+    doc = datasheet.build(path, cache_dir=workdir["cache"], top=10,
+                          out=tmp_path / "boundary.html").read_text(encoding="utf-8")
+    assert "gat: <span>1.2%</span>" in doc                            # not 120.0%
+    assert "120.0%" not in doc
+    assert ">+180.0%<" in doc                                         # not +1.8%
+    assert "+1.8%" not in doc
+
+
+def test_ev_row_surfaces_yahoo_source_when_present_and_degrades_when_not(workdir, tmp_path):
+    def build_with(ev: dict, name: str) -> str:
+        grades = _grades()
+        grades["names"][0]["ev"] = ev
+        path = tmp_path / f"{name}-grades.json"
+        path.write_text(json.dumps(grades), encoding="utf-8")
+        return datasheet.build(path, cache_dir=None, top=10,
+                               out=tmp_path / f"{name}.html").read_text(encoding="utf-8")
+
+    derived = build_with({"own": 8.9e9, "yahoo": 8.4e9, "gap_pct": 5.6,
+                          "yahoo_source": "derived"}, "derived")
+    assert "Referentie-EV (afgeleid" in derived
+    field = build_with({"own": 8.9e9, "yahoo": 10.6e9, "gap_pct": 19.1,
+                        "yahoo_source": "field"}, "field")
+    assert "Yahoo-EV (fast_info)" in field
+    legacy = build_with({"own": 8.9e9, "yahoo": 10.6e9, "gap_pct": 19.1}, "legacy")
+    assert "Yahoo-EV:" in legacy                     # no key -> neutral label, no crash
+
+
+# ------------------------------------------------- v3 weights come from the constant
+
+def test_quality_formula_is_rendered_from_w_quality(built_html, workdir, tmp_path,
+                                                    monkeypatch):
+    assert datasheet.W_QUALITY == {"q": 0.40, "g": 0.25, "d": 0.20, "m": 0.15}
+    formula = datasheet._weight_formula(datasheet.W_QUALITY)
+    assert formula == "0.40·Q + 0.25·G + 0.20·D + 0.15·M"
+    assert formula in built_html                     # the page shows the real constant
+    # ...and it is genuinely derived: change the constant, the page follows.
+    monkeypatch.setattr(datasheet, "W_QUALITY",
+                        {"q": 0.50, "g": 0.20, "d": 0.20, "m": 0.10})
+    doc = datasheet.build(workdir["grades"], cache_dir=None, top=10,
+                          out=tmp_path / "reweighted.html").read_text(encoding="utf-8")
+    assert "0.50·Q + 0.20·G + 0.20·D + 0.10·M" in doc
+    assert formula not in doc
+
+
 def test_build_degrades_gracefully_without_cache(workdir):
     out = datasheet.build(workdir["grades"], cache_dir=None,
                           stage2_dir=workdir["data"], top=10,

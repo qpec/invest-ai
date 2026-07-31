@@ -128,14 +128,18 @@ def avg_turnover_pct(turnovers: list[float]) -> float | None:
 
 # ------------------------------------------------------------- tick scoring (§5.10)
 
-def score_ticks(facts: dict, prices: dict, meta: dict, ticks: list[str]) -> dict:
+def score_ticks(facts: dict, prices: dict, meta: dict, ticks: list[str],
+                splits: dict | None = None) -> dict:
     """Per tick: PIT bundles for every symbol with facts -> scoring.score_universe
-    (the shared decision layer, §4). Returns {tick: §3.3 scored rows}."""
+    (the shared decision layer, §4). Returns {tick: §3.3 scored rows}. `splits` is the
+    §3.6 {symbol: {date: ratio}} map; as_of_bundle keeps only the events knowable at the
+    tick, so a splitter is not mistaken for a serial diluter (§6.14)."""
     out = {}
     for tick in ticks:
         bundles = []
         for symbol in sorted(facts):
-            bundle = pit.as_of_bundle(facts[symbol], symbol, meta.get(symbol), tick, prices)
+            bundle = pit.as_of_bundle(facts[symbol], symbol, meta.get(symbol), tick,
+                                      prices, splits)
             if bundle is not None:
                 bundles.append(bundle)
         out[tick] = scoring.score_universe(bundles)
@@ -234,13 +238,15 @@ def band_cohorts(scored_by_tick: dict, prices: dict, ticks: list[str]) -> dict:
 
 
 def run_backtest(facts: dict, prices: dict, meta: dict, *, start: str, end: str,
-                 top_n: int = 15, cost_bp: float = DEFAULT_COST_BP) -> dict:
+                 top_n: int = 15, cost_bp: float = DEFAULT_COST_BP,
+                 splits: dict | None = None) -> dict:
     """The pure §5.10 end-to-end core over preloaded dicts: SPY quarter grid ->
-    score_ticks -> strategy/pool/SPY tracks + band cohorts + tick log + disclosures."""
+    score_ticks -> strategy/pool/SPY tracks + band cohorts + tick log + disclosures.
+    `splits` (§3.6) keeps a stock split from reading as dilution at a tick (§6.14)."""
     ticks = pit.quarter_ends(prices.get("SPY") or {}, start, end)
     if len(ticks) < 2:
         raise ValueError("fewer than 2 rebalance ticks on the SPY grid for this range")
-    scored_by_tick = score_ticks(facts, prices, meta, ticks)
+    scored_by_tick = score_ticks(facts, prices, meta, ticks, splits)
     strategy = simulate(scored_by_tick, prices, ticks, top_n=top_n, cost_bp=cost_bp)
     pool = simulate(scored_by_tick, prices, ticks, top_n=None, cost_bp=0.0)
     pool.pop("tick_log")
@@ -303,9 +309,9 @@ def render_report(result: dict) -> str:
 # --------------------------------------------------------------------- I/O + CLI
 
 def load_bt_cache(bt_dir: str | Path = BT_DIR,
-                  universe_path: str | Path = "universe.csv") -> tuple[dict, dict, dict]:
+                  universe_path: str | Path = "universe.csv") -> tuple[dict, dict, dict, dict]:
     """bt_cache/ + universe.csv -> ({symbol: facts}, {symbol: price grid incl. SPY},
-    {symbol: meta}) for the pure cores (§3.6, §5.10).
+    {symbol: meta}, {symbol: split events}) for the pure cores (§3.6, §5.10).
 
     Every dict is keyed by the TRUE universe symbol, never by the filename stem: the
     writer sanitizes '/' to '-' (BRK/B -> BRK-B.json), so a stem key would miss its meta
@@ -322,14 +328,17 @@ def load_bt_cache(bt_dir: str | Path = BT_DIR,
                             "industry": row.get("industry")}
             by_stem[pit.cache_stem(symbol)] = symbol
 
-    facts, prices = {}, {}
+    facts, prices, splits = {}, {}, {}
     for path in sorted((bt_dir / "facts").glob("*.json")):
         payload = json.loads(path.read_text(encoding="utf-8"))
         facts[pit.facts_symbol(payload) or by_stem.get(path.stem) or path.stem] = payload
     for path in sorted((bt_dir / "prices").glob("*.json")):
-        symbol, grid = pit.load_price_file(json.loads(path.read_text(encoding="utf-8")))
-        prices[symbol or by_stem.get(path.stem) or path.stem] = grid
-    return facts, prices, meta
+        symbol, grid, events = pit.load_price_file(
+            json.loads(path.read_text(encoding="utf-8")))
+        key = symbol or by_stem.get(path.stem) or path.stem
+        prices[key] = grid
+        splits[key] = events
+    return facts, prices, meta, splits
 
 
 def write_reports(result: dict, md: str, stem: str,
@@ -355,7 +364,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--universe", default="universe.csv")
     args = ap.parse_args(argv)
 
-    facts, prices, meta = load_bt_cache(args.bt_cache, args.universe)
+    facts, prices, meta, splits = load_bt_cache(args.bt_cache, args.universe)
     if not facts or "SPY" not in prices:
         print("bt_cache is leeg of mist SPY — draai eerst bt_fetch.py", file=sys.stderr)
         return 1
@@ -365,6 +374,7 @@ def main(argv: list[str] | None = None) -> int:
               f"draagt latere splits/dividenden; draai bt_fetch.py opnieuw. "
               f"(staat ook in de disclosures)", file=sys.stderr)
     result = run_backtest(facts, prices, meta, start=args.start, end=args.end,
+                          splits=splits,
                           top_n=args.top_n, cost_bp=args.cost_bp)
     md_path, json_path = write_reports(result, render_report(result),
                                        f"backtest-{args.start}-{args.end}")

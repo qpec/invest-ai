@@ -71,6 +71,54 @@ def test_bootstrap_gate_and_rank_passers_enter():
     assert state["transfers"] == transfers                # append-only history seeded
 
 
+def test_bootstrap_fills_the_squad_and_a_real_bench():
+    # msg 58's first formation was 14 seated + 5 on the bench "waiting one more quarter
+    # for their evidence" — with 30 gate-passing names a bootstrap must produce BOTH.
+    scored = [graded(f"N{i:02d}", 100.0 - i, v=50) for i in range(30)]
+    state, transfers = formation.update(None, scored, Q3_A)
+    assert len(state["squad"]) == scoring.SLOTS == 15            # the seats, rank order
+    assert squad_syms(state) == {f"N{i:02d}" for i in range(15)}
+    bench = state["bench"]
+    assert [b["symbol"] for b in bench] == [f"N{i:02d}" for i in range(15, 30)]
+    assert all(b == {"symbol": b["symbol"], "streak": 1,
+                     "needed": scoring.PERSISTENCE_QUARTERS} for b in bench)
+    assert len(transfers) == 15                                 # bench seats nobody yet
+    assert {t["symbol"] for t in transfers} == squad_syms(state)
+
+
+def test_bench_band_stops_at_the_sell_line():
+    # A candidate ranked past EXIT_RANK is not a candidate at all: it would be sold the
+    # day it were seated, so it collects no evidence.
+    scored = [graded(f"N{i:02d}", 100.0 - i, v=50)
+              for i in range(scoring.EXIT_RANK + 5)]
+    state, _ = formation.update(None, scored, Q3_A)
+    assert len(state["squad"]) == scoring.SLOTS
+    assert len(state["bench"]) == scoring.EXIT_RANK - scoring.SLOTS
+    assert state["bench"][-1]["symbol"] == f"N{scoring.EXIT_RANK - 1:02d}"
+    assert formation.bench_rank() == scoring.EXIT_RANK
+
+
+def test_bench_candidate_from_outside_the_seats_is_promoted_when_it_rises():
+    # Bench evidence is only worth something when the name is ALSO back in the entry
+    # pool (rank <= SLOTS) and a slot is open — evidence plus a place, never one alone.
+    seated = [graded(f"S{i:02d}", 100.0 - i, v=50) for i in range(15)]
+    waiting = graded("WAIT", 80.0, v=50)                        # rank 16: bench, not pool
+    state, _ = formation.update(None, seated + [waiting], Q3_A)
+    assert "WAIT" not in squad_syms(state)
+    assert bench_by_sym(state)["WAIT"]["streak"] == 1
+
+    state, transfers = formation.update(state, seated + [waiting], Q4)
+    assert bench_by_sym(state)["WAIT"]["streak"] == 2           # evidence, but rank 16
+    assert transfers == []                                      # ...so still no seat
+
+    # A veto frees a slot AND WAIT rises into the top-15: now it may be seated.
+    dropped = seated[:14] + [vetoed("S14"), graded("WAIT", 95.0, v=50)]
+    state, transfers = formation.update(state, dropped, Q1_27)
+    assert "WAIT" in squad_syms(state)
+    assert [(t["action"], t["symbol"]) for t in transfers] == [("out", "S14"),
+                                                              ("in", "WAIT")]
+
+
 def test_bootstrap_gate_boundary_is_inclusive():
     state, _ = formation.update(None, [graded("EDGE", 90, v=scoring.GATE_V_PCTL)], Q3_A)
     assert squad_syms(state) == {"EDGE"}                  # V-pctl == 20.0 passes (>=)

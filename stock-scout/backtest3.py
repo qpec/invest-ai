@@ -342,7 +342,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--universe", default="universe.csv")
     args = ap.parse_args(argv)
 
-    facts, prices, meta = backtest.load_bt_cache(args.bt_cache, args.universe)
+    facts, prices, meta, splits = backtest.load_bt_cache(args.bt_cache, args.universe)
     if not facts or "SPY" not in prices:
         print("bt_cache is leeg of mist SPY — draai eerst bt_fetch.py", file=sys.stderr)
         return 1
@@ -356,7 +356,7 @@ def main(argv: list[str] | None = None) -> int:
         print("minder dan 2 ticks op het SPY-grid — te weinig prijshistorie",
               file=sys.stderr)
         return 1
-    scored_by_tick = backtest.score_ticks(facts, prices, meta, ticks)
+    scored_by_tick = backtest.score_ticks(facts, prices, meta, ticks, splits)
     span = f"{HALF_A[0]}-{HALF_B[1]}"
 
     if args.cohorts:

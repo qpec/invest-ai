@@ -320,7 +320,7 @@ def test_sanitized_symbol_round_trips_from_cache_files_back_to_its_universe_meta
     symbol = "BRK/B"
     bt_dir, universe = _write_cache(tmp_path, symbol)
     assert (bt_dir / "facts" / "BRK-B.json").exists()
-    facts, prices, meta = backtest.load_bt_cache(bt_dir, universe)
+    facts, prices, meta, _splits = backtest.load_bt_cache(bt_dir, universe)
     assert set(facts) == {symbol} and set(prices) == {symbol}
     assert meta[symbol]["sector"] == "Financials"
     assert pit.price_at(prices, symbol, "2024-06-28") == 110.0
@@ -335,13 +335,13 @@ def test_legacy_cache_files_resolve_through_the_universe_sanitized_name_map(tmp_
     # universe.csv, so an old bt_cache keeps working (its grid is flagged degraded).
     symbol = "BRK/B"
     bt_dir, universe = _write_cache(tmp_path, symbol, annotate=False, legacy_prices=True)
-    facts, prices, meta = backtest.load_bt_cache(bt_dir, universe)
+    facts, prices, meta, _splits = backtest.load_bt_cache(bt_dir, universe)
     assert set(facts) == {symbol} and set(prices) == {symbol}
     assert meta[symbol]["sector"] == "Financials"
     assert backtest.degraded_price_symbols(prices) == [symbol]
     # With no universe row to reverse it, the stem is all that is left — and it is honest.
     empty = tmp_path / "nothing.csv"
-    facts, prices, _ = backtest.load_bt_cache(bt_dir, empty)
+    facts, prices, _, _ = backtest.load_bt_cache(bt_dir, empty)
     assert set(facts) == {"BRK-B"} and set(prices) == {"BRK-B"}
 
 

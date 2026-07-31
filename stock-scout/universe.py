@@ -128,7 +128,7 @@ def _drop_group_warrant_symbols(d: pd.DataFrame) -> pd.DataFrame:
     stems = set(zip(d["_norm"], d["symbol"]))
     derivative = [len(s) > 1 and s[-1] in "WU" and (n, s[:-1]) in stems
                   for n, s in zip(d["_norm"], d["symbol"])]
-    return d[~pd.Series(derivative, index=d.index)]
+    return d[~pd.Series(derivative, index=d.index, dtype=bool)]
 
 
 def filter_universe(df: pd.DataFrame, *, broad: bool = False) -> pd.DataFrame:
@@ -147,7 +147,9 @@ def filter_universe(df: pd.DataFrame, *, broad: bool = False) -> pd.DataFrame:
         d = d[d["market_cap"].isin(CAPS_BROAD)]
     else:
         d = d[d["sector"].isin(CORE_SECTORS) & d["market_cap"].isin(CAPS_DEFAULT)]
-    d = d[~d["name"].map(is_derivative_line)]          # warrants/units are not companies
+    # Warrants/units are not companies (dtype=bool keeps an EMPTY mask a mask, not a
+    # list of column labels).
+    d = d[~d["name"].map(is_derivative_line).astype(bool)]
     d = d.drop_duplicates(subset="symbol", keep="first").reset_index(drop=True)
     d["_norm"] = d["name"].map(normalize_name)
     d = _drop_group_warrant_symbols(d)

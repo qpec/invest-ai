@@ -62,6 +62,7 @@ def build_bundle(cache_entry: dict) -> dict:
         "yahoo_ev": fi.get("enterprise_value", fi.get("enterpriseValue")),
         "price": (cache_entry.get("price") or {}).get("close"),
         "shares_series": [[d, v] for d, v in sorted((cache_entry.get("shares") or {}).items())],
+        "splits": cache_entry.get("splits") or {},   # §3.2 — a split is not dilution (§4.3)
         "annual": cache_entry.get("annual") or {},
         "quarterly": cache_entry.get("quarterly") or {},
     }
