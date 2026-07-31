@@ -1,0 +1,9 @@
+cache/
+cache-*/
+bt_cache/
+__pycache__/
+*.pyc
+progress.json
+failures.log
+data/equities.bz2
+universe.csv

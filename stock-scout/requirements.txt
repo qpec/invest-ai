@@ -1,0 +1,7 @@
+# Runtime dependencies of the stock-scout pipeline (chat msg 4: venv met yfinance/pandas/scipy)
+yfinance
+pandas
+scipy
+
+# dev/test
+pytest
