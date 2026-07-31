@@ -1,0 +1,56 @@
+{
+  "run_date": "2026-07-30",
+  "note": "Stage-2 qualitative validation layer, reconstructed from the 2026-07-30 chat history (msg 39). Each analysis weighs the model metrics (composite, MoS, Buffett-lens, flags) against fresh H1-2026 context. Source URLs were not preserved in the history; titles are.",
+  "analyses": {
+    "EXEL": {
+      "verdict": "Sterke kandidaat",
+      "analysis": "De enige naam waar álle lagen groen zijn: 13/13 op de Buffett-lens, geen dataflags, net cash en eigen inkoop. Katalysator en risico ineen: het zanzalintinib-besluit van 3 december — de franchise-verbreding voorbij cabozantinib moet zich daar bewijzen.",
+      "sources": [{"title": "Exelixis Q1 2026 resultaten", "url": null}]
+    },
+    "ADBE": {
+      "verdict": "Sterke kandidaat",
+      "analysis": "Contrarian: -43% op AI-paniek terwijl de guidance +11% doet en Firefly +75% kwartaal-op-kwartaal groeit; 8,2% owner-FCF-yield. Brede moat, vrijwel maximale Buffett-lens. De weddenschap is binair: AI versterkt Adobe, of disrupt het. De cijfers zeggen vooralsnog het eerste.",
+      "sources": [{"title": "Adobe 2026-outlook", "url": null}]
+    },
+    "YOU": {
+      "verdict": "Kandidaat met voorbehoud",
+      "analysis": "De cijfers versnellen (bookings +40,8%, FCF-guidance verhoogd naar ≥$465 mln), maar alle drie de dataflags staan aan (eigen-EV-gat, share-class/Up-C, float-gedreven ROIC), de Buffett-lens is zwak (6/13) en TSA rolt een gratis Touchless ID-alternatief uit. Klein sizen; Q2 (augustus) is het checkpoint: houdt CLEAR+ de 13%+ vast, wat doet Touchless ID met churn?",
+      "sources": [{"title": "CLEAR Q1 2026", "url": null}, {"title": "ID Tech — CLEAR/TSA-partnership", "url": null}]
+    },
+    "GDDY": {
+      "verdict": "Kandidaat",
+      "analysis": "Kasstroommachine op een nette waardering; de kernvraag is cashflow-zonder-groei: de omzetgroei is mager en de score leunt op inkoop plus marge. Zolang de domein/hosting-kern niet krimpt is dit een degelijke compounder, geen versneller.",
+      "sources": [{"title": "GoDaddy Q1-transcript", "url": null}]
+    },
+    "HALO": {
+      "verdict": "Kandidaat",
+      "analysis": "ENHANZE-royaltyplatform met extreem hoge ROIC en net cash. De kernvraag is de royalty-staart na 2028: aflopende deals en partnerconcentratie bepalen of de huidige kasstroom een plateau of een piek is.",
+      "sources": [{"title": "Halozyme FY25/guidance", "url": null}]
+    },
+    "UTHR": {
+      "verdict": "Kandidaat",
+      "analysis": "Net cash en goedkoop op owner-FCF; de PAH-franchise draait. De kernvraag is de Yutrepia-strijd: Liquidia's lancering deed $130 mln in Q1 (+44% k/k) en drukt direct op Tyvaso — het tempo van die erosie bepaalt de these.",
+      "sources": [{"title": "UTHR 10-Q", "url": null}]
+    },
+    "RMD": {
+      "verdict": "Kandidaat",
+      "analysis": "Slaapapneu-duopolist sinds Philips wegviel; GLP-1-angst is weggeëbd uit de cijfers. Dunste MoS van de top-10 (+9%): je betaalt een faire prijs voor kwaliteit. Kernvraag is de GLP-1-horizon op lange termijn, niet het volgende kwartaal.",
+      "sources": [{"title": "ResMed vs GLP-1", "url": null}]
+    },
+    "CRM": {
+      "verdict": "Kandidaat",
+      "analysis": "Verse TTM-FCF op een AI-angst-waardering; de zwakste D-pijler van de top-10 (49). De kernvraag is de beloofde her-versnelling: als de omzetgroei niet aantrekt, is dit een waarde-aandeel met een groei-multiple-verleden.",
+      "sources": [{"title": "Salesforce Q4 FY26", "url": null}]
+    },
+    "MEDP": {
+      "verdict": "Kandidaat",
+      "analysis": "Beste momentum van de lijst: bookings +28%, C→B op verse TTM-cijfers. De kernvraag is de biotech-funding-cyclus — Medpace's klanten zijn kleine biotechs; hun financieringsklimaat is Medpace's omzet met een jaar vertraging.",
+      "sources": [{"title": "Medpace Q2", "url": null}]
+    },
+    "APP": {
+      "verdict": "Terughoudend",
+      "analysis": "Het model beloont momentum-achtige metrics, maar de MoS zegt -43% en er loopt een betwist short-sellerrapport. Verhaal-positie, geen waarde-anker: wie dit koopt, koopt de voortzetting van een uitzonderlijke run, niet een veiligheidsmarge.",
+      "sources": [{"title": "AppLovin short-seller", "url": null}]
+    }
+  }
+}
