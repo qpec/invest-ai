@@ -119,8 +119,8 @@ def _paced_call(state_dir: Path, fn):
 
 def _raw_history(yf_ticker: str, period: str):
     """The one Ticker.history touch. auto_adjust=False so Close AND Adj Close arrive;
-    actions=True so Dividends ride the same bar fetch. Currency comes from
-    history_metadata — no extra request."""
+    actions=True so Dividends AND Stock Splits ride the same bar fetch. Currency comes
+    from history_metadata — no extra request."""
     t = yf.Ticker(yf_ticker)
     frame = t.history(period=period, auto_adjust=False, actions=True)
     meta = getattr(t, "history_metadata", None) or {}
@@ -128,9 +128,14 @@ def _raw_history(yf_ticker: str, period: str):
 
 
 def fetch_daily_bars(yf_ticker: str, *, state_dir: Path, period: str = "10d") -> pd.DataFrame:
-    """Ticker.history bars incl. dividends; raises FetchFailed on empty/NaN/non-positive
-    closes. Returns the normalized frame: DatetimeIndex, columns exactly
-    [close, adj_close, dividend, currency]."""
+    """Ticker.history bars incl. dividends AND split events; raises FetchFailed on
+    empty/NaN/non-positive closes. Returns the normalized frame: DatetimeIndex, columns
+    exactly [close, adj_close, dividend, split, currency].
+
+    `split` carries Yahoo's "Stock Splits" ratio (0.0 on ordinary days, e.g. 2.0 on the
+    effective date of a 2-for-1). It rides this one history call — populate asks for a
+    multi-year `period` so the split history covering the cached share series arrives
+    WITHOUT a second Yahoo request (§3.2 "splits", §5.2)."""
     configure()
     frame, currency = _paced_call(state_dir, lambda: _raw_history(yf_ticker, period))
     if frame is None or len(frame) == 0:
@@ -139,11 +144,13 @@ def fetch_daily_bars(yf_ticker: str, *, state_dir: Path, period: str = "10d") ->
     if missing:
         raise FetchFailed(f"{yf_ticker}: history frame missing columns {missing}")
     dividends = frame["Dividends"] if "Dividends" in frame.columns else pd.Series(0.0, index=frame.index)
+    splits = frame["Stock Splits"] if "Stock Splits" in frame.columns else pd.Series(0.0, index=frame.index)
     out = pd.DataFrame(
         {
             "close": frame["Close"].astype(float),
             "adj_close": frame["Adj Close"].astype(float),
             "dividend": dividends.fillna(0.0).astype(float),
+            "split": splits.fillna(0.0).astype(float),
         },
         index=frame.index,
     )

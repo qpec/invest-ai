@@ -100,12 +100,20 @@ BESI.AS, PHIA.AS, TWEKA.AS survive the default filter.
   "price": {"close": 123.4, "date": "2026-07-30"},
   "fast_info": { "last_price": ..., "market_cap": ..., "shares": ..., "currency": "USD", ... },  // plain floats/strings
   "shares": {"2025-07-01": 430000000.0, ...},          // get_shares_full, deduped last-per-date
+  "splits": {"2025-01-15": 2.0, ...},                  // split events from the SAME bar call (ratio per effective date)
   "annual":    {"income": {"<period_end>": {"<row>": <float|null>, ...}}, "balance": {...}, "cashflow": {...}},
   "quarterly": { same shape, may be absent pre-augment }
 }
 ```
 Statement payloads keep **every row Yahoo returns** (the datasheet shows the exact matched
 labels). Period ends are ISO dates. NaN → null.
+
+`splits` (deviation 8): `get_shares_full` counts are point-in-time and split-**unadjusted**,
+so the raw series reads a 2-for-1 as +100% dilution. The events ride the existing
+`Ticker.history(actions=True)` call — populate widens that one call to `period="5y"` — so
+there is **no** second Yahoo request. Only real events are stored (Yahoo writes 0.0 on
+ordinary days). Entries written before this key existed stay valid: **absent → no
+adjustment**.
 
 `progress.json` (written by populate/augment, read by reporter):
 `{"task": "populate", "total": N, "done": N, "failed": N, "started_at": iso, "finished": bool, "finished_at": iso|null}`
@@ -122,7 +130,7 @@ plus `failures.log` (one `symbol<TAB>reason` per line; 404/dead tickers land her
     "legs": { "<leg_id>": {"raw": ..., "percentile": ..., "cohort_n": ..., "score": ..., "note": "..."} },
     "veto": {"vetoed": false, "reason": "", "penalty": 0},
     "flags": [{"code": "EV_GAP|SHARE_CLASS|FLOAT_ROIC|LOW_BASE|ROIC_CAPPED|REINVESTOR", "message": "..."}],
-    "ev": {"own": ..., "yahoo": ..., "gap_pct": ...},
+    "ev": {"own": ..., "yahoo": ..., "gap_pct": ..., "yahoo_source": "field|derived|null"},
     "ttm": {"quarters": 4, "through": "YYYY-MM-DD", "basis": "quarterly|annual"},
     "mos": {"intrinsic_value": ..., "market_cap": ..., "mos_pct": ..., "wacc": ..., "growth": ..., "base_fcf": ...} | null,
     "buffett": {"score": 6, "max": 13, "items": [{"name": "...", "points": 2, "max": 2, "pass": true, "detail": "..."}]} | null
@@ -172,7 +180,8 @@ A per-name dict assembled by the callers:
 {
   "symbol", "sector", "industry", "name",
   "market_cap": float|null, "yahoo_ev": float|null, "price": float|null,
-  "shares_series": [["YYYY-MM-DD", float], ...],       // ascending, deduped
+  "shares_series": [["YYYY-MM-DD", float], ...],       // ascending, deduped, split-UNadjusted
+  "splits": {"YYYY-MM-DD": ratio, ...},                // optional; absent -> {} -> no adjustment
   "annual":    {"income": {pe: {row: val}}, "balance": ..., "cashflow": ...},
   "quarterly": {... or {} ...}
 }
@@ -194,9 +203,14 @@ decoupling seam). Row-label fallback chains used by extraction (first present wi
   `Allowance For Funds Used During Construction` — summed when present.
 
 ### 4.2 TTM assembly (v2.2)
-- If ≥4 quarterly periods with the needed rows → TTM = sum of newest 4 quarters; basis "quarterly".
-- Else fall back to the newest **annual** period as the TTM proxy; basis "annual" (that is the
-  msg 26 "dekking 413/429" split).
+- The TTM window is **one aligned period set**: the newest 4 period_ends present in **both**
+  the quarterly income and the quarterly cashflow statement (their intersection), each
+  carrying the needed rows. Every flow is summed over exactly those periods; balance-sheet
+  items stay latest-period. Income and cashflow must describe the same 12 months or accrual
+  divergence, owner-FCF/revenue and SBC/revenue mix windows (deviation 9). The chosen
+  periods are returned as `ttm["periods"]` (ascending).
+- Fewer than 4 **common** periods → fall back to the newest **annual** period as the TTM
+  proxy; basis "annual" (that is the msg 26 "dekking 413/429" split).
 - Growth CAGRs always use the **annual** series (msg 23: "groei-CAGR's blijven bewust op jaarbasis").
 - Per-period normalized owner-FCF (Stage-1.5 rule, vendored grader lines 34-76):
   `OCF − min(|CapEx|, D&A) − SBC`; D&A absent → maintenance proxy = |CapEx|.
@@ -209,30 +223,52 @@ Identical to the vendored grader (design §1, Stage-1.5) with the v2.x amendment
   Total Debt − Cash (v2.1, msg 19 item 1). P/owner-FCF as display companion.
 - **Q**: ROIC = TTM EBIT / Greenblatt denominator (Working Capital + (Total Assets −
   Current Assets − Cash)), capped at 1000% with flag `ROIC_CAPPED` when denominator ≤ 0
-  (v2.2 bonus catch, msg 23 item 5); gross-margin level×stability one leg (level percentile
-  × stability percentile/100); owner-FCF margin TTM.
+  **and TTM EBIT > 0** (v2.2 bonus catch, msg 23 item 5 — the capital-light/float-financed
+  Adobe case); denominator ≤ 0 with EBIT ≤ 0 is not a 1000% return: the leg is **None**
+  (integrity-suspend, no floor factor, no carve-out — deviation 10); gross-margin
+  level×stability one leg (level percentile × stability percentile/100); owner-FCF margin TTM.
 - **G**: annual revenue CAGR + annual per-share owner-FCF CAGR, each ROIC-floor-gated
   (× min(1, ROIC/15%)); per-share leg dropped + flag `LOW_BASE` when base-year owner-FCF
   < 2% of that year's revenue (v2.1 item 4); both legs None → G = 50 neutral.
 - **D**: net debt/EBITDA (TTM EBITDA); owner-FCF positive (TTM) → 100/0 leg; SBC/revenue TTM.
-- **M**: share-count trend %/yr (lower better; leg **neutral 50** and dilution penalty off when
-  flag `SHARE_CLASS` set — v2.1 item 2); accrual divergence = (NI **incl. NCI** TTM − OCF TTM)/
+- **M**: share-count trend %/yr on the **split-adjusted** series — every observation restated
+  in today's share terms by the cumulative split ratio applied after its date, so a 2-for-1
+  reads ~0%/yr instead of +100%/yr (deviation 8; the same adjusted series feeds the per-share
+  owner-FCF CAGR in **G**). Lower better; leg **neutral 50** and dilution penalty off when
+  flag `SHARE_CLASS` set — v2.1 item 2; accrual divergence = (NI **incl. NCI** TTM − OCF TTM)/
   revenue TTM (v2.2 item 4), lower better.
 
 ### 4.4 Veto / penalty order (all evaluated on the bundle before scoring)
-1. **Leverage veto** (design §2): net debt/EBITDA > 4 (TTM), or EBITDA ≤ 0 with net debt > 0.
+The veto layer runs **before** the §4.6 integrity-suspend: a veto is a fact about the bundle,
+not a score, so a name whose EBITDA is 0 while it carries net debt is VETOED on the leverage
+rule rather than suspended for the ratio that same 0 makes uncomputable (deviation 12). Only
+names that survive the veto layer are then checked for missing required metrics.
+1. **Leverage veto** (design §2): net debt/EBITDA > 4 (TTM), or EBITDA ≤ 0 with net debt > 0
+   (EBITDA exactly 0 included).
 2. **Cash-flow-quality veto** (v2.2, msg 26/28): credit-loss/write-off add-backs ≥ 25% of
    positive TTM OCF → `VETOED "cash-flow quality: OCF leans …%"` (DAVE 28%, IPGP 77%, AMRX 28%
    all fire; threshold pinned at 0.25).
-3. **Dilution veto** (v2.2): share-count CAGR > 20%/yr → VETOED (QXO 909%/yr, VSAT, GBTG).
+3. **Dilution veto** (v2.2): share-count CAGR > 20%/yr → VETOED (QXO 909%/yr, VSAT, GBTG);
+   **suppressed when `SHARE_CLASS` is set** (deviation 11) — §4.5 already declares that
+   trend untrustworthy for those names, and a trend that cannot score a leg cannot veto.
 4. **Cash-destruction veto** per §4.2; reinvestor carve-out unchanged from the vendored
-   grader (ROIC > 15% and revenue growth > 10%/yr → flagged `REINVESTOR`, not vetoed).
+   grader (ROIC > 15% and revenue growth > 10%/yr → flagged `REINVESTOR`, not vetoed; an
+   unusable ROIC (None, §4.3) never qualifies).
 5. **Dilution penalty**: 5%/yr < CAGR ≤ 20%/yr → −15, flagged (suppressed when `SHARE_CLASS`).
 
 ### 4.5 Flags (v2.1, msg 19 — computed for every name, shown everywhere)
-- `EV_GAP`: |own EV − Yahoo EV| / own EV > 15% (only when Yahoo EV known).
+- `EV_GAP`: |own EV − reference EV| / own EV > 15%. The reference EV is the supplied
+  `yahoo_ev` when present (`ev.yahoo_source = "field"`); otherwise it is **derived** from the
+  cache as `price × latest listed shares + Total Debt − Cash` (`"derived"`, deviation 13),
+  because yfinance's FastInfo carries no enterprise value and the `info`/quoteSummary path
+  is banned and blocked — `yahoo_ev` is None in every live run, which left this flag and
+  `SHARE_CLASS` structurally dead. The Up-C signal *is* a share-count mismatch: the quoted
+  market cap counts all units, `get_shares_full` reports the registrant's listed class. A
+  single-class company has implied units ≈ reported shares → gap ≈ 0 → no flag; an Up-C
+  shows a positive gap. No reference at all (no price/shares) → no gap, no flag.
 - `SHARE_CLASS`: NCI / total equity > 10% **and** EV gap > 15% (both conditions — Tenet's
-  41% NCI with a 10% gap must NOT flag, msg 19).
+  41% NCI with a 10% gap must NOT flag, msg 19). Sets the M share-trend leg to neutral 50
+  and switches **both** the dilution penalty and the hard dilution veto off (§4.4).
 - `FLOAT_ROIC`: deferred revenue > 30% of TTM revenue → "ROIC float-driven".
 - `LOW_BASE`, `ROIC_CAPPED`, `REINVESTOR` as above.
 
@@ -240,8 +276,8 @@ Identical to the vendored grader (design §1, Stage-1.5) with the v2.x amendment
 Sector percentile machinery, pillar aggregation, composite weights
 `0.25/0.25/0.20/0.15/0.15`, grade bands ≥80 A / ≥65 B / ≥50 C / ≥35 D / F, tiering
 (Core/Adjacent/Outside) — all **identical to the vendored grader**. Integrity-suspend
-(INSUFFICIENT with reason) whenever a required metric is None; None never reaches
-`percentileofscore`. Vetoed names are suppressed, never ranked.
+(INSUFFICIENT with reason) whenever a required metric is None **and no §4.4 veto fired
+first**; None never reaches `percentileofscore`. Vetoed names are suppressed, never ranked.
 
 ### 4.7 v3 quality engine + gates (msgs 50, 58 — frozen)
 - `quality_score = 0.40·Q + 0.25·G + 0.20·D + 0.15·M` (no V).
@@ -281,8 +317,9 @@ universe size + NL names kept. Downloads to `data/equities.bz2` once, reuses the
 ### 5.2 `populate.py`
 `python populate.py [--universe universe.csv] [--limit N] [--only SYM,SYM] [--fresh] [--annual-only]`
 - Per symbol (default: annual **and** quarterly in one pass — msg 62 "nu mét kwartaaldata in
-  één pass"; `--annual-only` reproduces the v1 behavior): fast_info, daily bar (close,
-  currency), shares_full, annual statements, quarterly statements → `cache/<SYM>.json`.
+  één pass"; `--annual-only` reproduces the v1 behavior): fast_info, daily bars (close,
+  currency **and split events** — one `history(actions=True)` call widened to `period="5y"`,
+  §3.2 `splits`), shares_full, annual statements, quarterly statements → `cache/<SYM>.json`.
 - Paced via `vendor/yf_fetch.py` primitives (flock + spacing + rate-limit ladder;
   spacing default 0.6 s ± jitter, `--pace` to override).
 - Resumable: existing fresh cache entries are skipped (`--max-age-days`, default 3).
@@ -415,3 +452,41 @@ fresh-ranked quality cohorts 1-15 / 16-50 / 51-100 / 101+ per period, no gates.
    or streak requirement is pending.
 7. Chat-reported run outputs (589/443/428 counts, specific grades, backtest returns) are
    period data, not assertions the code must reproduce today.
+
+**Post-reconstruction review fixes (2026-07-31).** Six confirmed findings against the
+reconstructed pipeline; the chat is silent on all six because the original agent never hit
+(or never reported) them. Each keeps the pinned v2.x semantics and only removes a way the
+implementation contradicted them.
+
+8. **Split-adjusted share counts** (§3.2 `splits`, §4.1, §4.3 M/G) — `get_shares_full` is
+   split-unadjusted, so a 2-for-1 read as +100%/yr dilution: the >20%/yr hard veto fired on
+   any recent splitter for ~a year and the per-share owner-FCF CAGR flipped deeply negative.
+   Splits are cached from the existing bar call (no extra Yahoo request, `period="5y"`) and
+   every share observation is restated in today's share terms before any trend/per-share
+   math. Cache entries and bundles without the key behave exactly as before.
+9. **Aligned TTM window** (§4.2) — the newest 4 income quarters and the newest 4 cashflow
+   quarters were taken independently, so a name whose statements are one quarter apart mixed
+   12-month windows inside one ratio (NI TTM − OCF TTM, owner-FCF/revenue, SBC/revenue). The
+   window is now the newest 4 period_ends present in both statements; <4 common → the annual
+   fallback, unchanged. The vendored grader keyed everything off one period set.
+10. **ROIC cap requires EBIT > 0** (§4.3 Q) — the +1000% cap fired for *any* non-positive
+    Greenblatt denominator, handing loss-makers a full ROIC floor factor, top-of-cohort Q/G
+    credit and an escape hatch into the §4.4 reinvestor carve-out. The cap is now the
+    capital-light/float-financed case only; EBIT ≤ 0 over a non-positive base suspends the leg.
+11. **`SHARE_CLASS` suppresses the hard dilution veto** (§4.4) — §4.5 already declares the
+    share trend untrustworthy for these names (leg neutral 50, penalty off), yet the same
+    trend could still hard-veto them. It no longer can; every other name is unaffected.
+12. **Veto layer before integrity-suspend** (§4.4/§4.6) — EBITDA exactly 0 with net debt > 0
+    produced INSUFFICIENT instead of the §4.4 leverage veto, because the undefined ratio
+    suspended the name before the veto ran. Vetoes are bundle facts and are evaluated first.
+13. **Derived reference EV** (§3.3, §4.5) — `yahoo_ev` came from cached `fast_info`, but
+    yfinance's FastInfo has no enterprise-value field and the `info`/quoteSummary path is
+    banned by the fetch layer and blocked by this environment's proxy (verified:
+    SSLError/connection reset). `yahoo_ev` was therefore always None in live runs and the
+    v2.1 `EV_GAP` / `SHARE_CLASS` flags (msg 19: 12 EV_GAP names, 4 SHARE_CLASS incl.
+    YOU/SGRY/FPS/PLAB) were structurally dead. The same Up-C signal is reconstructed from
+    the cache — the listed-class EV `price × latest shares + debt − cash` against the
+    all-units own EV — and `ev.yahoo_source` records `"field"` vs `"derived"` so the report
+    and datasheet stay honest. A supplied `yahoo_ev` always wins. In the PIT/backtest world
+    market cap is *defined* as shares × price, so the derived reference equals own EV and
+    the gap is identically 0 — the flags stay silent there, as before.

@@ -1,9 +1,10 @@
 """Paced, resumable yfinance fundamentals cache builder (RECONSTRUCTION.md §3.2, §5.2).
 
 Per symbol (default one pass, msg 62 "nu mét kwartaaldata in één pass"; --annual-only
-reproduces the v1 path): fast_info, daily bar, shares_full, annual + quarterly
-statements -> cache/<SYM>.json exactly per §3.2 (NaN -> null, ISO period ends, full
-row payloads, shares deduped last-per-date). Fresh entries are skipped
+reproduces the v1 path): fast_info, daily bars (5y, so the same single history call
+also yields the split events), shares_full, annual + quarterly statements ->
+cache/<SYM>.json exactly per §3.2 (NaN -> null, ISO period ends, full row payloads,
+shares deduped last-per-date, splits as {date: ratio}). Fresh entries are skipped
 (--max-age-days 3); failures are never fatal — one failures.log line + the failed
 count in progress.json (msg 6: 404s on dead tickers are logged and skipped);
 progress.json is rewritten after EVERY symbol so the detached reporter (§5.4) always
@@ -12,8 +13,8 @@ Pacing lives in vendor/yf_fetch (flock + spacing + rate-limit ladder); the lock
 state_dir is the cache dir's parent, so every process on the box serializes on the
 same lock.
 
-Pure parts (build_cache_entry, statement_payload, shares_payload, write_progress,
-is_fresh) do no I/O beyond their arguments and are unit-tested offline.
+Pure parts (build_cache_entry, statement_payload, shares_payload, splits_payload,
+write_progress, is_fresh) do no I/O beyond their arguments and are unit-tested offline.
 """
 from __future__ import annotations
 
@@ -32,6 +33,9 @@ from vendor import yf_fetch
 PROGRESS_FILE = "progress.json"
 FAILURES_FILE = "failures.log"
 STATEMENT_TYPES = ("income", "balance", "cashflow")
+# The bar fetch doubles as the split-history fetch (§3.2 "splits"): one history call,
+# widened to cover the cached share series, instead of a second Yahoo request.
+PRICE_PERIOD = "5y"
 
 
 # ---------------------------------------------------------------- pure builders
@@ -86,6 +90,21 @@ def statement_payload(frame: pd.DataFrame) -> dict:
     return dict(sorted(out.items()))
 
 
+def splits_payload(bars: pd.DataFrame) -> dict:
+    """Split events out of the daily-bar frame -> {ISO date: ratio} (§3.2 "splits").
+    Yahoo writes 0.0 on every ordinary day and the ratio (2.0, 0.1, ...) on the effective
+    date; only real events are kept. A frame without the column (older callers, synthetic
+    fixtures) yields {} — absent splits mean no adjustment, never a guess."""
+    out = {}
+    if bars is None or "split" not in getattr(bars, "columns", []):
+        return out
+    for ts, v in bars["split"].items():
+        f = _num(v)
+        if isinstance(f, float) and f > 0.0 and f != 1.0:
+            out[pd.Timestamp(ts).date().isoformat()] = f
+    return dict(sorted(out.items()))
+
+
 def shares_payload(series: pd.Series) -> dict:
     """get_shares_full series -> {ISO date: float}, deduped last-per-date (§3.2):
     chronological iteration + dict overwrite keeps the last observation per date."""
@@ -100,9 +119,13 @@ def shares_payload(series: pd.Series) -> dict:
 
 def build_cache_entry(symbol: str, meta: dict, fast_info: dict, bars: pd.DataFrame,
                       shares: pd.Series | None, annual: dict, quarterly: dict | None = None,
-                      *, fetched_at: datetime | None = None) -> dict:
+                      *, fetched_at: datetime | None = None,
+                      splits: dict | None = None) -> dict:
     """Assemble one cache/<SYM>.json payload per §3.2 — pure and JSON-serializable
-    with allow_nan=False. `quarterly` None -> the key is absent (pre-augment shape)."""
+    with allow_nan=False. `quarterly` None -> the key is absent (pre-augment shape).
+    `splits` defaults to the split events carried by the bar frame (§3.2 "splits"): the
+    scoring layer needs them to restate the raw share series in today's share terms, so a
+    split does not read as dilution (§4.3)."""
     fetched_at = fetched_at or datetime.now(timezone.utc)
     currency = None
     if "currency" in bars.columns and len(bars):
@@ -118,6 +141,7 @@ def build_cache_entry(symbol: str, meta: dict, fast_info: dict, bars: pd.DataFra
                   "date": pd.Timestamp(bars.index[-1]).date().isoformat()},
         "fast_info": {str(k): _scalar(v) for k, v in (fast_info or {}).items()},
         "shares": shares_payload(shares) if shares is not None and len(shares) else {},
+        "splits": dict(splits) if splits is not None else splits_payload(bars),
         "annual": {st: statement_payload(annual[st]) for st in STATEMENT_TYPES},
     }
     if quarterly is not None:
@@ -183,7 +207,7 @@ def fetch_entry(symbol: str, meta: dict, state_dir: Path, *, annual_only: bool) 
     {} keeps the M leg computable-from-nothing neutral, quarterly absent is the
     legal pre-augment shape per §3.2). RateLimited always propagates."""
     fast = yf_fetch.fetch_fast_info(symbol, state_dir=state_dir)
-    bars = yf_fetch.fetch_daily_bars(symbol, state_dir=state_dir)
+    bars = yf_fetch.fetch_daily_bars(symbol, state_dir=state_dir, period=PRICE_PERIOD)
     try:
         shares = yf_fetch.fetch_shares_full(symbol, state_dir=state_dir)
     except yf_fetch.RateLimited:

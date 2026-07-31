@@ -2,12 +2,17 @@
 
 Synthetic bundles only; no network, no files, no clock. Covers TTM basis selection,
 every §4.4 veto and §4.5 flag, the §4.6 percentile/composite machinery, the §4.7 v3
-quality engine and the §4.8 shadow layers (MoS DCF, Buffett checklist, portfolio clamps).
+quality engine and the §4.8 shadow layers (MoS DCF, Buffett checklist, portfolio clamps),
+plus the v2.4 review fixes: split-adjusted share counts, the aligned TTM window, the
+EBIT-gated ROIC cap, SHARE_CLASS suppressing the hard dilution veto, the zero-EBITDA
+leverage veto and the derived reference EV behind EV_GAP/SHARE_CLASS.
 """
 import copy
 
+import pandas as pd
 import pytest
 
+import populate
 import scoring
 
 YEARS = ["2022-12-31", "2023-12-31", "2024-12-31", "2025-12-31"]
@@ -113,6 +118,42 @@ def test_owner_fcf_da_absent_falls_back_to_capex():
     assert scoring._owner_fcf(cell) == pytest.approx(70.0 - 8.0 - 5.0)
 
 
+def test_ttm_window_is_the_intersection_of_income_and_cashflow_periods():
+    """§4.2 (v2.4): income and cashflow must be summed over the SAME four quarters.
+    Yahoo here is one quarter ahead on income (through 2025-12-31) and one behind on
+    cashflow (through 2025-09-30); the aligned window is the newest 4 common ends."""
+    b = base_bundle()
+    inc, cf = {}, {}
+    for pe in ["2024-12-31"] + QTRS:                   # 5 income quarters
+        inc[pe] = dict(b["quarterly"]["income"][QTRS[0]])
+        inc[pe]["Total Revenue"] = 400e6 if pe == "2025-12-31" else 300e6
+    for pe in ["2024-09-30", "2024-12-31"] + QTRS[:3]:  # 5 cashflow quarters, one behind
+        cf[pe] = dict(b["quarterly"]["cashflow"][QTRS[0]])
+        cf[pe]["Operating Cash Flow"] = 100e6 if pe == "2024-09-30" else 70e6
+    b["quarterly"]["income"], b["quarterly"]["cashflow"] = inc, cf
+
+    ttm = scoring.assemble_ttm(b)
+    assert ttm["basis"] == "quarterly" and ttm["quarters"] == 4
+    assert ttm["periods"] == ["2024-12-31", "2025-03-31", "2025-06-30", "2025-09-30"]
+    assert ttm["through"] == "2025-09-30"
+    # Revenue over the ALIGNED window: 4 x 300e6 — the misaligned newest-4-income window
+    # (which drops 2024-12-31 and picks up the 400e6 quarter) would have summed 1.3e9.
+    assert ttm["revenue"] == pytest.approx(1.2e9)
+    assert ttm["ocf"] == pytest.approx(4 * 70e6)       # 2024-09-30's 100e6 stays out
+    assert ttm["owner_fcf"] == pytest.approx(4 * (70e6 - 12e6 - 5e6))
+
+
+def test_ttm_falls_back_to_annual_when_fewer_than_four_common_quarters():
+    b = base_bundle()
+    cf = {pe: dict(b["quarterly"]["cashflow"][QTRS[0]])
+          for pe in ["2024-06-30", "2024-09-30", "2024-12-31", "2025-03-31"]}
+    b["quarterly"]["cashflow"] = cf                    # only 2025-03-31 is common
+    ttm = scoring.assemble_ttm(b)
+    assert ttm["basis"] == "annual" and ttm["quarters"] == 1
+    assert ttm["periods"] == ["2025-12-31"]
+    assert ttm["revenue"] == pytest.approx(1.3e9)
+
+
 # --- §4.4 vetoes -------------------------------------------------------------------------
 
 def test_leverage_veto_net_debt_over_4x():
@@ -175,6 +216,65 @@ def test_dilution_15_pct_penalty_not_veto():
     raw = (0.25 * p["v"] + 0.25 * p["q"] + 0.20 * p["g"] + 0.15 * p["d"]
            + 0.15 * p["m"] - 15)
     assert row["composite"] == pytest.approx(max(0.0, raw), abs=0.2)
+
+
+def test_stock_split_is_not_dilution():
+    """§4.3/§4.5 (v2.4): raw Yahoo share counts are split-UNadjusted, so a 2-for-1 doubles
+    the series overnight. Unadjusted that trips the >20%/yr hard veto and drags the
+    per-share owner-FCF CAGR deeply negative; with the cache's split history the trend is
+    ~0%/yr and the per-share leg is flat."""
+    b = base_bundle()
+    b["shares_series"] = ([[f"{y}-06-30", 50e6] for y in range(2021, 2025)]
+                          + [["2025-06-30", 100e6]])
+    unadjusted = run_one(b)                            # the bug this fix removes
+    assert unadjusted["grade"] == "VETOED"
+    assert "dilution veto" in unadjusted["veto"]["reason"]
+
+    b["splits"] = {"2025-01-15": 2.0}
+    row = run_one(b)
+    assert row["veto"]["vetoed"] is False and row["veto"]["penalty"] == 0
+    assert row["grade"] in "ABCDF"
+    assert row["legs"]["m_shares"]["raw"] == pytest.approx(0.0, abs=1e-9)
+    # Per-share owner-FCF: flat owner-FCF on a constant split-adjusted count -> ~0%/yr,
+    # against the ~-20%/yr the raw series produces.
+    assert row["legs"]["g_ps_ofcf"]["raw"] == pytest.approx(0.0, abs=1e-9)
+    assert scoring._per_share_ofcf_growth(
+        {**b, "splits": {}})[0] == pytest.approx(-20.6, abs=0.5)
+
+
+def test_genuine_issuer_still_hard_vetoed_with_split_history_present():
+    b = base_bundle()
+    b["shares_series"] = [["2024-12-31", 100e6], ["2025-12-15", 125e6]]   # +26%/yr real
+    b["splits"] = {"2019-05-01": 2.0}                  # an old split, before both points
+    row = run_one(b)
+    assert row["grade"] == "VETOED"
+    assert "dilution veto" in row["veto"]["reason"]
+
+
+def test_splits_absent_or_unusable_leave_the_series_untouched():
+    b = base_bundle()
+    b["shares_series"] = [["2024-12-31", 100e6], ["2025-12-15", 125e6]]
+    assert scoring.adjusted_shares_series(b) == [("2024-12-31", 100e6),
+                                                 ("2025-12-15", 125e6)]
+    b["splits"] = {"2025-06-01": 0.0, "2025-07-01": None}   # never rescale on junk
+    assert scoring.adjusted_shares_series(b) == [("2024-12-31", 100e6),
+                                                 ("2025-12-15", 125e6)]
+
+
+def test_cache_entry_carries_the_split_history(tmp_path):
+    """The §3.2 cache side of the same fix: split events ride the one daily-bar call."""
+    bars = pd.DataFrame(
+        {"close": [10.0, 5.0, 5.5], "adj_close": [10.0, 5.0, 5.5],
+         "dividend": [0.0, 0.0, 0.0], "split": [0.0, 2.0, 0.0],
+         "currency": ["USD", "USD", "USD"]},
+        index=pd.DatetimeIndex(["2025-01-14", "2025-01-15", "2025-01-16"]))
+    assert populate.splits_payload(bars) == {"2025-01-15": 2.0}
+    annual = {st: pd.DataFrame({pd.Timestamp("2025-12-31"): {"Total Revenue": 1.0}})
+              for st in populate.STATEMENT_TYPES}
+    entry = populate.build_cache_entry("TST", {}, {"currency": "USD"}, bars, None, annual)
+    assert entry["splits"] == {"2025-01-15": 2.0}
+    # A frame without the column (older callers / fixtures) -> {}, i.e. no adjustment.
+    assert populate.splits_payload(bars.drop(columns=["split"])) == {}
 
 
 def _burner(b, *, ttm_positive):
@@ -244,6 +344,25 @@ def test_share_class_requires_both_conditions():
     assert leg["percentile"] is None
 
 
+def test_share_class_suppresses_the_hard_dilution_veto_too():
+    """§4.4/§4.5 (v2.4): the trend the system just declared untrustworthy (leg forced to
+    neutral 50, penalty off) may not hard-veto the name either — while the same trend on
+    an unflagged name still does."""
+    b = base_bundle()
+    set_all_balances(b, **{"Stockholders Equity": 590e6, "Minority Interest": 410e6})
+    b["yahoo_ev"] = 9.8e9 * 0.80
+    b["shares_series"] = [["2024-12-31", 100e6], ["2025-12-15", 130e6]]   # ~+32%/yr
+    row = run_one(b)
+    assert "SHARE_CLASS" in flag_codes(row)
+    assert row["veto"]["vetoed"] is False and row["veto"]["penalty"] == 0
+    assert row["grade"] in "ABCDF"
+    assert row["legs"]["m_shares"]["score"] == 50.0
+
+    plain = base_bundle()
+    plain["shares_series"] = [["2024-12-31", 100e6], ["2025-12-15", 130e6]]
+    assert run_one(plain)["grade"] == "VETOED"
+
+
 def test_share_class_suppresses_dilution_penalty():
     b = base_bundle()
     set_all_balances(b, **{"Stockholders Equity": 590e6, "Minority Interest": 410e6})
@@ -283,6 +402,101 @@ def test_roic_capped_on_non_positive_denominator():
     assert "ROIC_CAPPED" in flag_codes(row)
     assert row["legs"]["q_roic"]["raw"] == pytest.approx(1000.0)
     assert row["grade"] in "ABCDF"                       # capped, not suspended
+
+
+def test_roic_cap_requires_positive_ebit():
+    """§4.3 (v2.4): the 1000% cap is the capital-light/float-financed case (EBIT > 0).
+    A loss-maker over a negative capital base is not a 1000% return on capital — the leg
+    suspends, so it can claim neither the ROIC floor factor nor cohort-topping Q/G credit."""
+    assert scoring._roic_pct(-80e6, dict(BAL_CELL, **{"Working Capital": -950e6})) \
+        == (None, False)
+    b = base_bundle()
+    set_all_balances(b, **{"Working Capital": -950e6})
+    for pe in QTRS:
+        b["quarterly"]["income"][pe]["EBIT"] = -20e6     # TTM EBIT -80e6
+    row = run_one(b)
+    assert row["grade"] == "INSUFFICIENT"
+    assert "ROIC" in row["note"]
+    assert "ROIC_CAPPED" not in flag_codes(row)
+    assert row["composite"] is None
+
+
+def test_negative_ebit_cannot_buy_the_reinvestor_carve_out():
+    b = _burner(base_bundle(), ttm_positive=False)
+    set_all_balances(b, **{"Working Capital": -950e6})   # non-positive capital base
+    for i, pe in enumerate(YEARS):                       # revenue CAGR 14.5%/yr > 10%
+        b["annual"]["income"][pe]["Total Revenue"] = [1.0e9, 1.15e9, 1.3e9, 1.5e9][i]
+    for pe in QTRS:
+        b["quarterly"]["income"][pe]["EBIT"] = -20e6
+    row = run_one(b)
+    assert row["grade"] == "VETOED"                      # not spared, not INSUFFICIENT
+    assert "cash-destruction" in row["veto"]["reason"]
+    assert "REINVESTOR" not in flag_codes(row)
+
+
+def test_zero_ebitda_with_net_debt_is_vetoed_not_insufficient():
+    """§4.4 (v2.4): EBITDA exactly 0 leaves net debt/EBITDA uncomputable, and the veto
+    layer runs BEFORE the §4.6 integrity-suspend — so the leverage veto fires instead of
+    the name silently dropping out as INSUFFICIENT."""
+    b = base_bundle()
+    for pe in QTRS:
+        b["quarterly"]["income"][pe]["EBITDA"] = 0.0
+    set_all_balances(b, **{"Total Debt": 500e6, "Cash And Cash Equivalents": 100e6})
+    row = run_one(b)
+    assert row["grade"] == "VETOED"
+    assert "EBITDA <= 0" in row["veto"]["reason"]
+    assert row["legs"] == {} and row["composite"] is None
+
+
+def test_insufficient_still_wins_when_no_veto_fires():
+    b = base_bundle()
+    for pe in QTRS:
+        del b["quarterly"]["income"][pe]["EBITDA"]       # EBITDA missing, no net debt
+    assert run_one(b)["grade"] == "INSUFFICIENT"
+
+
+# --- §4.5 EV_GAP / SHARE_CLASS on a derived reference EV (v2.4) --------------------------
+
+def test_derived_reference_ev_flags_an_up_c_structure():
+    """yfinance's FastInfo has no enterprise-value field and the `info` path is banned, so
+    `yahoo_ev` is None in live runs. The Up-C signal is a share-count mismatch: the quoted
+    market cap counts ALL units (125M x $100) while get_shares_full reports the listed
+    class (100M). Rebuilding the listed-class reference EV revives both flags."""
+    b = base_bundle()
+    b["yahoo_ev"] = None
+    b["market_cap"] = 12.5e9
+    set_all_balances(b, **{"Stockholders Equity": 590e6, "Minority Interest": 410e6})
+    row = run_one(b)
+    assert row["ev"]["yahoo_source"] == "derived"
+    assert row["ev"]["yahoo"] == pytest.approx(9.8e9)     # 100 x 100e6 + 100e6 - 300e6
+    assert row["ev"]["own"] == pytest.approx(12.3e9)
+    assert row["ev"]["gap_pct"] == pytest.approx(20.3, abs=0.1)
+    assert {"EV_GAP", "SHARE_CLASS"} <= flag_codes(row)
+    assert row["legs"]["m_shares"]["score"] == 50.0
+
+
+def test_derived_reference_ev_silent_for_a_single_class_high_nci_name():
+    # The Tenet case (§4.5): 41% NCI but one share class -> implied units == reported
+    # shares -> gap 0 -> neither flag.
+    b = base_bundle()
+    b["yahoo_ev"] = None
+    set_all_balances(b, **{"Stockholders Equity": 590e6, "Minority Interest": 410e6})
+    row = run_one(b)
+    assert row["ev"]["yahoo_source"] == "derived"
+    assert row["ev"]["gap_pct"] == pytest.approx(0.0, abs=1e-9)
+    assert flag_codes(row) == set()
+
+
+def test_supplied_yahoo_ev_wins_and_source_is_reported():
+    row = run_one(base_bundle())                         # yahoo_ev 9.8e9 supplied
+    assert row["ev"]["yahoo_source"] == "field"
+    assert row["ev"]["yahoo"] == pytest.approx(9.8e9)
+    b = base_bundle()
+    b["yahoo_ev"], b["price"] = None, None               # nothing to derive from
+    row = run_one(b)
+    assert row["ev"]["yahoo_source"] is None
+    assert row["ev"]["yahoo"] is None and row["ev"]["gap_pct"] is None
+    assert flag_codes(row) == set()
 
 
 # --- §4.6 scoring machinery --------------------------------------------------------------
