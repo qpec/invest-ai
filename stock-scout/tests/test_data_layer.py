@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -18,6 +19,7 @@ import universe
 # ------------------------------------------------------------------ universe.py
 
 NL_SIX = ["ADYEN.AS", "ASM.AS", "ASML.AS", "BESI.AS", "PHIA.AS", "TWEKA.AS"]
+EQUITIES_BZ2 = Path(__file__).resolve().parent.parent / "data" / "equities.bz2"
 
 
 def _row(symbol, name, sector, cap, country, exchange="NYQ", currency="USD", industry="X"):
@@ -92,6 +94,130 @@ def test_lone_away_from_home_listing_is_kept(equities_df):
     df.loc[df["symbol"] == "ELV?", "symbol"] = "ELVN"
     out = universe.filter_universe(df)
     assert "ELVN" in set(out["symbol"])
+
+
+# --------------------------------- cross-listing dedupe without a home listing (§3.1)
+
+# A real slice of FinanceDatabase: argenx SE and NXP Semiconductors NV are Dutch
+# companies with NO Euronext Amsterdam line, so the whole group lists "away from home".
+# Alphabetically first are the Berlin line and a São Paulo BDR — both wrong-currency
+# ghosts that would be graded in place of the company.
+AWAY_FROM_HOME_SLICE = [
+    _row("1AE.BE", "argenx SE", "Health Care", "Large Cap", "Netherlands", "BER", "EUR"),
+    _row("1AE.F", "argenx SE", "Health Care", "Large Cap", "Netherlands", "FRA", "EUR"),
+    _row("1AE.MU", "argenx SE", "Health Care", "Large Cap", "Netherlands", "MUN", "EUR"),
+    _row("A1RG34.SA", "argenx SE", "Health Care", "Large Cap", "Netherlands", "SAO", "BRL"),
+    _row("ARGNF", "argenx SE", "Health Care", "Large Cap", "Netherlands", "PNK", "USD"),
+    _row("ARGX", "argenx SE", "Health Care", "Large Cap", "Netherlands", "NMS", "USD"),
+    _row("ARGX.BR", "argenx SE", "Health Care", "Large Cap", "Netherlands", "BRU", "EUR"),
+    _row("N1XP34.SA", "NXP Semiconductors NV", "Information Technology", "Large Cap",
+         "Netherlands", "SAO", "BRL"),
+    _row("NXPI", "NXP Semiconductors NV", "Information Technology", "Large Cap",
+         "Netherlands", "NMS", "USD"),
+    _row("NXPI.VI", "NXP Semiconductors NV", "Information Technology", "Large Cap",
+         "Netherlands", "VIE", "EUR"),
+    _row("VNX.F", "NXP Semiconductors NV", "Information Technology", "Large Cap",
+         "Netherlands", "FRA", "EUR"),
+]
+
+
+def test_away_from_home_group_keeps_the_primary_us_line_not_the_alphabetical_first():
+    out = universe.filter_universe(pd.DataFrame(AWAY_FROM_HOME_SLICE))
+    kept = list(out["symbol"])
+    assert kept == ["ARGX", "NXPI"]                # one row per company, the primary line
+    for ghost in ("1AE.BE", "A1RG34.SA", "ARGNF", "N1XP34.SA", "NXPI.VI", "VNX.F"):
+        assert ghost not in kept
+    assert set(out["currency"]) == {"USD"}         # no wrong-currency symbol survives
+
+
+def test_otc_pink_line_never_beats_the_major_us_line():
+    # ARGNF (OTC pink, dot-free) is tier 2, ARGX (Nasdaq) tier 1 — the venue decides,
+    # not the alphabet.
+    rows = [r for r in AWAY_FROM_HOME_SLICE if r["symbol"] in ("ARGNF", "ARGX")]
+    assert list(universe.filter_universe(pd.DataFrame(rows))["symbol"]) == ["ARGX"]
+    only_otc = [r for r in AWAY_FROM_HOME_SLICE if r["symbol"] == "ARGNF"]
+    assert list(universe.filter_universe(pd.DataFrame(only_otc))["symbol"]) == ["ARGNF"]
+
+
+def test_shortest_symbol_breaks_ties_inside_one_tier():
+    rows = [r for r in AWAY_FROM_HOME_SLICE if r["symbol"] in ("1AE.MU", "1AE.F", "A1RG34.SA")]
+    assert list(universe.filter_universe(pd.DataFrame(rows))["symbol"]) == ["1AE.F"]
+
+
+def test_warrant_and_unit_lines_are_dropped_but_mlp_common_units_survive():
+    rows = [
+        _row("RGTI", "Rigetti Computing Inc.", "Information Technology", "Mid Cap", "United States", "NMS"),
+        _row("RGTIW", "Rigetti Computing Inc. Warrants", "Information Technology", "Mid Cap", "United States", "NMS"),
+        _row("BTSGU", "BrightSpring Health Services Inc. Tangible Equity Unit", "Health Care", "Mid Cap", "United States", "NMS"),
+        _row("PPLC", "PPL Corporation Corporate Units", "Information Technology", "Mid Cap", "United States", "NYQ"),
+        _row("LVOXU", "LiveVox Holdings Inc. Unit", "Information Technology", "Mid Cap", "United States", "NMS"),
+        _row("TXO", "TXO Energy Partners L.P. Common Units Representing Limited Partner Interests",
+             "Information Technology", "Mid Cap", "United States", "NYQ"),
+        # False-positive guards: these names merely CONTAIN the letters.
+        _row("UNH", "UnitedHealth Group Incorporated", "Health Care", "Mega Cap", "United States", "NYQ"),
+        _row("U", "Unity Software Inc.", "Information Technology", "Mid Cap", "United States", "NYQ"),
+        _row("IBRX", "ImmunityBio Inc", "Health Care", "Mid Cap", "United States", "NMS"),
+        _row("CYH", "Community Health Systems, Inc.", "Health Care", "Mid Cap", "United States", "NYQ"),
+    ]
+    kept = set(universe.filter_universe(pd.DataFrame(rows))["symbol"])
+    assert kept == {"RGTI", "TXO", "UNH", "U", "IBRX", "CYH"}
+    assert universe.is_derivative_line("Rigetti Computing Inc. Warrants")
+    assert universe.is_derivative_line("Novanta Inc. Tangible Equity Units")
+    assert not universe.is_derivative_line("UnitedHealth Group Incorporated")
+    assert not universe.is_derivative_line(
+        "XPLR Infrastructure LP Common Units representing limited partner interests")
+
+
+def test_w_or_u_suffixed_symbol_loses_to_its_ordinary_sibling_in_the_same_group():
+    # Same company name on both rows (no textual "warrant" decoration): the symbol
+    # convention is the only signal, and the ordinary line must win.
+    rows = [
+        _row("AURO", "Aurora Innovation Inc.", "Information Technology", "Mid Cap", "United States", "NMS"),
+        _row("AUROW", "Aurora Innovation Inc.", "Information Technology", "Mid Cap", "United States", "NMS"),
+    ]
+    assert list(universe.filter_universe(pd.DataFrame(rows))["symbol"]) == ["AURO"]
+    # ...but a W/U symbol whose stem does not exist is a company, never a warrant.
+    lone = [_row("AUROW", "Aurora Innovation Inc.", "Information Technology", "Mid Cap",
+                 "United States", "NMS")]
+    assert list(universe.filter_universe(pd.DataFrame(lone))["symbol"]) == ["AUROW"]
+
+
+def test_equities_url_uses_the_compression_path():
+    # §3.1 pins compression/ and calls database/ WRONG (it 404s): with data/equities.bz2
+    # gitignored, a fresh checkout's default run downloads from this URL or dies.
+    assert universe.EQUITIES_URL == (
+        "https://raw.githubusercontent.com/JerBouma/FinanceDatabase/main/"
+        "compression/equities.bz2")
+    assert "/database/" not in universe.EQUITIES_URL
+
+
+# ------------------------------- real FinanceDatabase (skipped when not cached locally)
+
+@pytest.fixture(scope="module")
+def real_equities():
+    if not EQUITIES_BZ2.exists():
+        pytest.skip(f"no local FinanceDatabase copy at {EQUITIES_BZ2}")
+    return universe.load_equities(EQUITIES_BZ2)
+
+
+def test_real_database_default_filter_anchors(real_equities):
+    out = universe.filter_universe(real_equities)
+    symbols = set(out["symbol"])
+    for sym in NL_SIX:                       # the msg-4 sanity anchor still holds
+        assert sym in symbols
+    assert {"ARGX", "NXPI"} <= symbols       # primary lines win their groups
+    assert not {"1AE.BE", "N1XP34.SA"} & symbols
+    assert not out["symbol"].duplicated().any()
+    assert not any(universe.is_derivative_line(n) for n in out["name"])
+
+
+def test_real_database_broad_filter_anchors(real_equities):
+    out = universe.filter_universe(real_equities, broad=True)
+    symbols = set(out["symbol"])
+    assert {"ARGX", "NXPI"} <= symbols
+    assert not {"RGTIW", "AUROW", "DJTWW", "LVOXU", "PPLC"} & symbols
+    assert "TXO" in symbols                  # an MLP's common units are its ordinary line
+    assert not set(out["sector"]) & {"Financials", "Real Estate"}
 
 
 # ------------------------------------------------------------------ populate.py

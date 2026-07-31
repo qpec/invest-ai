@@ -60,6 +60,9 @@ LEG_LABELS = {
 }
 PILLAR_LABELS = {"v": "V · Waardering", "q": "Q · Kwaliteit", "g": "G · Groei",
                  "d": "D · Degelijkheid", "m": "M · Management"}
+# Optional §3.3 ev.yahoo_source (absent in older grades JSON -> the neutral label).
+EV_SOURCE_LABELS = {"field": "Yahoo-EV (fast_info)",
+                    "derived": "Referentie-EV (afgeleid: koers × aandelen + schuld − kas)"}
 FLAG_EXPLAIN = {   # v2.1/v2.2 flag glossary (spec §4.5, msg 19)
     "EV_GAP": "Eigen EV (mcap + schuld − kas) wijkt >15% af van Yahoo's enterpriseValue; "
               "de yield rekent op de eigen EV.",
@@ -256,12 +259,24 @@ def _raw(x) -> str:
     return f"{float(x):.4f}" if 0 < a < 1 else f"{float(x):.2f}"
 
 
-def _pct_frac(x, signed: bool = False) -> str:
-    """Percentage display for values that may be stored as fraction (|x| ≤ 1.5) or %."""
+def _pct(x, *, stored: str, signed: bool = False) -> str:
+    """Percentage cell. `stored` names the unit the FIELD carries, per §3.3 — "percent"
+    for values already in percent (`ev.gap_pct`) and "fraction" for fractions of 1
+    (`mos.mos_pct`, `mos.growth`, `mos.wacc`). Never guessed from magnitude: a −0.8%
+    EV gap and a +180% margin of safety are both ordinary values that a magnitude
+    guess renders 100× off in opposite directions."""
+    if stored not in ("percent", "fraction"):
+        raise ValueError(f"stored must be 'percent' or 'fraction', got {stored!r}")
     if x is None:
         return "—"
-    v = float(x) * 100.0 if abs(float(x)) <= 1.5 else float(x)
+    v = float(x) * 100.0 if stored == "fraction" else float(x)
     return f"{v:+.1f}%" if signed else f"{v:.1f}%"
+
+
+def _weight_formula(weights: dict) -> str:
+    """'0.40·Q + 0.25·G + 0.20·D + 0.15·M' rendered FROM the weight constant, so the
+    page can never advertise weights the constant no longer holds."""
+    return " + ".join(f"{w:.2f}·{p.upper()}" for p, w in weights.items())
 
 
 # ---------------------------------------------------------------- HTML fragments
@@ -415,7 +430,7 @@ def _pillar_table(row: dict) -> str:
                 f"<span id='recheck2-{_e(row.get('symbol', ''))}' class='muted'>"
                 "JavaScript vereist</span></td></tr>")
     quality = row.get("quality_score")
-    tail = (f"<p class='muted'>v3-kwaliteitsscore (0.40·Q + 0.25·G + 0.20·D + 0.15·M): "
+    tail = (f"<p class='muted'>v3-kwaliteitsscore ({_e(_weight_formula(W_QUALITY))}): "
             f"{_num(quality)}</p>" if quality is not None else "")
     return ("<h3>Pijlers × gewichten → composite</h3><div class='scroll'><table><thead><tr>"
             "<th>Pijler</th><th>Score</th><th>Gewicht</th><th>Bijdrage</th></tr></thead>"
@@ -489,12 +504,17 @@ def _flags_block(row: dict) -> str:
 
 
 def _ev_block(row: dict) -> str:
+    """Own EV vs the reference EV (§4.5). `ev.gap_pct` is stored in PERCENT (§3.3).
+    `ev.yahoo_source` ("field" = Yahoo's own enterpriseValue, "derived" = reconstructed
+    from price × shares + debt − cash) is optional: an older grades JSON without the key
+    renders the neutral label."""
     ev = row.get("ev") or {}
     gap = ev.get("gap_pct")
-    gap_txt = "—" if gap is None else _pct_frac(gap)
+    gap_txt = _pct(gap, stored="percent")
     cls = " class='flag'" if gap is not None and abs(float(gap)) > 15 else ""
+    source = EV_SOURCE_LABELS.get(ev.get("yahoo_source"), "Yahoo-EV")
     return (f"<h3>Eigen EV vs Yahoo-EV</h3><p>Eigen EV (mcap + schuld − kas): "
-            f"<b>{_money(ev.get('own'))}</b> · Yahoo-EV: {_money(ev.get('yahoo'))} · "
+            f"<b>{_money(ev.get('own'))}</b> · {_e(source)}: {_money(ev.get('yahoo'))} · "
             f"gat: <span{cls}>{_e(gap_txt)}</span></p>")
 
 
@@ -587,11 +607,14 @@ def _mos_block(row: dict) -> str:
     cls = "ok" if (pct or 0) > 0 else "bad"
     return (head + "<div class='scroll'><table><tbody>"
             f"<tr><td>Basis-FCF (max(TTM, 0.85 × 3-jr gem.))</td><td>{_money(mos.get('base_fcf'))}</td></tr>"
-            f"<tr><td>Groei (omzet-CAGR, afgekapt)</td><td>{_pct_frac(mos.get('growth'))}</td></tr>"
-            f"<tr><td>WACC (geklemd 6–20%)</td><td>{_pct_frac(mos.get('wacc'))}</td></tr>"
+            f"<tr><td>Groei (omzet-CAGR, afgekapt)</td>"
+            f"<td>{_pct(mos.get('growth'), stored='fraction')}</td></tr>"
+            f"<tr><td>WACC (geklemd 6–20%)</td>"
+            f"<td>{_pct(mos.get('wacc'), stored='fraction')}</td></tr>"
             f"<tr><td>Intrinsieke waarde (3-traps DCF)</td><td>{_money(mos.get('intrinsic_value'))}</td></tr>"
             f"<tr><td>Marktkapitalisatie</td><td>{_money(mos.get('market_cap'))}</td></tr>"
-            f"<tr><th>Margin of safety</th><th class='{cls}'>{_pct_frac(pct, signed=True)}</th></tr>"
+            f"<tr><th>Margin of safety</th>"
+            f"<th class='{cls}'>{_pct(pct, stored='fraction', signed=True)}</th></tr>"
             "</tbody></table></div>")
 
 
@@ -627,7 +650,7 @@ def _card(rank: int, row: dict, entry: dict | None, stage2: dict | None,
         f"<b>{rank}. {sym}</b> — {_e(row.get('name', ''))} "
         f"<span class='chip'>{_e(row.get('grade', ''))} {_num(row.get('composite'))}</span>"
         f"<span class='chip'>{_e(row.get('tier', ''))}</span>"
-        f"<span class='chip'>MoS {_pct_frac(mos, signed=True)}</span>{flags} "
+        f"<span class='chip'>MoS {_pct(mos, stored='fraction', signed=True)}</span>{flags} "
         f"<span id='recheck-{sym}' class='muted'>hercheck: JavaScript vereist</span>")
     meta = (f"<p class='muted'>{_e(row.get('sector') or '')} · {_e(row.get('industry') or '')}"
             f" · {_e(ttm_txt)}{_e(price_txt)}</p>")

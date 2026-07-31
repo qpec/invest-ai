@@ -10,9 +10,23 @@ solved properly"): rows are grouped by normalized company name (lowercase,
 listing decorations after " - " and parentheticals cut, punctuation stripped,
 trailing corporate/ADR suffix tokens and single letters dropped); within a
 group the home-market listing wins — a Dutch company keeps its Euronext
-Amsterdam ``.AS`` symbol, a US company its bare US symbol; a company that only
-lists away from home keeps its only listing. FinanceDatabase symbols are
-already yfinance symbols, so the ``.AS`` suffix is kept as-is.
+Amsterdam ``.AS`` symbol, a US company its bare US symbol.
+
+A company that lists ONLY away from home keeps its primary line, never an
+alphabetical accident: the preference is (0) home market, (1) a bare, dot-free
+symbol on a major US venue, (2) any other bare symbol, (3) the rest — ties
+broken by the shortest, then alphabetically first symbol. argenx SE and NXP
+Semiconductors NV are Dutch companies without an Amsterdam listing: they must
+resolve to ``ARGX`` and ``NXPI`` (Nasdaq), not to ``1AE.BE`` (Berlin) or
+``N1XP34.SA`` (a São Paulo BDR) — a wrong-currency ghost that would then be
+graded in place of the real company.
+
+Warrant/unit lines are dropped before grouping (a warrant is not an ordinary
+share and must never survive as its own "company"): names carrying a
+warrant/unit decoration — except an MLP's "common units", which ARE the
+ordinary line — and, inside a group, a symbol that is an ordinary sibling's
+symbol plus the US ``W``/``U`` suffix. FinanceDatabase symbols are already
+yfinance symbols, so the ``.AS`` suffix is kept as-is.
 
 The equities database is downloaded ONCE in main() (never at import time) to
 data/equities.bz2; ``--equities-file`` accepts a local copy.
@@ -28,7 +42,9 @@ from pathlib import Path
 
 import pandas as pd
 
-EQUITIES_URL = "https://raw.githubusercontent.com/JerBouma/FinanceDatabase/main/database/equities.bz2"
+# §3.1 pins `compression/` — the `database/` path 404s, which would hard-fail a fresh
+# checkout's default `python universe.py` (data/equities.bz2 is gitignored).
+EQUITIES_URL = "https://raw.githubusercontent.com/JerBouma/FinanceDatabase/main/compression/equities.bz2"
 DEFAULT_EQUITIES = Path("data") / "equities.bz2"
 
 COUNTRIES = ("United States", "Netherlands")
@@ -45,6 +61,29 @@ _SUFFIX_TOKENS = {
     "adr", "ads", "adss", "sponsored", "unsponsored", "registry", "shs", "shares",
 }
 
+# Yahoo exchange codes of the major US venues. A dot-free symbol quoted here is the
+# company's primary line; OTC (PNK/OTC) is deliberately NOT primary, so argenx's
+# ARGNF pink sheet can never beat its Nasdaq ARGX line.
+US_PRIMARY_EXCHANGES = frozenset({"NMS", "NYQ", "NGM", "NCM", "NGS", "NAS", "ASE",
+                                  "AMX", "PCX", "BTS"})
+
+_WARRANT_RE = re.compile(r"\bwarrants?\b", re.IGNORECASE)
+_UNIT_RE = re.compile(r"\bunits?\b", re.IGNORECASE)
+_COMMON_UNIT_RE = re.compile(r"\bcommon units?\b", re.IGNORECASE)
+
+
+def is_derivative_line(name: str) -> bool:
+    """True for a warrant/unit listing — a derivative of the company, not the company.
+
+    Warrants always qualify ("Rigetti Computing Inc. Warrants", "Expand Energy
+    Corporation Class C Warrants"). "Unit" lines qualify too (SPAC units, "Tangible
+    Equity Units", "Corporate Units") EXCEPT an MLP/LP "Common Units representing
+    limited partner interests", which is that partnership's ordinary line (TXO, XIFR)."""
+    s = str(name)
+    if _WARRANT_RE.search(s):
+        return True
+    return bool(_UNIT_RE.search(s)) and not _COMMON_UNIT_RE.search(s)
+
 
 def normalize_name(name: str) -> str:
     """Normalized grouping key for cross-listing dedupe (§3.1): lowercase, cut at
@@ -60,18 +99,36 @@ def normalize_name(name: str) -> str:
     return " ".join(tokens)
 
 
-def _pick_home_listing(group: pd.DataFrame) -> pd.Series:
-    """Home-market preference within one normalized-name group (§3.1): NL company ->
-    `.AS` listing, US company -> bare US symbol, else the (alphabetically first)
-    only listing away from home."""
-    g = group.sort_values("symbol")
-    nl = g[(g["country"] == "Netherlands") & g["symbol"].str.endswith(".AS")]
-    if len(nl):
-        return nl.iloc[0]
-    us = g[(g["country"] == "United States") & ~g["symbol"].str.contains(".", regex=False)]
-    if len(us):
-        return us.iloc[0]
-    return g.iloc[0]
+def listing_tier(d: pd.DataFrame) -> pd.Series:
+    """Listing preference per row (lower wins), the §3.1 dedupe order:
+
+    0 home market — NL company on a `.AS` line, US company on a bare US primary line;
+    1 primary venue away from home — a bare, dot-free symbol on a major US exchange
+      (this is what makes argenx resolve to ARGX and NXP to NXPI instead of to their
+      Berlin/São Paulo secondary lines);
+    2 any other bare, dot-free symbol (OTC pink sheets, unknown venues);
+    3 everything else (foreign secondary lines, BDRs, registry shares)."""
+    sym = d["symbol"].astype(str)
+    dot_free = ~sym.str.contains(".", regex=False)
+    primary = dot_free & d["exchange"].astype(str).str.upper().isin(US_PRIMARY_EXCHANGES)
+    home = (((d["country"] == "Netherlands") & sym.str.endswith(".AS"))
+            | ((d["country"] == "United States") & primary))
+    tier = pd.Series(3, index=d.index, dtype="int64")
+    tier[dot_free] = 2
+    tier[primary] = 1
+    tier[home] = 0
+    return tier
+
+
+def _drop_group_warrant_symbols(d: pd.DataFrame) -> pd.DataFrame:
+    """Drop a symbol that is an ordinary sibling's symbol plus the US warrant/unit
+    suffix (`RGTI` -> `RGTIW`, `BTSG` -> `BTSGU`) WITHIN the same company group —
+    the belt to the name-based `is_derivative_line` braces, for feeds that give the
+    warrant line the company's own name. Never drops a symbol whose stem is absent."""
+    stems = set(zip(d["_norm"], d["symbol"]))
+    derivative = [len(s) > 1 and s[-1] in "WU" and (n, s[:-1]) in stems
+                  for n, s in zip(d["_norm"], d["symbol"])]
+    return d[~pd.Series(derivative, index=d.index)]
 
 
 def filter_universe(df: pd.DataFrame, *, broad: bool = False) -> pd.DataFrame:
@@ -90,18 +147,20 @@ def filter_universe(df: pd.DataFrame, *, broad: bool = False) -> pd.DataFrame:
         d = d[d["market_cap"].isin(CAPS_BROAD)]
     else:
         d = d[d["sector"].isin(CORE_SECTORS) & d["market_cap"].isin(CAPS_DEFAULT)]
-    d = d.drop_duplicates(subset="symbol", keep="first")
+    d = d[~d["name"].map(is_derivative_line)]          # warrants/units are not companies
+    d = d.drop_duplicates(subset="symbol", keep="first").reset_index(drop=True)
     d["_norm"] = d["name"].map(normalize_name)
-
-    rows = []
-    for norm, group in d.groupby("_norm", sort=False):
-        if norm == "":  # unnormalizable names never merge with each other
-            rows.extend(r for _, r in group.iterrows())
-        else:
-            rows.append(_pick_home_listing(group))
-    if not rows:
+    d = _drop_group_warrant_symbols(d)
+    if d.empty:
         return pd.DataFrame(columns=COLUMNS)
-    out = pd.DataFrame(rows)[COLUMNS]
+
+    # One row per company: the best listing tier, ties to the shortest (most canonical)
+    # then alphabetically first symbol. Unnormalizable names never merge with each other.
+    d["_tier"] = listing_tier(d)
+    d["_len"] = d["symbol"].str.len()
+    d = d.sort_values(["_tier", "_len", "symbol"], kind="stable")
+    named = d[d["_norm"] != ""].groupby("_norm", sort=False).head(1)
+    out = pd.concat([named, d[d["_norm"] == ""]])[COLUMNS]
     return out.sort_values("symbol").reset_index(drop=True)
 
 

@@ -6,12 +6,23 @@ Bundle that scoring.py consumes live — EDGAR tags mapped to Yahoo-style row la
 exist, and the value used for a period is the latest-filed one (restatements honored,
 lookahead impossible). Flow quarters: durations <= 100 days pass through as true
 quarters; longer cumulatives (YTD / FY / broken-fiscal-year stubs) are differenced
-against the prior YTD whose period-start matches within +/-365 days (msg 44), accepted
-only when the derived span is itself a quarter (<= 100 days) so a prior-year YTD can
-never masquerade as one; Q4 falls out of FY minus the 9-month YTD through the same rule
-(no separate FY-minus-3-quarters pass). Multi-class dei share counts are summed per
-filed date; an inconsistent filing empties the series so the M share-trend leg stays
-neutral in scoring (msg 44). No I/O, no network, no clock.
+against a prior CUMULATIVE only — same period-start, or a genuine cumulative (span >
+100 days) whose start matches within +/-365 days for broken fiscal years (msg 44) —
+and accepted only when the derived span is itself a quarter (<= 100 days), so neither a
+prior-year YTD nor a DISCRETE sibling quarter can masquerade as the subtrahend; Q4 falls
+out of FY minus the 9-month YTD through the same rule (no separate FY-minus-3-quarters
+pass). Multi-class dei share counts are summed per filed date; an inconsistent filing
+empties the SERIES so the M share-trend leg stays neutral in scoring (msg 44) while
+shares_fallback() still yields a share count for the market cap, so the name grades
+instead of vanishing as INSUFFICIENT (`shares_basis` records which path was used).
+
+Prices: the §3.6 weekly grid carries BOTH the raw close and the adjusted close per bar.
+Anything multiplied by a share count (market cap, own EV, MoS, WACC) MUST use the raw
+close — adjusted closes are retroactively rescaled by every later split and dividend, so
+building a historical market cap out of them silently imports the future. Total-return
+math (NAV, forward returns, the benchmark track) uses adj_close. A legacy grid of plain
+floats loads DEGRADED: the one value stands for both fields (grid_is_degraded() flags it).
+No I/O, no network, no clock.
 """
 from __future__ import annotations
 
@@ -19,7 +30,13 @@ from datetime import date
 
 QUARTER_MAX_DAYS = 100         # §5.9: a duration this short IS a quarter (53-week-year safe)
 YTD_START_WINDOW_DAYS = 365    # §5.9: prior-YTD start-match tolerance (broken fiscal years)
+SAME_START_TOLERANCE_DAYS = 7  # 52/53-week fiscal wobble still counts as the same start
 ANNUAL_MIN_DAYS, ANNUAL_MAX_DAYS = 330, 400   # 52-week (364d) .. sloppy calendar annual
+MULTICLASS_SPREAD_DAYS = 45    # cover-page class rows this close still sum to one count
+
+PRICE_FIELDS = ("close", "adj_close")   # raw (share-count math) / adjusted (total return)
+DEFAULT_PRICE_FIELD = "close"
+BARS_KEY, SYMBOL_KEY = "bars", "symbol"  # §3.6 price-file envelope (true symbol inside)
 
 # §5.9 tag fallback chains (msg 44 adversarial fixes pinned; first present wins per period).
 _INCOME_CONCEPTS = {
@@ -104,10 +121,25 @@ def annual_flows(periods: dict) -> dict:
     return out
 
 
+def _is_prior_cumulative(start: str, start2: str, end2: str) -> bool:
+    """§5.9 subtrahend test: may the period (start2, end2) be subtracted from a cumulative
+    starting at `start`? Only a prior CUMULATIVE qualifies — either it starts on the same
+    day (within SAME_START_TOLERANCE_DAYS for 52/53-week wobble), in which case it IS this
+    fiscal period's shorter YTD whatever its length (the 3-month YTD doubles as Q1), or it
+    is itself materially longer than a quarter and its start matches within the +/-365d
+    broken-fiscal-year window (msg 44). A DISCRETE sibling quarter with a different start
+    is refused: 9M-YTD minus a discrete Q2 would book Q1+Q3 as Q3. The tolerance is orders
+    of magnitude below a quarter, so it can never re-admit one."""
+    if abs(_days(start, start2)) <= SAME_START_TOLERANCE_DAYS:
+        return True
+    return (_days(start2, end2) > QUARTER_MAX_DAYS
+            and abs(_days(start, start2)) <= YTD_START_WINDOW_DAYS)
+
+
 def quarterly_flows(periods: dict) -> dict:
     """§5.9 flow-quarter derivation over {(start, end): value}: durations <= 100 days pass
     through as true quarters; a longer cumulative becomes the quarter ending at its end by
-    subtracting the prior YTD — period-start within +/-365 days (exact match preferred,
+    subtracting a prior CUMULATIVE per _is_prior_cumulative (start drift preferred smallest,
     then the latest prior end), and only a derived span <= 100 days is accepted, so a
     prior-year YTD (span ~365d) can never masquerade as a quarter (msg 44)."""
     quarters = {}
@@ -122,10 +154,9 @@ def quarterly_flows(periods: dict) -> dict:
         for (start2, end2), val2 in periods.items():
             if end2 >= end or not 0 < _days(end2, end) <= QUARTER_MAX_DAYS:
                 continue
-            drift = abs(_days(start, start2))
-            if drift > YTD_START_WINDOW_DAYS:
+            if not _is_prior_cumulative(start, start2, end2):
                 continue
-            rank = (drift, -date.fromisoformat(end2).toordinal())
+            rank = (abs(_days(start, start2)), -date.fromisoformat(end2).toordinal())
             if best is None or rank < best[0]:
                 best = (rank, val - val2)
         if best is not None:
@@ -198,6 +229,32 @@ def shares_series(facts: dict, as_of) -> list:
     return [[end, series[end]] for end in sorted(series)]
 
 
+def shares_fallback(facts: dict, as_of) -> tuple[float | None, str | None]:
+    """§5.9 multi-class fallback (the reachable half of msg 44's "multi-class-shares-
+    fallback met neutrale M-leg"): the best share count knowable at as_of when
+    shares_series() refuses to build a trend series. The latest filed date <= as_of wins;
+    its class rows are summed when they were all measured within MULTICLASS_SPREAD_DAYS of
+    each other (an ordinary cover page counts its classes days apart -> "fallback-sum"),
+    otherwise they cannot be one company-wide count and the largest single class stands in
+    ("fallback-largest"). Returns (count, basis), (None, None) when nothing is knowable.
+    The SERIES stays empty either way — the M share-trend leg stays neutral — but the name
+    keeps a market cap and therefore GRADES instead of silently suspending."""
+    as_of = _iso(as_of)
+    by_filed = {}
+    for entry in _unit_entries(facts, "dei", _SHARES_TAG):
+        filed, end, val = entry.get("filed"), entry.get("end"), entry.get("val")
+        if filed is None or end is None or val is None or filed > as_of:
+            continue
+        by_filed.setdefault(filed, []).append((end, float(val)))
+    if not by_filed:
+        return None, None
+    observations = by_filed[max(by_filed)]
+    ends = [end for end, _ in observations]
+    if _days(min(ends), max(ends)) <= MULTICLASS_SPREAD_DAYS:
+        return sum(val for _, val in observations), "fallback-sum"
+    return max(val for _, val in observations), "fallback-largest"
+
+
 def shares_at(series: list, as_of) -> float | None:
     """Last share observation dated at or before as_of from an ascending §5.9 series."""
     as_of = _iso(as_of)
@@ -208,21 +265,79 @@ def shares_at(series: list, as_of) -> float | None:
     return best
 
 
-def price_at(prices: dict, symbol: str, day) -> float | None:
-    """Last weekly close at or before `day` from the §3.6 grid ({symbol: {date: adj_close}});
-    None when the symbol has no bar at or before it."""
+def bar_value(bar, field: str = DEFAULT_PRICE_FIELD) -> float | None:
+    """One §3.6 price bar -> the requested field. A current bar is
+    {"close": raw, "adj_close": adjusted}; a bar missing the asked-for field falls back to
+    the other one, and a LEGACY plain-float bar (grids written before the split-safe
+    format) stands for both fields — degraded, because that single value was an adjusted
+    close, so market caps built from it carry every later split/dividend rescaling."""
+    if isinstance(bar, dict):
+        val = bar.get(field)
+        if val is None:
+            val = bar.get("adj_close" if field == "close" else "close")
+        return None if val is None else float(val)
+    return None if bar is None else float(bar)
+
+
+def grid_is_degraded(grid: dict) -> bool:
+    """True when any bar in a §3.6 grid has no raw close of its own — a legacy float bar,
+    or an adjusted-only bar written when Yahoo would not hand over the raw column. The
+    caller must disclose that market caps built on it are split/dividend-contaminated."""
+    return any(not isinstance(bar, dict) or bar.get("close") is None
+               for bar in (grid or {}).values())
+
+
+def price_at(prices: dict, symbol: str, day, field: str = DEFAULT_PRICE_FIELD) -> float | None:
+    """Last weekly bar at or before `day` from the §3.6 grid ({symbol: {date: bar}}), read
+    on `field`: "close" (RAW, the only price that may multiply a share count) or
+    "adj_close" (total return: NAV, forward returns, benchmark). None when the symbol has
+    no bar at or before `day`."""
     grid = prices.get(symbol) or {}
     day = _iso(day)
     best = None
     for bar in grid:
         if bar <= day and (best is None or bar > best):
             best = bar
-    return grid[best] if best is not None else None
+    return bar_value(grid[best], field) if best is not None else None
+
+
+# ----------------------------------------------- §3.6 cache-file shapes (writer + reader)
+
+def price_file(symbol: str, bars: dict) -> dict:
+    """The §3.6 prices/<SYM>.json payload: the TRUE symbol next to the date-keyed bars, so
+    a sanitized filename ("BRK/B" -> BRK-B.json) round-trips back to its universe symbol."""
+    return {SYMBOL_KEY: symbol, BARS_KEY: bars}
+
+
+def load_price_file(payload: dict) -> tuple[str | None, dict]:
+    """A prices/<SYM>.json payload -> (symbol or None, {date: bar}). Accepts the current
+    envelope and both legacy shapes (a bare date-keyed map of floats or of bars), where the
+    symbol is unknown and the caller falls back to the filename stem."""
+    if not isinstance(payload, dict):
+        return None, {}
+    if BARS_KEY in payload:
+        return payload.get(SYMBOL_KEY), payload.get(BARS_KEY) or {}
+    return (payload.get(SYMBOL_KEY),
+            {key: val for key, val in payload.items() if key != SYMBOL_KEY})
+
+
+def cache_stem(symbol: str) -> str:
+    """The §3.2/§3.6 cache filename stem for a symbol ('/' -> '-', dots kept) — a pure
+    mirror of populate.cache_filename so the offline loader can REVERSE the sanitization
+    (map BRK-B.json back to the universe's "BRK/B") without importing the yfinance-backed
+    writer. tests/test_pit.py pins the two rules identical."""
+    return symbol.replace("/", "-")
+
+
+def facts_symbol(payload: dict) -> str | None:
+    """The true symbol annotated onto a facts/<SYM>.json payload by bt_fetch (companyfacts
+    itself carries only cik/entityName), or None for a file written before the annotation."""
+    return (payload or {}).get(SYMBOL_KEY)
 
 
 def quarter_ends(spy_prices: dict, start, end) -> list:
     """§5.10 rebalance grid: the last weekly bar date per calendar quarter within
-    [start, end], from the benchmark's {date: adj_close} price grid."""
+    [start, end], from the benchmark's {date: bar} price grid (dates only, no values)."""
     start, end = _iso(start), _iso(end)
     by_quarter = {}
     for day in spy_prices:
@@ -237,8 +352,13 @@ def quarter_ends(spy_prices: dict, start, end) -> list:
 def as_of_bundle(facts: dict, symbol: str, meta: dict, as_of, prices: dict) -> dict | None:
     """§5.9: EDGAR companyfacts -> the §4.1 Bundle as it was knowable on as_of, or None
     when no annual income period is visible yet (a pre-first-10-K name is not scoreable).
-    market_cap = shares_at(as_of) x price_at(as_of) on the §3.6 weekly grid; yahoo_ev is
-    None by construction (no Yahoo in the PIT world — the EV_GAP flag never fires)."""
+    market_cap = share count at as_of x the RAW weekly close at as_of — as-reported dei
+    shares against an as-traded price, never the adjusted close (that one is rewritten by
+    every later split/dividend and would import the future into every historical tick).
+    The share count comes from the trend series, else from shares_fallback; `shares_basis`
+    ("series" | "fallback-sum" | "fallback-largest" | None) records which, so the multi-
+    class path is auditable. yahoo_ev is None by construction (no Yahoo in the PIT world —
+    the EV_GAP flag never fires)."""
     as_of = _iso(as_of)
     if not facts or not (facts.get("facts") or {}):
         return None
@@ -256,8 +376,10 @@ def as_of_bundle(facts: dict, symbol: str, meta: dict, as_of, prices: dict) -> d
         return None
     balance = _section(_balance_maps(facts, as_of))
     series = shares_series(facts, as_of)
-    px = price_at(prices, symbol, as_of)
-    shares = shares_at(series, as_of)
+    px = price_at(prices, symbol, as_of, DEFAULT_PRICE_FIELD)   # RAW close, never adjusted
+    shares, shares_basis = shares_at(series, as_of), "series"
+    if shares is None:                    # empty/inconsistent series -> best count at as_of
+        shares, shares_basis = shares_fallback(facts, as_of)
     meta = meta or {}
     return {
         "symbol": symbol,
@@ -265,7 +387,7 @@ def as_of_bundle(facts: dict, symbol: str, meta: dict, as_of, prices: dict) -> d
         "industry": meta.get("industry"),
         "market_cap": shares * px if shares is not None and px is not None else None,
         "yahoo_ev": None, "price": px,
-        "shares_series": series,
+        "shares_series": series, "shares_basis": shares_basis,
         "annual": {"income": annual_income,
                    "balance": {end: payload for end, payload in balance.items()
                                if end in annual_income},

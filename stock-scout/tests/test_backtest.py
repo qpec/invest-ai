@@ -1,6 +1,7 @@
 """Offline tests for the backtest harnesses (RECONSTRUCTION.md §5.10, §5.11):
-NAV arithmetic incl. the cost drag, delist exits, band-cohort bookkeeping, the
-owner-mode hold-a-winner scenario (msg 47 'ontsla je beste werknemer'), the
+NAV arithmetic incl. the cost drag, delist exits, band-cohort bookkeeping, total-return
+(adjusted-close) marking across a split, the bt_cache round-trip for a sanitized symbol,
+the owner-mode hold-a-winner scenario (msg 47 'ontsla je beste werknemer'), the
 walk-forward verdict structure, quality cohorts, and one synthetic-facts end-to-end
 run through the shared decision layer. Injected scored rows + synthetic companyfacts
 only — no network, no real caches."""
@@ -8,10 +9,12 @@ from __future__ import annotations
 
 import json
 
+import pandas as pd
 import pytest
 
 import backtest
 import backtest3
+import bt_fetch
 import formation
 import pit
 import scoring
@@ -33,9 +36,21 @@ def row(symbol, composite, quality=None, v=50.0, grade="B", vetoed=False, reason
 
 
 def grid_of(path_by_symbol):
-    """{symbol: [px per tick]} -> the §3.6 weekly price shape (bars on the ticks)."""
+    """{symbol: [px per tick]} -> a LEGACY §3.6 weekly grid (plain floats, one value for
+    both price fields). Kept deliberately: these tests double as the backward-compatibility
+    proof that pre-split-safe caches still load and simulate."""
     return {sym: {day: px for day, px in zip(T, path) if px is not None}
             for sym, path in path_by_symbol.items()}
+
+
+def bars_of(raw_by_symbol, adj_by_symbol=None):
+    """{symbol: [raw px per tick]} (+ optional adjusted path) -> the current §3.6 grid
+    shape: {"YYYY-MM-DD": {"close": raw, "adj_close": adjusted}}."""
+    adj_by_symbol = adj_by_symbol or raw_by_symbol
+    return {sym: {day: {"close": raw, "adj_close": adj}
+                  for day, raw, adj in zip(T, path, adj_by_symbol[sym])
+                  if raw is not None}
+            for sym, path in raw_by_symbol.items()}
 
 
 # ------------------------------------------------- NAV arithmetic + cost drag (§5.10)
@@ -65,6 +80,35 @@ def test_partial_rotation_charges_cost_on_the_traded_weight_only():
     res = backtest.simulate(scored, prices, T[:3], top_n=2, cost_bp=10.0)
     assert res["turnover_pct"] == pytest.approx([100.0, 100.0])
     assert res["final_nav"] == pytest.approx(0.999 * (1 - 0.001 * 1.0))
+
+
+# ------------------------------------------- raw vs adjusted marking (§3.6, §5.10)
+
+def test_returns_and_nav_use_adjusted_closes_so_a_split_is_not_a_crash():
+    # X splits 2:1 between T1 and T2: the raw close halves (110 -> 55) while the adjusted
+    # series runs on. Total-return math must read adj_close (0% over the split), never the
+    # raw close (-50%) — the raw close belongs to share-count math only (market cap).
+    prices = bars_of({"X": [100.0, 110.0, 55.0]}, {"X": [50.0, 55.0, 55.0]})
+    assert backtest.fwd_return(prices, "X", T[0], T[1]) == pytest.approx(0.10)
+    assert backtest.fwd_return(prices, "X", T[1], T[2]) == pytest.approx(0.0)
+    assert pit.price_at(prices, "X", T[2]) == 55.0            # raw, for the market cap
+    assert pit.price_at(prices, "X", T[1]) == 110.0
+    scored = {t: [row("X", 90)] for t in T[:3]}
+    res = backtest.simulate(scored, prices, T[:3], top_n=1, cost_bp=0.0)
+    assert res["final_nav"] == pytest.approx(1.10)            # not 1.10 * 0.5
+    assert not backtest.degraded_price_symbols(prices)
+
+
+def test_benchmark_track_and_degradation_reporting_follow_the_same_rule():
+    prices = bars_of({"SPY": [100.0, 110.0, 55.0]}, {"SPY": [50.0, 55.0, 55.0]})
+    track = backtest.spy_track(prices, T[:3])
+    assert track[T[1]] == pytest.approx(1.10) and track[T[2]] == pytest.approx(1.10)
+    # A legacy float grid still simulates, but every reader is told it is contaminated.
+    legacy = grid_of({"SPY": [100.0, 110.0, 121.0]})
+    assert backtest.spy_track(legacy, T[:3])[T[2]] == pytest.approx(1.21)
+    assert backtest.degraded_price_symbols(legacy) == ["SPY"]
+    assert any("ruwe close" in d for d in backtest.disclosures(10.0, ["SPY"]))
+    assert not any("ruwe close" in d for d in backtest.disclosures(10.0))
 
 
 # ----------------------------------------------------------------- delist exit (§5.10)
@@ -157,7 +201,10 @@ def test_owner_mode_exits_on_veto_and_delist_but_not_on_price():
                      row("R1", 80, vetoed=True, reason="leverage veto: 5.1 > 4.0")]
     res = backtest3.simulate_owner(scored, prices, T, top_n=2, cost_bp=0.0)
     assert res["holdings_log"][0]["held"] == ["R1", "W"]
-    assert res["holdings_log"][1]["held"] == ["W"]           # veto bites at T1
+    # The veto bites at T1: R1 is out and never returns. (Whether the freed slot is
+    # refilled that same tick is formation.py's persistence rule — a bench name with its
+    # two quarters of evidence may take it — not this test's subject.)
+    assert all("R1" not in entry["held"] for entry in res["holdings_log"][1:])
     reasons = " ".join(t["reason"] for t in res["state"]["transfers"])
     assert "veto" in reasons
     assert all("W" in entry["held"] for entry in res["holdings_log"])
@@ -239,6 +286,65 @@ def test_quality_cohorts_rank_buckets_and_cumulative_returns():
     assert "Rang 1-15" in backtest3.render_cohorts_report(result)
 
 
+# ---------------------------------------- bt_cache round-trip (§3.6, §5.10 loader)
+
+def _write_cache(tmp_path, symbol, *, annotate=True, legacy_prices=False):
+    """Write one facts + one prices file exactly as bt_fetch does (filename sanitized,
+    true symbol inside), or in the pre-fix legacy shapes."""
+    facts_dir, prices_dir = tmp_path / "bt" / "facts", tmp_path / "bt" / "prices"
+    facts_dir.mkdir(parents=True, exist_ok=True)
+    prices_dir.mkdir(parents=True, exist_ok=True)
+    stem = pit.cache_stem(symbol)
+    payload = _facts_for(1.0)
+    if annotate:
+        payload[pit.SYMBOL_KEY] = symbol
+    (facts_dir / f"{stem}.json").write_text(json.dumps(payload), encoding="utf-8")
+    if legacy_prices:
+        bars = {"2024-03-28": 50.0, "2024-06-28": 55.0}          # flat floats, no symbol
+    else:
+        frame = pd.DataFrame({"close": [100.0, 110.0], "adj_close": [50.0, 55.0]},
+                             index=pd.to_datetime(["2024-03-28", "2024-06-28"], utc=True))
+        bars = bt_fetch.prices_payload(frame, "2020-01-01", symbol)
+    (prices_dir / f"{stem}.json").write_text(json.dumps(bars), encoding="utf-8")
+    universe = tmp_path / "universe.csv"
+    universe.write_text("symbol,name,sector,industry\n"
+                        f"{symbol},Berkshire Hathaway,Financials,Insurance\n",
+                        encoding="utf-8")
+    return tmp_path / "bt", universe
+
+
+def test_sanitized_symbol_round_trips_from_cache_files_back_to_its_universe_meta(tmp_path):
+    # The writer sanitizes 'BRK/B' -> BRK-B.json. Keying the loaded dicts by the filename
+    # stem loses the symbol: the meta lookup misses (sector None -> wrong tier and wrong
+    # sector cohort) and every downstream match against the universe symbol fails.
+    symbol = "BRK/B"
+    bt_dir, universe = _write_cache(tmp_path, symbol)
+    assert (bt_dir / "facts" / "BRK-B.json").exists()
+    facts, prices, meta = backtest.load_bt_cache(bt_dir, universe)
+    assert set(facts) == {symbol} and set(prices) == {symbol}
+    assert meta[symbol]["sector"] == "Financials"
+    assert pit.price_at(prices, symbol, "2024-06-28") == 110.0
+    assert pit.price_at(prices, symbol, "2024-06-28", "adj_close") == 55.0
+    bundle = pit.as_of_bundle(facts[symbol], symbol, meta[symbol], "2024-06-28", prices)
+    assert bundle["sector"] == "Financials"           # the tier/cohort input survives
+    assert bundle["market_cap"] == pytest.approx(1_000_000.0 * 110.0)
+
+
+def test_legacy_cache_files_resolve_through_the_universe_sanitized_name_map(tmp_path):
+    # Files written before the in-payload symbol: the loader reverses the sanitization via
+    # universe.csv, so an old bt_cache keeps working (its grid is flagged degraded).
+    symbol = "BRK/B"
+    bt_dir, universe = _write_cache(tmp_path, symbol, annotate=False, legacy_prices=True)
+    facts, prices, meta = backtest.load_bt_cache(bt_dir, universe)
+    assert set(facts) == {symbol} and set(prices) == {symbol}
+    assert meta[symbol]["sector"] == "Financials"
+    assert backtest.degraded_price_symbols(prices) == [symbol]
+    # With no universe row to reverse it, the stem is all that is left — and it is honest.
+    empty = tmp_path / "nothing.csv"
+    facts, prices, _ = backtest.load_bt_cache(bt_dir, empty)
+    assert set(facts) == {"BRK-B"} and set(prices) == {"BRK-B"}
+
+
 # ------------------------------- synthetic facts end-to-end (§5.10, test_pit style)
 
 def dfact(start, end, val, filed):
@@ -314,6 +420,10 @@ def test_end_to_end_synthetic_facts_through_the_shared_decision_layer():
     md = backtest.render_report(result)
     assert "Band-cohorten" in md and "PIT-discipline" in md and "Tick-log" in md
     json.dumps(result, allow_nan=False)                      # §5.10 .json contract
+    # This fixture runs on a legacy float grid, so the report must own up to it.
+    assert result["degraded_price_symbols"] == sorted(["SPY"] + symbols)
+    assert any("ruwe close" in d for d in result["disclosures"])
+    assert "ruwe close" in md
 
     # And the same PIT world drives owner-mode + walk-forward unchanged (§5.11).
     scored = backtest.score_ticks(facts, prices, meta, result["ticks"])

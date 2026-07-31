@@ -11,15 +11,25 @@ V-percentile < EXIT_V_PCTL (extreme duurte) — winners and sitting players get 
 (msg 58: DOCU at rank 35 stays). Every constant is imported from scoring.py, never
 redefined here.
 
+The bench is the waiting room around the entry pool: gate-passing names ranked
+anywhere inside the candidate band (rank <= BENCH_RANK, the same rank at which a
+seated name would be sold) that are not seated. They collect a quarter of evidence
+per quarter; a bench member is promoted when it has BOTH the persistence
+(streak >= PERSISTENCE_QUARTERS) AND a spot in the entry pool (rank <= SLOTS,
+through the price gate) AND an open slot — msg 58's first formation, 14 seated with
+KRYS/CPAY/GDDY/FTNT/NVDA "waiting one more quarter for their evidence".
+
 Quarter discipline (msg 62 fix): the quarter key is the calendar quarter of run_date;
 streaks/persistence advance ONLY when that quarter differs from the stored one — a
 same-quarter re-run refreshes ranks and gate verdicts (and can still exit or seat a
 name) without handing anyone an unearned "second quarter of evidence".
 
 Bootstrap (first run, msg 58 "PIT-bootstrap"): pool members already passing gate+rank
-enter immediately with since = current quarter; any pool remainder that finds no open
-slot goes to the bench with streak 1. The squad never exceeds SLOTS; a free slot with
-no proven candidate stays open ("liever cash dan een kandidaat zonder bewijs").
+enter immediately with since = current quarter; every other bench candidate — the
+gate-passing names ranked just outside the seats — starts on the bench with streak 1,
+so a first run really does produce squad AND bench. The squad never exceeds SLOTS; a
+free slot with no proven candidate stays open ("liever cash dan een kandidaat zonder
+bewijs").
 
 `update()` is pure (no I/O, no clock); load/save/CLI wrap it. Transfers are
 append-only with dated NL reasons (msg 57-58 phrasing).
@@ -38,6 +48,14 @@ STATE_FILE = "formation-state.json"
 _NL_NUMBERS = {1: "één", 2: "twee", 3: "drie", 4: "vier", 5: "vijf"}
 
 
+def bench_rank() -> int:
+    """Bench band bound: still-plausible entries are the gate-passing names down to the
+    rank at which a SEATED name would be sold (§4.7 EXIT_RANK) — below that line a name
+    is not a candidate at all and collects no evidence. Read at call time, so a backtest
+    sweep that moves the exit rank moves the bench band with it."""
+    return EXIT_RANK
+
+
 def quarter_of(run_date: str) -> str:
     """Calendar quarter key of an ISO date (§3.4): '2026-07-30' -> '2026Q3'."""
     d = date.fromisoformat(run_date)
@@ -48,22 +66,25 @@ def _nl_count(n: int) -> str:
     return _NL_NUMBERS.get(n, str(n))
 
 
-def _views(scored: list[dict]) -> tuple[dict, dict, dict, list[str]]:
-    """Per-run views over §3.3 scored rows -> (rank, v_pctl, veto_reason, pool).
+def _views(scored: list[dict]) -> tuple[dict, dict, dict, list[str], list[str]]:
+    """Per-run views over §3.3 scored rows -> (rank, v_pctl, veto_reason, pool, band).
 
     rank: quality rank 1..N over names with a quality_score (desc, symbol tiebreak);
     v_pctl: V pillar score (the sector percentile of owner-FCF yield, §4.7);
     veto_reason: symbol -> reason for every vetoed name;
-    pool: entry pool in rank order — rank <= SLOTS AND V-percentile >= GATE_V_PCTL."""
+    pool: entry pool in rank order — rank <= SLOTS AND V-percentile >= GATE_V_PCTL;
+    band: bench candidates in rank order — the same gate, rank <= bench_rank() (a
+    superset of the pool: the pool is what may be SEATED, the band what may WAIT)."""
     ranked = sorted((s for s in scored if s.get("quality_score") is not None),
                     key=lambda s: (-s["quality_score"], s["symbol"]))
     rank = {s["symbol"]: i + 1 for i, s in enumerate(ranked)}
     v_pctl = {s["symbol"]: s["pillars"]["v"] for s in ranked}
     veto_reason = {s["symbol"]: (s.get("veto") or {}).get("reason") or "veto"
                    for s in scored if (s.get("veto") or {}).get("vetoed")}
-    pool = [s["symbol"] for s in ranked
-            if rank[s["symbol"]] <= SLOTS and v_pctl[s["symbol"]] >= GATE_V_PCTL]
-    return rank, v_pctl, veto_reason, pool
+    gated = [s["symbol"] for s in ranked if v_pctl[s["symbol"]] >= GATE_V_PCTL]
+    pool = [sym for sym in gated if rank[sym] <= SLOTS]
+    band = [sym for sym in gated if rank[sym] <= bench_rank()]
+    return rank, v_pctl, veto_reason, pool, band
 
 
 def _transfer(run_date: str, action: str, symbol: str, reason: str) -> dict:
@@ -76,21 +97,26 @@ def _sorted_squad(squad: list[dict]) -> list[dict]:
                                         m["quality_rank"] or 0, m["symbol"]))
 
 
-def _bootstrap(rank: dict, pool: list[str], quarter: str, run_date: str
+def _bootstrap(rank: dict, pool: list[str], band: list[str], quarter: str, run_date: str
                ) -> tuple[list[dict], list[dict], list[dict]]:
-    """§5.6 first run: gate+rank passers enter with since = current quarter; any pool
-    remainder beyond the open slots goes to the bench with streak 1."""
-    squad, bench, transfers = [], [], []
+    """§5.6 first run: entry-pool members (gate + rank <= SLOTS) take the seats, in rank
+    order, up to SLOTS; every remaining bench candidate — pool overflow first, then the
+    gate-passing names ranked just outside the seats (up to bench_rank()) — starts on the
+    bench with streak 1, so it can be promoted once it has both the evidence and a
+    place in the entry pool."""
+    squad, transfers = [], []
     for sym in pool:
-        if len(squad) < SLOTS:
-            squad.append({"symbol": sym, "since": quarter, "entered_date": run_date,
-                          "quality_rank": rank[sym], "streak": 1})
-            transfers.append(_transfer(
-                run_date, "in", sym,
-                f"erin — bootstrap: rang {rank[sym]} binnen de top-{SLOTS} "
-                f"én door de prijspoort"))
-        else:
-            bench.append({"symbol": sym, "streak": 1, "needed": PERSISTENCE_QUARTERS})
+        if len(squad) >= SLOTS:
+            break
+        squad.append({"symbol": sym, "since": quarter, "entered_date": run_date,
+                      "quality_rank": rank[sym], "streak": 1})
+        transfers.append(_transfer(
+            run_date, "in", sym,
+            f"erin — bootstrap: rang {rank[sym]} binnen de top-{SLOTS} "
+            f"én door de prijspoort"))
+    seated = {m["symbol"] for m in squad}
+    bench = [{"symbol": sym, "streak": 1, "needed": PERSISTENCE_QUARTERS}
+             for sym in band if sym not in seated]
     return squad, bench, transfers
 
 
@@ -100,14 +126,15 @@ def update(state: dict | None, scored: list[dict], run_date: str
 
     Order: exits (always evaluated — a veto must bite even on a same-quarter re-run) ->
     squad rank refresh + streak advance (advance only on quarter change, msg 62) ->
-    bench rebuild from the current pool (carried streaks; +1 only on quarter change;
-    a name that fell out of the pool loses its consecutive streak) -> promotions
-    (streak >= PERSISTENCE_QUARTERS, rank order, only while a slot is open)."""
+    bench rebuild from the current candidate band (carried streaks; +1 only on quarter
+    change; a name that fell out of the band loses its consecutive streak) -> promotions
+    (streak >= PERSISTENCE_QUARTERS AND back inside the entry pool, rank order, only
+    while a slot is open)."""
     quarter = quarter_of(run_date)
-    rank, v_pctl, veto_reason, pool = _views(scored)
+    rank, v_pctl, veto_reason, pool, band = _views(scored)
 
     if not state or not state.get("quarter"):
-        squad, bench, new_transfers = _bootstrap(rank, pool, quarter, run_date)
+        squad, bench, new_transfers = _bootstrap(rank, pool, band, quarter, run_date)
         history = list((state or {}).get("transfers") or [])
         return {"as_of": run_date, "quarter": quarter, "slots": SLOTS,
                 "squad": _sorted_squad(squad), "bench": bench,
@@ -144,20 +171,24 @@ def update(state: dict | None, scored: list[dict], run_date: str
             m["streak"] += 1
         squad.append(m)
 
-    # Bench — the pool minus the squad, streaks carried; consecutive-quarter discipline.
+    # Bench — the candidate band minus the squad, streaks carried; consecutive-quarter
+    # discipline (a name that left the band starts over at 1 when it returns).
     in_squad = {m["symbol"] for m in squad}
     prev_streak = {b["symbol"]: b["streak"] for b in state["bench"]}
     bench = []
-    for sym in pool:
+    for sym in band:
         if sym in in_squad:
             continue
         streak = prev_streak.get(sym)
         streak = 1 if streak is None else streak + 1 if new_quarter else streak
         bench.append({"symbol": sym, "streak": streak, "needed": PERSISTENCE_QUARTERS})
 
-    # Promotions — proven bench members take open slots in rank order; the slot cap is
-    # absolute and an unfilled slot stays open (cash) rather than seating thin evidence.
-    for cand in [b for b in bench if b["streak"] >= PERSISTENCE_QUARTERS]:
+    # Promotions — bench members with the evidence AND a place in the entry pool take
+    # open slots in rank order; the slot cap is absolute and an unfilled slot stays open
+    # (cash) rather than seating thin evidence.
+    in_pool = set(pool)
+    for cand in [b for b in bench
+                 if b["streak"] >= PERSISTENCE_QUARTERS and b["symbol"] in in_pool]:
         if len(squad) >= SLOTS:
             break
         sym = cand["symbol"]

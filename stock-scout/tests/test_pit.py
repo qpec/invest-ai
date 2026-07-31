@@ -1,18 +1,22 @@
 """Offline tests for the EDGAR point-in-time layer (RECONSTRUCTION.md §5.8, §5.9, §3.6):
 filed-date discipline, tag fallback chains, YTD->quarter derivation (incl. a broken
-fiscal year exercising the +/-365d prior-YTD window and Q4 = FY minus the 9-month YTD),
-multi-class shares, debt composition, the weekly price grid, and one end-to-end
-synthetic-facts -> as_of_bundle -> scoring.score_universe integration. Synthetic
-companyfacts JSON only — no network, no real caches."""
+fiscal year exercising the +/-365d prior-YTD window, the refusal of a discrete-quarter
+subtrahend, and Q4 = FY minus the 9-month YTD), multi-class shares (empty trend series +
+market-cap fallback), raw-vs-adjusted price selection, the reversible filename
+sanitization, and one end-to-end synthetic-facts -> as_of_bundle ->
+scoring.score_universe integration. Synthetic companyfacts JSON only — no network, no
+real caches."""
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
 import bt_fetch
 import pit
+import populate
 import scoring
 
 META = {"name": "Synthetic Corp", "sector": "Information Technology", "industry": "Software"}
@@ -109,17 +113,43 @@ def test_prior_year_ytd_never_masquerades_as_a_quarter():
 
 
 def test_broken_fiscal_year_prior_ytd_matches_within_365d_window():
-    # Fiscal-calendar switch: the transition cumulative starts 2023-08-01 while the last
-    # quarter filed under the old calendar started 2023-07-01 — a 31-day start drift an
-    # exact-start matcher would refuse; the +/-365d window (msg 44) accepts it and the
-    # <=100d derived-span guard confirms the result is a quarter.
+    # Fiscal-calendar switch: the new-calendar cumulative starts 2023-08-01 while the last
+    # CUMULATIVE filed under the old calendar started 2023-07-01 — a 31-day start drift an
+    # exact-start matcher would refuse; the +/-365d window (msg 44) accepts it because the
+    # candidate is itself a cumulative (183 days), and the <=100d derived-span guard
+    # confirms the result is a quarter.
     gaap = {"Revenues": [
-        dfact("2023-07-01", "2023-09-30", 30.0, "2023-11-01"),    # true quarter, old calendar
-        dfact("2023-08-01", "2023-12-31", 75.0, "2024-03-01"),    # transition stub (152d)
+        dfact("2023-07-01", "2023-12-31", 60.0, "2024-02-01"),    # old-calendar 6M cumulative
+        dfact("2023-08-01", "2024-03-31", 100.0, "2024-05-01"),   # new-calendar 8M cumulative
         dfact("2024-01-01", "2024-12-31", 400.0, "2025-02-01")]}  # annual anchor
+    assert _rev_quarters(gaap) == {"2024-03-31": pytest.approx(40.0)}
+
+
+def test_a_discrete_quarter_is_never_the_ytd_subtrahend():
+    # The 6M YTD is missing (filers do skip cumulatives) but a DISCRETE Q2 is present.
+    # Subtracting it from the 9M YTD yields Q1+Q3 booked as Q3 (45 - 12 = 33 instead of
+    # the true 23) — the ±365d start window alone accepts that (91-day start drift), so
+    # the subtrahend must also be a cumulative. Q3 is then simply not derivable, which is
+    # the honest outcome; Q4 = FY - 9M still lands through the same-start rule.
+    gaap = {"Revenues": [
+        dfact("2024-01-01", "2024-03-31", 10.0, "2024-05-01"),   # Q1, doubles as the 3M YTD
+        dfact("2024-04-01", "2024-06-30", 12.0, "2024-08-01"),   # DISCRETE Q2
+        dfact("2024-01-01", "2024-09-30", 45.0, "2024-11-01"),   # 9M YTD (no 6M YTD filed)
+        dfact("2024-01-01", "2024-12-31", 70.0, "2025-02-01")]}  # FY
     quarters = _rev_quarters(gaap)
-    assert quarters["2023-09-30"] == 30.0
-    assert quarters["2023-12-31"] == 75.0 - 30.0
+    assert "2024-09-30" not in quarters
+    assert quarters == {"2024-03-31": 10.0, "2024-06-30": 12.0,
+                        "2024-12-31": pytest.approx(25.0)}
+
+
+def test_a_52_53_week_start_wobble_still_counts_as_the_same_ytd_start():
+    # 52/53-week filers restate the fiscal-year start by a day or two; that must not cost
+    # them their quarters, while staying orders of magnitude below a quarter boundary.
+    gaap = {"Revenues": [
+        dfact("2024-01-01", "2024-06-30", 25.0, "2024-08-01"),    # 6M YTD
+        dfact("2024-01-03", "2024-09-30", 45.0, "2024-11-01"),    # 9M YTD, start 2 days off
+        dfact("2024-01-01", "2024-12-31", 70.0, "2025-02-01")]}
+    assert _rev_quarters(gaap)["2024-09-30"] == pytest.approx(20.0)
 
 
 # ------------------------------------------------------- multi-class shares (§5.9)
@@ -135,16 +165,35 @@ def test_multi_class_shares_summed_per_filed_date():
     assert pit.shares_at(series, "2024-01-01") is None
 
 
-def test_inconsistent_share_classes_empty_the_series():
+def test_inconsistent_share_classes_empty_the_series_but_keep_a_market_cap():
+    # The SERIES stays empty (msg 44: the M share-trend leg goes neutral) — but the name
+    # must still get a market cap from the best count at as_of, otherwise scoring
+    # integrity-suspends it as INSUFFICIENT at every tick and it silently disappears from
+    # the backtest universe. (This assertion used to demand market_cap is None.)
     shares = [ifact("2024-01-25", 100e6, "2024-02-01"),
               ifact("2024-01-26", 50e6, "2024-02-01")]   # two measurement dates, one filing
     facts = facts_of(gaap={"Revenues": [dfact("2024-01-01", "2024-12-31", 100.0, "2025-02-01")]},
                      shares=shares)
     assert pit.shares_series(facts, "2025-03-01") == []
     bundle = pit.as_of_bundle(facts, "SYN", META, "2025-03-01",
-                              {"SYN": {"2025-02-28": 10.0}})
+                              {"SYN": {"2025-02-28": {"close": 10.0, "adj_close": 5.0}}})
     assert bundle["shares_series"] == []
-    assert bundle["market_cap"] is None   # no shares -> no PIT market cap
+    assert bundle["shares_basis"] == "fallback-sum"
+    assert bundle["market_cap"] == pytest.approx(150e6 * 10.0)   # summed classes x RAW close
+
+
+def test_shares_fallback_paths_and_filed_date_discipline():
+    # Class rows measured days apart are one cover page -> summed.
+    close = facts_of(shares=[ifact("2025-01-14", 700e3, "2025-01-20"),
+                             ifact("2025-01-15", 310e3, "2025-01-20")])
+    assert pit.shares_fallback(close, "2025-03-01") == (1_010e3, "fallback-sum")
+    # Rows half a year apart cannot be one company-wide count -> the largest class stands in.
+    far = facts_of(shares=[ifact("2024-06-30", 900e3, "2025-01-20"),
+                           ifact("2025-01-15", 1_000e3, "2025-01-20")])
+    assert pit.shares_fallback(far, "2025-03-01") == (1_000e3, "fallback-largest")
+    # Filed-date discipline holds for the fallback too, and nothing knowable -> (None, None).
+    assert pit.shares_fallback(far, "2025-01-01") == (None, None)
+    assert pit.shares_fallback(facts_of(), "2025-03-01") == (None, None)
 
 
 # ------------------------------------------------------- debt composition (§5.9)
@@ -173,16 +222,55 @@ def test_debt_composition_rule():
 # ------------------------------------------------- weekly price grid (§5.9, §3.6)
 
 def test_price_at_and_market_cap_from_weekly_grid():
+    # Legacy float bars (grids written before the split-safe format) still load: the one
+    # value stands for both fields — degraded, and flagged as such.
     prices = {"SYN": {"2025-02-14": 10.0, "2025-02-21": 11.0, "2025-02-28": 12.0}}
     assert pit.price_at(prices, "SYN", "2025-02-23") == 11.0
+    assert pit.price_at(prices, "SYN", "2025-02-23", "adj_close") == 11.0
     assert pit.price_at(prices, "SYN", "2025-02-14") == 10.0
     assert pit.price_at(prices, "SYN", "2025-02-01") is None
     assert pit.price_at(prices, "MISSING", "2025-02-23") is None
+    assert pit.grid_is_degraded(prices["SYN"])
     facts = facts_of(gaap={"Revenues": [dfact("2024-01-01", "2024-12-31", 100.0, "2025-02-01")]},
                      shares=[ifact("2025-01-15", 1_000_000.0, "2025-01-20")])
     bundle = pit.as_of_bundle(facts, "SYN", META, "2025-02-23", prices)
     assert bundle["market_cap"] == pytest.approx(1_000_000.0 * 11.0)
     assert bundle["price"] == 11.0
+    assert bundle["shares_basis"] == "series"
+
+
+def test_price_at_selects_raw_or_adjusted_and_a_missing_field_falls_back():
+    prices = {"SYN": {"2025-02-14": {"close": 100.0, "adj_close": 50.0},
+                      "2025-02-21": {"close": 110.0, "adj_close": 55.0}},
+              "HALF": {"2025-02-21": {"adj_close": 55.0}}}      # adjusted-only bar
+    assert pit.price_at(prices, "SYN", "2025-02-23") == 110.0         # default = RAW close
+    assert pit.price_at(prices, "SYN", "2025-02-23", "close") == 110.0
+    assert pit.price_at(prices, "SYN", "2025-02-23", "adj_close") == 55.0
+    assert pit.price_at(prices, "HALF", "2025-02-23", "close") == 55.0   # falls back
+    assert not pit.grid_is_degraded(prices["SYN"])
+    assert pit.grid_is_degraded(prices["HALF"])     # adjusted-only bar = degraded
+    assert pit.bar_value({"close": 3.0, "adj_close": 1.5}, "adj_close") == 1.5
+    assert pit.bar_value(7.0, "close") == pit.bar_value(7.0, "adj_close") == 7.0
+    assert pit.bar_value(None) is None
+
+
+def test_a_later_split_cannot_rewrite_the_historical_market_cap():
+    # A 2:1 split AFTER the tick retroactively halves every earlier adj_close; the raw
+    # close is untouched. dei share counts are as-reported, so the market cap must be built
+    # on the raw close — otherwise every historical tick silently imports the future
+    # (contaminating V, the entry gate, own EV, WACC and MoS).
+    facts = facts_of(gaap={"Revenues": [dfact("2024-01-01", "2024-12-31", 100.0, "2025-02-01")]},
+                     shares=[ifact("2025-01-15", 1_000_000.0, "2025-01-20")])
+    before = {"SYN": {"2025-02-14": {"close": 100.0, "adj_close": 100.0},
+                      "2025-02-21": {"close": 110.0, "adj_close": 110.0}}}
+    after = {"SYN": {"2025-02-14": {"close": 100.0, "adj_close": 50.0},   # split rescaled
+                     "2025-02-21": {"close": 110.0, "adj_close": 55.0}}}
+    b0 = pit.as_of_bundle(facts, "SYN", META, "2025-02-23", before)
+    b1 = pit.as_of_bundle(facts, "SYN", META, "2025-02-23", after)
+    assert b0["market_cap"] == b1["market_cap"] == pytest.approx(1_000_000.0 * 110.0)
+    assert b0["price"] == b1["price"] == 110.0
+    # The adjusted grid is exactly the contamination the raw close avoids.
+    assert pit.price_at(after, "SYN", "2025-02-23", "adj_close") == 55.0
 
 
 def test_quarter_ends_take_the_last_weekly_bar_per_calendar_quarter():
@@ -205,14 +293,62 @@ def test_bt_fetch_cik_map_facts_url_and_user_agent():
     assert bt_fetch.EDGAR_SPACING_SECONDS >= 0.15
 
 
-def test_bt_fetch_prices_payload_and_period_ladder():
+def test_bt_fetch_prices_payload_carries_both_prices_and_the_true_symbol():
     idx = pd.to_datetime(["2019-12-27", "2020-01-03", "2020-01-10"], utc=True)
-    frame = pd.DataFrame({"adj_close": [1.0, 2.0, 3.0], "currency": "USD"}, index=idx)
-    assert bt_fetch.prices_payload(frame, "2020-01-01") == {"2020-01-03": 2.0,
-                                                            "2020-01-10": 3.0}
+    frame = pd.DataFrame({"close": [2.0, 4.0, 6.0], "adj_close": [1.0, 2.0, 3.0],
+                          "currency": "USD"}, index=idx)
+    assert bt_fetch.prices_payload(frame, "2020-01-01", "BRK/B") == {
+        "symbol": "BRK/B",
+        "bars": {"2020-01-03": {"close": 4.0, "adj_close": 2.0},
+                 "2020-01-10": {"close": 6.0, "adj_close": 3.0}}}
+    # An adjusted-only frame (today's vendored fetch_weekly_bars shape) degrades honestly.
+    legacy = pd.DataFrame({"adj_close": [1.0, 2.0, 3.0], "currency": "USD"}, index=idx)
+    degraded = bt_fetch.prices_payload(legacy, "2020-01-01", "SYN")
+    assert degraded["bars"]["2020-01-03"] == {"adj_close": 2.0}   # no fake raw close
+    assert pit.grid_is_degraded(degraded["bars"])
+    assert pit.price_at({"SYN": degraded["bars"]}, "SYN", "2020-01-10") == 3.0  # falls back
+
+
+def test_bt_fetch_period_ladder():
     assert bt_fetch.yf_period("2020-01-01", today=date(2026, 7, 31)) == "10y"
     assert bt_fetch.yf_period("2026-01-01", today=date(2026, 7, 31)) == "1y"
     assert bt_fetch.yf_period("2010-01-01", today=date(2026, 7, 31)) == "max"
+
+
+def test_weekly_frame_takes_raw_closes_and_degrades_only_when_they_are_absent(monkeypatch):
+    idx = pd.to_datetime(["2024-03-28", "2024-06-28"], utc=True)
+    vendor = pd.DataFrame({"adj_close": [50.0, 55.0], "currency": "USD"}, index=idx)
+    monkeypatch.setattr(bt_fetch.yf_fetch, "fetch_weekly_bars",
+                        lambda symbol, **kw: vendor.copy())
+    # Today's vendor keeps only Adj Close -> bt_fetch's own paced call supplies raw Close.
+    monkeypatch.setattr(bt_fetch, "_raw_weekly_closes",
+                        lambda symbol, **kw: pd.Series([100.0, 110.0], index=idx))
+    frame, degraded = bt_fetch.weekly_frame("SYN", state_dir=Path("."), period="2y")
+    assert not degraded
+    assert list(frame["close"]) == [100.0, 110.0] and list(frame["adj_close"]) == [50.0, 55.0]
+    # No raw closes to be had -> adjusted-only (never a fake raw close), and the run says so.
+    monkeypatch.setattr(bt_fetch, "_raw_weekly_closes", lambda symbol, **kw: None)
+    frame, degraded = bt_fetch.weekly_frame("SYN", state_dir=Path("."), period="2y")
+    assert degraded and "close" not in frame.columns
+    assert pit.grid_is_degraded(bt_fetch.prices_payload(frame, "2020-01-01", "SYN")["bars"])
+    # A future vendor that returns close itself is used as-is (no supplementary call).
+    both = pd.DataFrame({"close": [100.0, 110.0], "adj_close": [50.0, 55.0]}, index=idx)
+    monkeypatch.setattr(bt_fetch.yf_fetch, "fetch_weekly_bars", lambda symbol, **kw: both.copy())
+
+    def _never(*a, **kw):
+        raise AssertionError("vendor already exposes raw closes — no second fetch")
+
+    monkeypatch.setattr(bt_fetch, "_raw_weekly_closes", _never)
+    frame, degraded = bt_fetch.weekly_frame("SYN", state_dir=Path("."), period="2y")
+    assert not degraded and list(frame["close"]) == [100.0, 110.0]
+
+
+def test_cache_stem_mirrors_the_writer_filename_rule():
+    # pit.cache_stem is the loader's mirror of populate.cache_filename — the two rules
+    # must not drift, or a sanitized filename stops round-tripping to its symbol.
+    for symbol in ("BRK/B", "ADBE", "ASML.AS", "RDS/A"):
+        assert populate.cache_filename(symbol) == pit.cache_stem(symbol) + ".json"
+    assert pit.cache_stem("BRK/B") == "BRK-B"
 
 
 # ---------------------------------------- integration: facts -> bundle -> scoring
@@ -265,7 +401,8 @@ def _integration_facts():
 
 
 def test_integration_synthetic_facts_score_end_to_end():
-    prices = {"SYN": {"2025-02-14": 45.0, "2025-02-21": 50.0}}
+    prices = {"SYN": {"2025-02-14": {"close": 45.0, "adj_close": 22.5},
+                      "2025-02-21": {"close": 50.0, "adj_close": 25.0}}}
     bundle = pit.as_of_bundle(_integration_facts(), "SYN", META, "2025-03-01", prices)
     assert bundle is not None
     assert bundle["market_cap"] == pytest.approx(1_010_000.0 * 50.0)
@@ -284,5 +421,33 @@ def test_integration_synthetic_facts_score_end_to_end():
     assert row["quality_score"] is not None
     assert row["ttm"] == {"quarters": 4, "through": "2024-12-31", "basis": "quarterly"}
     assert row["tier"] == "Core"
-    assert row["ev"]["yahoo"] is None              # no Yahoo EV in the PIT world
-    assert all(flag["code"] != "SHARE_CLASS" for flag in row["flags"])
+    # No Yahoo EV field exists in the PIT world (scoring may derive a reference EV from the
+    # bundle's own price x listed shares; that one agrees with own EV here, so no EV_GAP).
+    assert bundle["yahoo_ev"] is None
+    assert all(flag["code"] not in ("EV_GAP", "SHARE_CLASS") for flag in row["flags"])
+    assert bundle["shares_basis"] == "series"
+
+
+def test_multi_class_fallback_grades_with_a_neutral_share_trend_leg():
+    # msg 44's "multi-class-shares-fallback met neutrale M-leg", end to end: inconsistent
+    # class rows empty the trend SERIES (the M share-trend leg carries no weight) while the
+    # market cap survives on the fallback count — so the name GRADES. With market_cap None
+    # it used to integrity-suspend as INSUFFICIENT and vanish from the backtest universe.
+    facts = _integration_facts()
+    facts["facts"]["dei"]["EntityCommonStockSharesOutstanding"]["units"]["shares"] = [
+        ifact("2025-01-10", 700_000.0, "2025-01-20"),    # class A, counted 10 Jan
+        ifact("2025-01-15", 310_000.0, "2025-01-20")]    # class B, counted 15 Jan
+    prices = {"SYN": {"2025-02-14": {"close": 45.0, "adj_close": 22.5},
+                      "2025-02-21": {"close": 50.0, "adj_close": 25.0}}}
+    bundle = pit.as_of_bundle(facts, "SYN", META, "2025-03-01", prices)
+    assert bundle["shares_series"] == []
+    assert bundle["shares_basis"] == "fallback-sum"
+    assert bundle["market_cap"] == pytest.approx(1_010_000.0 * 50.0)
+
+    rows = scoring.score_universe([bundle])
+    row = rows[0]
+    assert row["grade"] in set("ABCDF")               # survives scoring, not INSUFFICIENT
+    assert row["composite"] is not None and row["quality_score"] is not None
+    # The share-trend leg is neutral: suspended, so M rests on the accruals leg alone.
+    assert row["legs"]["m_shares"]["score"] is None
+    assert row["pillars"]["m"] == pytest.approx(row["legs"]["m_accruals"]["score"], abs=0.06)
