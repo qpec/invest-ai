@@ -32,10 +32,21 @@ BT_DIR = Path("bt_cache")
 REPORTS_DIR = Path("reports")
 
 
-def disclosures(cost_bp: float) -> list[str]:
+def disclosures(cost_bp: float, degraded: list[str] | None = None) -> list[str]:
     """The §5.10 disclosure set (msg 44): PIT discipline, survivorship both directions,
-    cost model, data caveats — printed in full under every report."""
-    return [
+    cost model, data caveats — printed in full under every report. `degraded` names the
+    symbols whose price grid still lacks raw closes (legacy §3.6 files), which adds the
+    split-contamination caveat to the set."""
+    extra = []
+    if degraded:
+        extra.append(
+            f"Koersdata-degradatie: {len(degraded)} symbolen "
+            f"({', '.join(sorted(degraded)[:8])}"
+            f"{', ...' if len(degraded) > 8 else ''}) hebben nog een oud koersrooster "
+            "zonder ruwe close; hun marktkapitalisatie is met een aangepaste "
+            "(split/dividend-gecorrigeerde) koers gebouwd en draagt dus latere "
+            "corporate actions in zich — draai bt_fetch.py opnieuw om ze te verversen.")
+    return extra + [
         "PIT-discipline: alleen EDGAR-facts met filed-datum <= de tick zijn zichtbaar; "
         "per periode geldt de laatst-gefilede waarde (restatements zoals toen bekend) — "
         "lookahead is onmogelijk gemaakt, niet slechts vermeden.",
@@ -48,9 +59,18 @@ def disclosures(cost_bp: float) -> list[str]:
         "slippage, belastingen of valuta-effecten.",
         "Data-kanttekeningen: fundamentals uitsluitend uit EDGAR (niet-EDGAR-noteringen "
         "zoals de .AS-namen ontbreken); weekkoersen, geen intraday; delisting = exit "
-        "tegen de laatste beschikbare koers; marktkapitalisatie = dei-aandelen x "
-        "weekkoers; geen Yahoo-EV in de PIT-wereld (EV_GAP vuurt nooit).",
+        "tegen de laatste beschikbare koers; marktkapitalisatie = dei-aandelen x de RUWE "
+        "weekslotkoers (nooit de aangepaste — die wordt door latere splits/dividenden "
+        "herschaald en zou de toekomst in elke historische tick smokkelen), terwijl "
+        "rendement/NAV juist op de aangepaste koers loopt (totaalrendement); geen "
+        "Yahoo-EV in de PIT-wereld (EV_GAP vuurt nooit).",
     ]
+
+
+def degraded_price_symbols(prices: dict) -> list[str]:
+    """Symbols whose §3.6 grid is still legacy (plain floats, no raw close of its own) —
+    their PIT market caps carry later splits/dividends. Fed to disclosures()."""
+    return sorted(sym for sym, grid in prices.items() if pit.grid_is_degraded(grid))
 
 
 # ---------------------------------------------------------------- pure price helpers
@@ -63,10 +83,12 @@ def alive(prices: dict, symbol: str, tick: str) -> bool:
 
 
 def fwd_return(prices: dict, symbol: str, t0: str, t1: str) -> float | None:
-    """Forward return t0 -> t1 from the §3.6 weekly grid. price_at is last-bar-at-or-
-    before, so a mid-quarter delisting naturally exits at its last available price."""
-    p0 = pit.price_at(prices, symbol, t0)
-    p1 = pit.price_at(prices, symbol, t1)
+    """Forward TOTAL return t0 -> t1 from the §3.6 weekly grid, on adj_close: dividends
+    count and a split in between is not a -50% crash (the raw close belongs to market-cap
+    math only). price_at is last-bar-at-or-before, so a mid-quarter delisting naturally
+    exits at its last available price."""
+    p0 = pit.price_at(prices, symbol, t0, "adj_close")
+    p1 = pit.price_at(prices, symbol, t1, "adj_close")
     if p0 is None or p1 is None or p0 <= 0:
         return None
     return p1 / p0 - 1.0
@@ -121,11 +143,12 @@ def score_ticks(facts: dict, prices: dict, meta: dict, ticks: list[str]) -> dict
 
 
 def candidates_at(scored: list[dict], prices: dict, tick: str) -> list[dict]:
-    """The tick's pool: graded rows (composite present) that are alive and priced,
-    sorted by (-composite, symbol). VETOED/INSUFFICIENT never rank (§4.6)."""
+    """The tick's pool: graded rows (composite present) that are alive and priced (the raw
+    close — the one the PIT market cap was built on), sorted by (-composite, symbol).
+    VETOED/INSUFFICIENT never rank (§4.6)."""
     rows = [r for r in scored
             if r.get("composite") is not None and alive(prices, r["symbol"], tick)
-            and pit.price_at(prices, r["symbol"], tick) is not None]
+            and pit.price_at(prices, r["symbol"], tick, "close") is not None]
     rows.sort(key=lambda r: (-r["composite"], r["symbol"]))
     return rows
 
@@ -179,13 +202,14 @@ def simulate(scored_by_tick: dict, prices: dict, ticks: list[str], *,
 
 
 def spy_track(prices: dict, ticks: list[str]) -> dict:
-    """SPY NAV normalized to 1.0 at the first tick (the §5.10 benchmark track)."""
-    base = pit.price_at(prices, "SPY", ticks[0])
+    """SPY NAV normalized to 1.0 at the first tick (the §5.10 benchmark track) — total
+    return, so adj_close like every other NAV track."""
+    base = pit.price_at(prices, "SPY", ticks[0], "adj_close")
     if base is None or base <= 0:
         return {}
     track = {}
     for tick in ticks:
-        px = pit.price_at(prices, "SPY", tick)
+        px = pit.price_at(prices, "SPY", tick, "adj_close")
         if px is not None:
             track[tick] = px / base
     return track
@@ -229,7 +253,8 @@ def run_backtest(facts: dict, prices: dict, meta: dict, *, start: str, end: str,
                     "max_drawdown_pct": max_drawdown_pct(spy_nav)},
             "bands": band_cohorts(scored_by_tick, prices, ticks),
             "tick_log": strategy["tick_log"],
-            "disclosures": disclosures(cost_bp)}
+            "degraded_price_symbols": degraded_price_symbols(prices),
+            "disclosures": disclosures(cost_bp, degraded_price_symbols(prices))}
 
 
 # ------------------------------------------------------------------- report (§5.10)
@@ -279,20 +304,31 @@ def render_report(result: dict) -> str:
 
 def load_bt_cache(bt_dir: str | Path = BT_DIR,
                   universe_path: str | Path = "universe.csv") -> tuple[dict, dict, dict]:
-    """bt_cache/ + universe.csv -> ({symbol: facts}, {symbol: prices incl. SPY},
-    {symbol: meta}) for the pure cores (§3.6, §5.10)."""
+    """bt_cache/ + universe.csv -> ({symbol: facts}, {symbol: price grid incl. SPY},
+    {symbol: meta}) for the pure cores (§3.6, §5.10).
+
+    Every dict is keyed by the TRUE universe symbol, never by the filename stem: the
+    writer sanitizes '/' to '-' (BRK/B -> BRK-B.json), so a stem key would miss its meta
+    row (no sector -> wrong tier, wrong sector cohort) and mismatch the universe symbol
+    everywhere downstream. The symbol is read from inside the payload, with the universe's
+    own sanitized-name map as the fallback for files written before that annotation."""
     bt_dir = Path(bt_dir)
-    facts = {p.stem: json.loads(p.read_text(encoding="utf-8"))
-             for p in sorted((bt_dir / "facts").glob("*.json"))}
-    prices = {p.stem: json.loads(p.read_text(encoding="utf-8"))
-              for p in sorted((bt_dir / "prices").glob("*.json"))}
-    meta = {}
+    meta, by_stem = {}, {}
     universe_path = Path(universe_path)
     if universe_path.exists():
         for row in pd.read_csv(universe_path).to_dict("records"):
-            meta[str(row["symbol"])] = {"name": row.get("name"),
-                                        "sector": row.get("sector"),
-                                        "industry": row.get("industry")}
+            symbol = str(row["symbol"])
+            meta[symbol] = {"name": row.get("name"), "sector": row.get("sector"),
+                            "industry": row.get("industry")}
+            by_stem[pit.cache_stem(symbol)] = symbol
+
+    facts, prices = {}, {}
+    for path in sorted((bt_dir / "facts").glob("*.json")):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        facts[pit.facts_symbol(payload) or by_stem.get(path.stem) or path.stem] = payload
+    for path in sorted((bt_dir / "prices").glob("*.json")):
+        symbol, grid = pit.load_price_file(json.loads(path.read_text(encoding="utf-8")))
+        prices[symbol or by_stem.get(path.stem) or path.stem] = grid
     return facts, prices, meta
 
 
@@ -323,6 +359,11 @@ def main(argv: list[str] | None = None) -> int:
     if not facts or "SPY" not in prices:
         print("bt_cache is leeg of mist SPY — draai eerst bt_fetch.py", file=sys.stderr)
         return 1
+    legacy = degraded_price_symbols(prices)
+    if legacy:
+        print(f"LET OP: {len(legacy)} koersroosters zonder ruwe close — marktkapitalisatie "
+              f"draagt latere splits/dividenden; draai bt_fetch.py opnieuw. "
+              f"(staat ook in de disclosures)", file=sys.stderr)
     result = run_backtest(facts, prices, meta, start=args.start, end=args.end,
                           top_n=args.top_n, cost_bp=args.cost_bp)
     md_path, json_path = write_reports(result, render_report(result),

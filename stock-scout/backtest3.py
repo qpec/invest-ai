@@ -84,7 +84,7 @@ def simulate_owner(scored_by_tick: dict, prices: dict, ticks: list[str], *,
                 break
             rows = [r for r in scored_by_tick[tick]
                     if backtest.alive(prices, r["symbol"], tick)
-                    and pit.price_at(prices, r["symbol"], tick) is not None]
+                    and pit.price_at(prices, r["symbol"], tick, "close") is not None]
             state, transfers = formation.update(state, rows, tick)
             dead = [m["symbol"] for m in state["squad"]
                     if not backtest.alive(prices, m["symbol"], tick)]
@@ -209,7 +209,9 @@ def walk_forward(scored_by_tick: dict, prices: dict, ticks: list[str], *,
     return {"top_n": top_n, "cost_bp": cost_bp,
             "halves": {h: {"ticks": t} for h, t in halves.items()},
             "directions": directions,
-            "disclosures": backtest.disclosures(cost_bp) + [
+            "degraded_price_symbols": backtest.degraded_price_symbols(prices),
+            "disclosures": backtest.disclosures(
+                cost_bp, backtest.degraded_price_symbols(prices)) + [
                 "Owner-mode posities: instap 1/slots van NAV (begrensd door beschikbare "
                 "cash), zittende posities driften onaangeroerd tot een exit; open "
                 "plekken en exits blijven cash; pool- en SPY-tracks frictieloos.",
@@ -231,7 +233,7 @@ def quality_cohorts(scored_by_tick: dict, prices: dict, ticks: list[str]) -> dic
             (r for r in scored_by_tick[t0]
              if r.get("quality_score") is not None
              and backtest.alive(prices, r["symbol"], t0)
-             and pit.price_at(prices, r["symbol"], t0) is not None),
+             and pit.price_at(prices, r["symbol"], t0, "close") is not None),
             key=lambda r: (-r["quality_score"], r["symbol"]))
         half = "A" if t0 <= HALF_A[1] else "B"
         for label, lo, hi in COHORT_BUCKETS:
@@ -344,6 +346,11 @@ def main(argv: list[str] | None = None) -> int:
     if not facts or "SPY" not in prices:
         print("bt_cache is leeg of mist SPY — draai eerst bt_fetch.py", file=sys.stderr)
         return 1
+    legacy = backtest.degraded_price_symbols(prices)
+    if legacy:
+        print(f"LET OP: {len(legacy)} koersroosters zonder ruwe close — "
+              f"marktkapitalisatie draagt latere splits/dividenden; draai bt_fetch.py "
+              f"opnieuw (staat ook in de disclosures).", file=sys.stderr)
     ticks = pit.quarter_ends(prices["SPY"], HALF_A[0], HALF_B[1])
     if len(ticks) < 2:
         print("minder dan 2 ticks op het SPY-grid — te weinig prijshistorie",
