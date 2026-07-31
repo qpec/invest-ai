@@ -142,24 +142,29 @@ def _cagr_pct(d0: str, v0: float, d1: str, v1: float) -> float:
 # --- TTM assembly (§4.2) -----------------------------------------------------------------
 
 def assemble_ttm(bundle: dict) -> dict:
-    """§4.2 TTM assembly: >=4 quarterly periods with the needed rows (revenue on income,
-    OCF+CapEx on cashflow) -> sum of the newest 4, basis "quarterly"; else the newest annual
-    period as proxy, basis "annual". Each summed item is None when a required row is missing
-    in any summed period (integrity — never a partial TTM); SBC and credit-loss default 0."""
+    """§4.2 TTM assembly over ONE aligned window: the newest 4 period_ends present in BOTH
+    the quarterly income and cashflow statements (the intersection), each carrying the
+    needed rows (revenue on income, OCF+CapEx on cashflow) -> sum over exactly those
+    periods, basis "quarterly"; fewer than 4 common periods -> the newest annual period as
+    proxy, basis "annual". Balance-sheet items stay latest-period (_latest_balance).
+    Summing both statements over the same 12 months is what keeps accrual divergence,
+    owner-FCF/revenue and SBC/revenue on comparable windows when Yahoo's newest income and
+    cashflow quarters differ. Each summed item is None when a required row is missing in
+    any summed period (integrity — never a partial TTM); SBC and credit-loss default 0.
+    `periods` reports the window that was actually summed (ascending)."""
     quarterly = bundle.get("quarterly") or {}
     annual = bundle.get("annual") or {}
     q_inc = quarterly.get("income") or {}
     q_cf = quarterly.get("cashflow") or {}
-    inc_pe = sorted(q_inc, reverse=True)[:4]
-    cf_pe = sorted(q_cf, reverse=True)[:4]
+    common = sorted(set(q_inc) & set(q_cf), reverse=True)[:4]
     quarterly_ok = (
-        len(inc_pe) == 4 and len(cf_pe) == 4
-        and all(_row(q_inc[p], "revenue") is not None for p in inc_pe)
+        len(common) == 4
+        and all(_row(q_inc[p], "revenue") is not None for p in common)
         and all(_row(q_cf[p], "ocf") is not None and _row(q_cf[p], "capex") is not None
-                for p in cf_pe))
+                for p in common))
     if quarterly_ok:
         basis, quarters = "quarterly", 4
-        inc_src, cf_src, inc_periods, cf_periods = q_inc, q_cf, inc_pe, cf_pe
+        inc_src, cf_src, inc_periods, cf_periods = q_inc, q_cf, common, common
     else:
         basis, quarters = "annual", 1
         inc_src = annual.get("income") or {}
@@ -173,9 +178,10 @@ def assemble_ttm(bundle: dict) -> dict:
 
     owner = [_owner_fcf(cf_src[p]) for p in cf_periods]
     ocf = [_row(cf_src[p], "ocf") for p in cf_periods]
-    used = list(inc_periods) + list(cf_periods)
+    used = sorted(set(inc_periods) | set(cf_periods))
     return {
         "basis": basis, "quarters": quarters, "through": max(used) if used else None,
+        "periods": used,
         "revenue": isum("revenue"), "ebit": isum("ebit"), "ebitda": isum("ebitda"),
         "gross_profit": isum("gross_profit"), "ni_incl_nci": isum("ni_incl_nci"),
         "interest_expense": isum("interest_expense"),
@@ -232,6 +238,36 @@ def _revenue_growth(bundle: dict) -> tuple[float | None, str]:
     return _cagr_pct(d0, v0, d1, v1), f"annual revenue CAGR {d0} -> {d1}"
 
 
+def _split_factor(splits: dict, pe: str) -> float:
+    """Cumulative split ratio applied strictly AFTER `pe` (no later split -> 1.0).
+    Non-numeric/non-positive ratios are ignored — a corrupt cache entry must not
+    silently rescale a share series."""
+    factor = 1.0
+    for day, raw in (splits or {}).items():
+        ratio = _num(raw)
+        if ratio is not None and ratio > 0 and str(day) > pe:
+            factor *= ratio
+    return factor
+
+
+def adjusted_shares_series(bundle: dict) -> list[tuple[str, float]]:
+    """§4.1 `shares_series` restated in TODAY's share terms: every observation is scaled by
+    the cumulative split ratio applied after its date, so a 2:1 split reads as ~0%/yr
+    instead of +100%/yr dilution. Raw Yahoo share counts are point-in-time and split-
+    UNadjusted; without this the §4.4 >20%/yr hard veto fires on any recent splitter for a
+    year and the per-share owner-FCF CAGR flips deeply negative. `splits` absent (older
+    cache entries, PIT bundles) -> the series passes through unchanged. Ascending,
+    non-positive/unparsable observations dropped."""
+    splits = bundle.get("splits") or {}
+    out = []
+    for day, raw in bundle.get("shares_series") or []:
+        value = _num(raw)
+        if value is None or value <= 0:
+            continue
+        out.append((str(day), value * _split_factor(splits, str(day))))
+    return sorted(out)
+
+
 def _shares_at(shares_series: list, pe: str) -> float | None:
     """Last share observation dated at or before `pe` from the ascending §4.1 series."""
     best = None
@@ -245,8 +281,10 @@ def _shares_at(shares_series: list, pe: str) -> float | None:
 def _per_share_ofcf_growth(bundle: dict) -> tuple[float | None, str, bool]:
     """§4.3 G — annual per-share owner-FCF CAGR %/yr -> (cagr, note, low_base_flag).
     The leg is DROPPED (None + LOW_BASE flag) when the base-year owner-FCF is < 2% of that
-    year's revenue (§4.5 v2.1 item 4); non-positive endpoints are not computable (no flag)."""
-    shares = bundle.get("shares_series") or []
+    year's revenue (§4.5 v2.1 item 4); non-positive endpoints are not computable (no flag).
+    Share counts are SPLIT-ADJUSTED first (adjusted_shares_series) — otherwise a split
+    would show up as a per-share collapse."""
+    shares = adjusted_shares_series(bundle)
     pts = []
     for pe, ofcf in _annual_owner_fcf_points(bundle):
         sh = _shares_at(shares, pe)
@@ -268,7 +306,9 @@ def _per_share_ofcf_growth(bundle: dict) -> tuple[float | None, str, bool]:
 def _share_trend_pct(shares_series: list) -> float | None:
     """§4.3 M — share-count trend %/yr: newest observation vs the one at-or-before a year
     prior (fallback: oldest), annualized by the actual span. None with <2 usable
-    observations or a span under ~3 months (annualizing noise)."""
+    observations or a span under ~3 months (annualizing noise). Callers pass the
+    SPLIT-ADJUSTED series (adjusted_shares_series) — a raw series reads a split as
+    dilution."""
     ser = sorted((d, v) for d, raw in shares_series or []
                  if (v := _num(raw)) is not None and v > 0)
     if len(ser) < 2:
@@ -284,15 +324,20 @@ def _share_trend_pct(shares_series: list) -> float | None:
 
 def _roic_pct(ttm_ebit: float | None, bal: dict) -> tuple[float | None, bool]:
     """§4.3 Q — Greenblatt ROIC: TTM EBIT / (Working Capital + (Total Assets - Current
-    Assets - Cash)), capped at 1000% -> (roic_pct, capped_flag). A non-positive denominator
-    returns the cap WITH the ROIC_CAPPED flag (v2.2) instead of suspending the name."""
+    Assets - Cash)), capped at 1000% -> (roic_pct, capped_flag).
+
+    A non-positive denominator returns the cap WITH the ROIC_CAPPED flag (v2.2) ONLY when
+    TTM EBIT is positive — that is the genuinely capital-light / float-financed case
+    (the msg-23 Adobe catch). EBIT <= 0 over a non-positive capital base is not a 1000%
+    return on capital: the leg suspends (None), which also denies it the ROIC floor
+    factor, top-of-cohort Q/G credit and the §4.4 reinvestor carve-out."""
     wc, ta = _row(bal, "working_capital"), _row(bal, "total_assets")
     ca, cash = _row(bal, "current_assets"), _row(bal, "cash")
     if None in (ttm_ebit, wc, ta, ca, cash):
         return None, False
     denom = wc + (ta - ca - cash)
     if denom <= 0:
-        return ROIC_CAP_PCT, True
+        return (ROIC_CAP_PCT, True) if ttm_ebit > 0 else (None, False)
     return min(ROIC_CAP_PCT, 100.0 * ttm_ebit / denom), False
 
 
@@ -320,10 +365,12 @@ def veto_check(*, net_debt_to_ebitda, ebitda, net_debt, credit_loss, ocf,
 
     1. leverage: net debt/EBITDA > 4 (TTM) or EBITDA <= 0 with net debt > 0;
     2. cash-flow quality: credit-loss add-backs >= 25% of positive TTM OCF;
-    3. dilution hard veto: share CAGR > 20%/yr;
+    3. dilution hard veto: share CAGR > 20%/yr — suppressed when SHARE_CLASS is set, the
+       same §4.5 verdict that already forces the M leg to neutral 50 and switches the
+       penalty off: a trend the system just declared untrustworthy cannot hard-veto;
     4. cash destruction: owner-FCF negative every annual period AND TTM <= 0 (a recovered
        burner escapes); reinvestor carve-out (ROIC > 15% and revenue growth > 10%/yr) is
-       spared and flagged, never vetoed;
+       spared and flagged, never vetoed (an unusable ROIC — None — never qualifies);
     5. dilution penalty: 5-20%/yr -> -15, suppressed when SHARE_CLASS (§4.5)."""
     if net_debt_to_ebitda is not None and net_debt_to_ebitda > NET_DEBT_EBITDA_VETO:
         return {"vetoed": True, "penalty": 0,
@@ -336,7 +383,8 @@ def veto_check(*, net_debt_to_ebitda, ebitda, net_debt, credit_loss, ocf,
         return {"vetoed": True, "penalty": 0,
                 "reason": f"cash-flow quality: OCF leans {100.0 * credit_loss / ocf:.0f}% "
                           f"on credit-loss/write-off add-backs"}, False
-    if share_trend_pct is not None and share_trend_pct > DILUTION_VETO_PCT:
+    if share_trend_pct is not None and not share_class \
+            and share_trend_pct > DILUTION_VETO_PCT:
         return {"vetoed": True, "penalty": 0,
                 "reason": f"dilution veto: shares +{share_trend_pct:.1f}%/yr (>20%/yr)"}, False
     if annual_all_negative and ttm_owner_fcf is not None and ttm_owner_fcf <= 0:
@@ -448,11 +496,27 @@ def _evaluate(bundle: dict) -> dict:
     bal = _latest_balance(bundle)
     mcap = _num(bundle.get("market_cap"))
     yahoo_ev = _num(bundle.get("yahoo_ev"))
+    price = _num(bundle.get("price"))
+    shares_adj = adjusted_shares_series(bundle)
+    latest_shares = shares_adj[-1][1] if shares_adj else None
     debt, cash = _row(bal, "total_debt"), _row(bal, "cash")
 
     own_ev = mcap + debt - cash if None not in (mcap, debt, cash) else None
-    gap_pct = (100.0 * (own_ev - yahoo_ev) / own_ev
-               if own_ev is not None and own_ev > 0 and yahoo_ev is not None else None)
+    # Reference EV for the §4.5 gap. yfinance's FastInfo carries no enterprise value and
+    # the `info`/quoteSummary path is banned (and blocked here), so `yahoo_ev` is None in
+    # live runs — which used to make EV_GAP and SHARE_CLASS structurally dead. The Up-C
+    # signal those flags were built on IS a share-count mismatch: the quoted market cap
+    # counts ALL units, while get_shares_full reports the registrant's listed class. So
+    # when no EV field is supplied, rebuild the listed-class reference EV from the cache
+    # itself: price x latest listed shares + debt - cash. A single-class company has
+    # implied units ~= reported shares -> gap ~0 -> no flag (Tenet's 41% NCI stays silent);
+    # an Up-C shows a positive gap. An explicitly supplied yahoo_ev always wins.
+    ref_ev, ev_source = yahoo_ev, ("field" if yahoo_ev is not None else None)
+    if ref_ev is None and price is not None and price > 0 \
+            and None not in (latest_shares, debt, cash):
+        ref_ev, ev_source = price * latest_shares + debt - cash, "derived"
+    gap_pct = (100.0 * (own_ev - ref_ev) / own_ev
+               if own_ev is not None and own_ev > 0 and ref_ev is not None else None)
     net_debt = debt - cash if None not in (debt, cash) else None
 
     owner_fcf, rev = ttm["owner_fcf"], ttm["revenue"]
@@ -472,19 +536,25 @@ def _evaluate(bundle: dict) -> dict:
     ps_growth, ps_note, low_base = _per_share_ofcf_growth(bundle)
 
     ebitda = ttm["ebitda"]
-    nd2e = net_debt / ebitda if net_debt is not None and ebitda else None
+    # EBITDA exactly 0 leaves the ratio undefined (not a huge number): the name is handed
+    # to the §4.4 leverage veto ("EBITDA <= 0 with net debt > 0") instead, which is why the
+    # veto layer runs BEFORE the §4.6 integrity-suspend in score_universe.
+    nd2e = (net_debt / ebitda
+            if net_debt is not None and ebitda is not None and ebitda != 0 else None)
     sbc_pct = (100.0 * ttm["sbc"] / rev
                if ttm["sbc"] is not None and rev is not None and rev > 0 else None)
 
-    share_trend = _share_trend_pct(bundle.get("shares_series"))
+    share_trend = _share_trend_pct(shares_adj)
     accrual = (100.0 * (ttm["ni_incl_nci"] - ttm["ocf"]) / rev
                if None not in (ttm["ni_incl_nci"], ttm["ocf"])
                and rev is not None and rev > 0 else None)
 
     flags = []
     if gap_pct is not None and abs(gap_pct) > EV_GAP_THRESHOLD_PCT:
+        source = ("derived reference EV (price x listed shares + debt - cash)"
+                  if ev_source == "derived" else "Yahoo EV")
         flags.append({"code": "EV_GAP",
-                      "message": f"own EV vs Yahoo EV gap {gap_pct:+.1f}% (>15%)"})
+                      "message": f"own EV vs {source} gap {gap_pct:+.1f}% (>15%)"})
     equity, nci = _row(bal, "equity"), _row(bal, "nci")
     share_class = False
     if None not in (equity, nci) and equity + nci > 0:
@@ -523,7 +593,7 @@ def _evaluate(bundle: dict) -> dict:
         "credit_loss": ttm["credit_loss"], "ocf": ttm["ocf"],
         "share_class": share_class,
         "annual_all_negative": _annual_all_negative(bundle),
-        "own_ev": own_ev, "yahoo_ev": yahoo_ev, "gap_pct": gap_pct,
+        "own_ev": own_ev, "ref_ev": ref_ev, "ev_source": ev_source, "gap_pct": gap_pct,
         "flags": flags, "ttm": ttm,
     }
     metrics["required_gap"] = next(
@@ -535,9 +605,12 @@ def _evaluate(bundle: dict) -> dict:
 
 def score_universe(bundles: list[dict]) -> list[dict]:
     """§4.6 two-phase pass over §4.1 Bundles -> §3.3 names[] dicts, universe order
-    preserved. Phase 1: metrics + flags, integrity-suspend (INSUFFICIENT, reason in
-    `note`), §4.4 veto (VETOED suppressed, never ranked). Phase 2: sector-percentile legs,
-    pillars, composite/grade and the §4.7 v3 quality_score for every graded name."""
+    preserved. Phase 1: metrics + flags, then the §4.4 veto layer (VETOED suppressed,
+    never ranked) and only afterwards the integrity-suspend (INSUFFICIENT, reason in
+    `note`) — §4.4 vetoes are bundle facts, so a name whose EBITDA is 0 while it carries
+    net debt must be VETOED on the leverage rule rather than suspended for the ratio that
+    same 0 makes uncomputable. Phase 2: sector-percentile legs, pillars, composite/grade
+    and the §4.7 v3 quality_score for every graded name."""
     order, results, surv = [], {}, {}
     for b in bundles:
         sym = b["symbol"]
@@ -552,22 +625,29 @@ def score_universe(bundles: list[dict]) -> list[dict]:
             "legs": {},
             "veto": {"vetoed": False, "reason": "", "penalty": 0},
             "flags": e["flags"],
-            "ev": {"own": e["own_ev"], "yahoo": e["yahoo_ev"], "gap_pct": e["gap_pct"]},
+            "ev": {"own": e["own_ev"], "yahoo": e["ref_ev"], "gap_pct": e["gap_pct"],
+                   "yahoo_source": e["ev_source"]},
             "ttm": {"quarters": e["ttm"]["quarters"], "through": e["ttm"]["through"],
                     "basis": e["ttm"]["basis"]},
             "note": "",
         }
-        if e["required_gap"] is not None:
-            row["grade"] = "INSUFFICIENT"
-            row["note"] = f"insufficient data: {e['required_gap']}"
-            results[sym] = row
-            continue
         veto, reinvestor = veto_check(
             net_debt_to_ebitda=e["nd2e"], ebitda=e["ebitda"], net_debt=e["net_debt"],
             credit_loss=e["credit_loss"], ocf=e["ocf"],
             share_trend_pct=e["share_trend"], share_class=e["share_class"],
             annual_all_negative=e["annual_all_negative"], ttm_owner_fcf=e["owner_fcf"],
             roic_pct=e["roic"], revenue_growth_pct=e["rev_growth"])
+        if veto["vetoed"]:                       # §4.4 before §4.6: a veto is a bundle fact
+            row["veto"] = veto
+            row["note"] = veto["reason"]
+            row["grade"] = "VETOED"
+            results[sym] = row
+            continue
+        if e["required_gap"] is not None:        # not vetoed -> can it be scored at all?
+            row["grade"] = "INSUFFICIENT"
+            row["note"] = f"insufficient data: {e['required_gap']}"
+            results[sym] = row
+            continue
         row["veto"] = veto
         row["note"] = veto["reason"]
         if reinvestor:
@@ -575,10 +655,6 @@ def score_universe(bundles: list[dict]) -> list[dict]:
                 "code": "REINVESTOR",
                 "message": "spared cash-destruction veto: ROIC > 15% and revenue "
                            "growth > 10%/yr — a caution, not a suppression"}]
-        if veto["vetoed"]:
-            row["grade"] = "VETOED"
-            results[sym] = row
-            continue
         surv[sym] = (e, row)
 
     def cohort(sector, key):

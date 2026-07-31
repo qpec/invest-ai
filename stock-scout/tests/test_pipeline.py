@@ -209,7 +209,7 @@ def test_grades_json_schema_and_count_identity(pipeline):
         assert NAME_KEYS <= set(row)
         assert set(row["pillars"]) == set("vqgdm")
         assert set(row["veto"]) == {"vetoed", "reason", "penalty"}
-        assert set(row["ev"]) == {"own", "yahoo", "gap_pct"}
+        assert set(row["ev"]) == {"own", "yahoo", "gap_pct", "yahoo_source"}
         assert set(row["ttm"]) == {"quarters", "through", "basis"}
         if row["grade"] in GRADE_LETTERS:
             assert set(row["legs"]) == LEG_IDS
