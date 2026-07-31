@@ -70,7 +70,8 @@ def cik_map(raw: dict) -> dict[str, int]:
     return {str(row["ticker"]).upper(): int(row["cik_str"]) for row in raw.values()}
 
 
-def prices_payload(frame: pd.DataFrame, start: str, symbol: str | None = None) -> dict:
+def prices_payload(frame: pd.DataFrame, start: str, symbol: str | None = None,
+                   splits: dict | None = None) -> dict:
     """Weekly frame -> the §3.6 prices/<SYM>.json payload: the true symbol next to
     {"YYYY-MM-DD": {"close": raw, "adj_close": adjusted}} bars at/after start. A frame
     without a raw "close" column (or with a NaN in it) writes that bar adjusted-ONLY rather
@@ -85,7 +86,7 @@ def prices_payload(frame: pd.DataFrame, start: str, symbol: str | None = None) -
         adj = float(row["adj_close"])
         raw = float(row["close"]) if has_close and not pd.isna(row["close"]) else None
         bars[day] = {"adj_close": adj} if raw is None else {"close": raw, "adj_close": adj}
-    return pit.price_file(symbol, dict(sorted(bars.items())))
+    return pit.price_file(symbol, dict(sorted(bars.items())), splits)
 
 
 def _paced(state_dir: Path, fn):
@@ -98,42 +99,73 @@ def _paced(state_dir: Path, fn):
         return fn()
 
 
-def _raw_weekly_closes(symbol: str, *, state_dir: Path, period: str) -> pd.Series | None:
-    """The RAW (unadjusted) weekly Close series, or None when Yahoo does not deliver one.
-    auto_adjust=False keeps Close next to Adj Close; only this column is taken — validation
-    of the grid itself stays with the vendored fetch_weekly_bars."""
+def _raw_weekly_frame(symbol: str, *, state_dir: Path, period: str):
+    """(RAW weekly Close series, {date: split ratio}) — or (None, {}) when Yahoo does not
+    deliver a Close column. auto_adjust=False keeps Close next to Adj Close and
+    actions=True carries the split events, so both ride ONE call; validation of the grid
+    itself stays with the vendored fetch_weekly_bars."""
     def _raw():
         return yf.Ticker(symbol).history(period=period, interval="1wk",
                                          auto_adjust=False, actions=True)
 
     frame = _paced(state_dir, _raw)
-    if frame is None or len(frame) == 0 or "Close" not in frame.columns:
-        return None
+    if frame is None or len(frame) == 0:
+        return None, {}
+    events = splits_payload(frame)
+    if "Close" not in frame.columns:
+        return None, events
     close = frame["Close"].astype(float)
     close = close[close.notna() & (close > 0)]
-    return close if len(close) else None
+    close = close[~close.index.duplicated(keep="last")]   # reindex refuses duplicate labels
+    return (close if len(close) else None), events
 
 
-def weekly_frame(symbol: str, *, state_dir: Path, period: str) -> tuple[pd.DataFrame, bool]:
-    """-> (frame with column adj_close and, when obtainable, close; degraded?). The
-    vendored, validated fetch_weekly_bars supplies adj_close (and close directly if a
-    future vendor version returns it); otherwise the raw closes come from
-    _raw_weekly_closes and are aligned onto the same bars — bars without one keep NaN
+def splits_payload(frame) -> dict:
+    """Yahoo's "Stock Splits" column -> the §3.6 {date: ratio} map (0.0 rows dropped).
+    Pure; a frame without the column yields {} (no splits known, never a fake ratio)."""
+    if frame is None or "Stock Splits" not in getattr(frame, "columns", []):
+        return {}
+    out = {}
+    for ts, raw in frame["Stock Splits"].items():
+        try:
+            ratio = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if ratio > 0:
+            out[pd.Timestamp(ts).date().isoformat()] = ratio
+    return dict(sorted(out.items()))
+
+
+def weekly_frame(symbol: str, *, state_dir: Path, period: str
+                 ) -> tuple[pd.DataFrame, bool, dict]:
+    """-> (frame with column adj_close and, when obtainable, close; degraded?; split
+    events). The vendored, validated fetch_weekly_bars supplies adj_close (and close
+    directly if a future vendor version returns it); otherwise the raw closes come from
+    _raw_weekly_frame and are aligned onto the same bars — bars without one keep NaN
     rather than a fake raw close. degraded=True means at least one bar has no raw close of
-    its own, so its market cap carries later split/dividend rescaling — disclose it."""
+    its own, so its market cap carries later split/dividend rescaling — disclose it.
+
+    The split events ride whichever fetch produced the frame (both ask actions=True, so no
+    extra Yahoo call): they let the backtest tell a 2:1 split from 100%/yr dilution, which
+    would otherwise trip the §4.4 hard dilution veto at every tick (§6.14)."""
     frame = yf_fetch.fetch_weekly_bars(symbol, state_dir=state_dir, period=period)
+    vendor_splits = splits_payload(frame)
     if "close" in frame.columns:
-        return frame.loc[:, ["close", "adj_close"]], bool(frame["close"].isna().any())
+        return (frame.loc[:, ["close", "adj_close"]],
+                bool(frame["close"].isna().any()), vendor_splits)
     out = frame.loc[:, ["adj_close"]].copy()
     try:
-        raw = _raw_weekly_closes(symbol, state_dir=state_dir, period=period)
+        raw, events = _raw_weekly_frame(symbol, state_dir=state_dir, period=period)
+    except yf_fetch.RateLimited:   # a rate limit still stops the run (§5.8), never degrades
+        raise
     except Exception:      # transport/shape failure on the supplementary call only
-        raw = None
+        raw, events = None, {}
+    events = events or vendor_splits
     if raw is None:
-        return out, True                        # adjusted-only, and the payload says so
+        return out, True, events                # adjusted-only, and the payload says so
     aligned = raw.reindex(out.index)
     out["close"] = aligned
-    return out.loc[:, ["close", "adj_close"]], bool(aligned.isna().any())
+    return out.loc[:, ["close", "adj_close"]], bool(aligned.isna().any()), events
 
 
 def yf_period(start: str, *, today: date | None = None) -> str:
@@ -175,12 +207,13 @@ def _fetch_prices(symbol: str, prices_dir: Path, state_dir: Path, start: str,
     degraded (no raw closes available)."""
     path = prices_dir / populate.cache_filename(symbol)
     if path.exists():
-        _, grid = pit.load_price_file(json.loads(path.read_text(encoding="utf-8")))
+        _, grid, _events = pit.load_price_file(
+            json.loads(path.read_text(encoding="utf-8")))
         stale = bool(grid) and pit.grid_is_degraded(grid)
         if not (stale and refresh_legacy):
             return stale
-    frame, degraded = weekly_frame(symbol, state_dir=state_dir, period=period)
-    populate.atomic_write_json(path, prices_payload(frame, start, symbol))
+    frame, degraded, splits = weekly_frame(symbol, state_dir=state_dir, period=period)
+    populate.atomic_write_json(path, prices_payload(frame, start, symbol, splits))
     return degraded
 
 

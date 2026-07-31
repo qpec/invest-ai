@@ -83,4 +83,17 @@ breaks (veto, rank > 40, extreme overvaluation) — winners are left alone.
 | `vendor/` | the ratified grader (reference) + hardened yfinance layer (see `vendor/README.md`) |
 | `data/stage2-*.json` | qualitative Stage-2 validation layers, picked up by the datasheet |
 
-Tests: `python -m pytest tests/ -q` — fully offline on synthetic fixtures.
+Tests: `python -m pytest tests/ -q` — 188 tests, fully offline on synthetic fixtures.
+
+## Validation status
+
+The point-in-time path is validated against **real SEC filings** (Adobe, Exelixis, ResMed,
+Medpace, Salesforce): the adapter reads Adobe's 19 annual and 73 quarterly periods and
+assembles TTM through May 2026, the same freshness the original v2.2 run reported. Two real
+defects surfaced only there — companies that had *repaid* their debt, and companies that
+never tag a gross-profit line, were both being dropped from every backtest tick — and both
+are fixed (`docs/RECONSTRUCTION.md` §6.15-16).
+
+A live Yahoo populate has **not** been run here: Yahoo rate-limits this container's IP.
+Nothing about the fetch layer changed in kind from the code that produced the original
+runs, but treat the first live run on your own box as the real smoke test.

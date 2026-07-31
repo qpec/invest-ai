@@ -84,11 +84,27 @@ Build (msg 2/4): FinanceDatabase equities (keyless:
 filter: `country ∈ {United States, Netherlands}` · `sector ∈ {Information Technology,
 Health Care}` · `market_cap ∈ {Mega Cap, Large Cap, Mid Cap}`. `--broad` (msg 64):
 all sectors **except** `Financials`, `Real Estate`; adds `Small Cap`.
-Cross-listing dedupe (msg 4, "the only_primary_listing pitfall solved properly"): group by
-normalized company name; keep the home-market listing (NL company → `.AS` symbol,
-US company → bare US symbol); a name that only lists away from home keeps its only listing.
-Expected sanity anchor from the chat: the six Dutch names ADYEN.AS, ASML.AS, ASM.AS,
-BESI.AS, PHIA.AS, TWEKA.AS survive the default filter.
+Cross-listing dedupe (msg 4, "the only_primary_listing pitfall solved properly"): drop
+warrant/unit lines (an MLP's *common units* are kept), then group by normalized company
+name and keep, in order of preference: (0) the home-market listing (NL company → `.AS`,
+US company → bare US symbol), (1) a bare symbol on a major US venue, (2) any bare symbol,
+(3) whatever is left — ties broken by shortest-then-alphabetical symbol. The tiering
+matters: an earlier alphabetical fallback silently replaced primary listings with foreign
+secondary lines (a São Paulo BDR instead of NXPI, a Berlin line instead of ARGX), so a
+wrong-currency symbol got graded and the real name vanished.
+Sanity anchors: the six Dutch names ADYEN.AS, ASML.AS, ASM.AS, BESI.AS, PHIA.AS, TWEKA.AS
+survive the default filter, and ARGX/NXPI win their own groups (1AE.BE and N1XP34.SA do
+not). Current real-database sizes: default 683 names (670 US, 13 NL), `--broad` 2,934.
+
+**Known vendor-data limitation (not a code defect).** Grouping is only as good as
+FinanceDatabase's `name` column, and that column is corrupt in both directions: ~16
+unrelated US tickers all carry the name "Stem, Inc." and collapse into one group (CBU,
+COLB, FIBK, LSTR, SBSAA, STEM and VSTM are dropped — VSTM/Verastem is a Health Care name
+inside the owner's core circle), while some genuine cross-listings of one company carry
+different sectors *and* industries (Boeing's `BCO` line is tagged "Professional Services").
+That second fact is why the grouping key cannot simply be tightened to name+sector+industry
+— it would split real cross-listings. Cost is ~7 names in 2,934 (0.2%); fixing it properly
+needs an identity column the vendor does not reliably supply.
 
 ### 3.2 `cache/<SYMBOL>.json` (dots in symbols are kept; `/` → `-`)
 ```jsonc
@@ -142,6 +158,12 @@ plus `failures.log` (one `symbol<TAB>reason` per line; 404/dead tickers land her
 `legs` ids: `v_yield`, `q_roic`, `q_gm`, `q_ofcf_margin`, `g_revenue`, `g_ps_ofcf`,
 `d_net_debt`, `d_self_funding`, `d_sbc`, `m_shares`, `m_accruals`.
 
+Units are NOT uniform and must be passed explicitly to any formatter: `ev.gap_pct` is in
+**percent**, while `mos.mos_pct`, `mos.growth` and `mos.wacc` are **fractions**. (Inferring
+the unit from magnitude renders a sub-1.5% EV gap 100× too large and a margin of safety
+above +150% 100× too small.) `ev.yahoo_source` is `"field"` when a Yahoo enterprise value
+was supplied and `"derived"` when the listed-class reference EV was reconstructed (§6.13).
+
 ### 3.4 `formation-state.json` (v3, msgs 57-58, 62)
 ```jsonc
 {
@@ -162,9 +184,28 @@ plus `failures.log` (one `symbol<TAB>reason` per line; 404/dead tickers land her
 The datasheet uses the file whose date == run date, else the newest file ≤ run date.
 
 ### 3.6 `bt_cache/`
-`company_tickers.json` (SEC symbol→CIK), `facts/<SYMBOL>.json` (raw companyfacts),
-`prices/<SYMBOL>.json` (`{"YYYY-MM-DD": adj_close}` weekly), `prices/SPY.json`.
+`company_tickers.json` (SEC symbol→CIK), `facts/<SYMBOL>.json` (raw companyfacts **plus a
+`"symbol"` annotation**), `prices/<SYMBOL>.json`, `prices/SPY.json`.
 All EDGAR calls carry a real `User-Agent` and are paced ≤ 8 req/s.
+
+Filenames sanitize `/` → `-` (BRK/B → `BRK-B.json`), so the TRUE symbol must travel inside
+the file — keying by filename stem loses it, and the name then misses its universe meta
+row (no sector → wrong tier and wrong sector cohort). The price file:
+
+```jsonc
+{ "symbol": "BRK/B",
+  "bars":   {"YYYY-MM-DD": {"close": <raw>, "adj_close": <adjusted>}, ...},
+  "splits": {"YYYY-MM-DD": <ratio>, ...} }      // e.g. 2.0 on a 2-for-1 effective date
+```
+
+Both prices are stored because they do different jobs: **anything multiplied by a share
+count (market cap, own EV, WACC, MoS) must use the raw close**, since adjusted closes are
+retroactively rescaled by every later split and dividend and would import the future into
+every historical tick; total-return math (NAV, forward returns, the benchmark track) uses
+`adj_close`. Legacy grids of plain floats still load, with the single value standing for
+both fields — degraded, detectable, and disclosed in the report. Splits ride the same
+`actions=True` fetch (no extra Yahoo call) and let the backtest tell a 2:1 split from
+100%/yr dilution; `--keep-legacy-prices` opts out of refetching old grids.
 
 ---
 
@@ -350,6 +391,13 @@ it (v2.2 path for an annual-only cache). Same pacing/progress/failure contracts.
 5. Formation update via `formation.py` (v3 live mode, msg 58) unless `--no-formation`.
 6. Write `reports/scout-run-<date>.md` + `reports/scout-grades-<date>.json`.
 7. `--telegram`: send the md summary + attach the datasheet if present.
+`--date` is validated as a real ISO `YYYY-MM-DD` at parse time (both discovery seams
+regex-match the date, so a malformed one produced reports nothing could find). The veto
+breakdown groups by **distinct sub-reason** (family rollup plus one line per sub-reason
+when a family has more than one), preserving the msg-10 split between "net debt/EBITDA > 4"
+and "EBITDA ≤ 0 with net debt". The header reports uncached AND unreadable cache entries
+separately, with a named block listing each unreadable symbol and its reason — one corrupt
+file must never abort a run.
 
 Report md sections (msgs 10, 28, 32, 57): header with counts by grade + veto breakdown by
 reason; tier-sectioned A-F table (symbol, name, grade, composite, V/Q/G/D/M, MoS%, flags);
@@ -363,7 +411,14 @@ implementing §4.7 against `formation-state.json`; quarter key = calendar quarte
 run_date; streaks/persistence advance **only** when the quarter differs from `state.quarter`
 (msg 62); same-quarter re-runs refresh ranks/gates without advancing streaks. Bootstrap
 (first run, msg 58 "PIT-bootstrap"): names already passing gate+rank enter immediately with
-`since = current quarter`; the rest of the pool goes to the bench with streak 1. Slots
+`since = current quarter`; the rest of the **candidate band** goes to the bench with
+streak 1. The band, not the pool, is what makes a bench possible: the entry pool is capped
+at rank ≤ SLOTS and the squad seats exactly that many, so "the rest of the pool" is empty
+by construction. Bench = gate-passing names ranked ≤ `EXIT_RANK` that are not seated;
+promotion requires persistence **and** rank ≤ SLOTS **and** an open slot. (This refines
+§4.7's "2 consecutive quarters in the entry pool": evidence accrues in the band, entry
+still demands the pool — which is what msg 58's 14-seated/5-benched first formation shows,
+since a benched name with an open slot available must have been outside the top-15.) Slots
 never exceed 15; a free slot with no proven candidate stays open ("liever cash dan een
 kandidaat zonder bewijs").
 
@@ -410,7 +465,27 @@ for its period). Tag chains (msg 44 adversarial fixes pinned):
 - Shares: `dei:EntityCommonStockSharesOutstanding` summed across share classes per filed
   date; when class rows are inconsistent → shares series empty → the M share-trend leg is
   neutral (msg 44 "multi-class-shares-fallback met neutrale M-leg").
-- market_cap = shares_at(as_of) × price_at(as_of) from the weekly price grid.
+- market_cap = shares_at(as_of) × the **raw** close at as_of (never the adjusted one —
+  §3.6); `adj_close` is for total return only.
+- Multi-class rule: an inconsistent filing empties the share SERIES (so the M share-trend
+  leg goes neutral) **and** still yields a fallback share count for the market cap, so the
+  name grades instead of vanishing as INSUFFICIENT; `shares_basis`
+  ("series" | "fallback-sum" | "fallback-largest") records which path was used.
+- Quarter derivation subtracts a prior **cumulative** only — same period-start (±7 days for
+  52/53-week wobble), or a genuine cumulative (span > 100 days) whose start matches within
+  ±365 days for broken fiscal years. A discrete sibling quarter is never the subtrahend
+  (9M-YTD minus a discrete Q2 would book Q1+Q3 as Q3).
+- `splits` from the §3.6 grid, filtered to events **on or before as_of**, reach the bundle
+  so as-reported dei counts are restated into as_of's share terms (§6.14).
+- **Debt on a repaid balance sheet:** EDGAR stops carrying `LongTermDebt*` once a filer
+  repays, so a properly tagged date (total assets AND cash present) with no debt tag reads
+  as 0.0 — but the most recent earlier debt observation within 400 days is carried forward
+  first, so the error always leans toward MORE leverage and a tagging gap can never sneak a
+  levered name past the §4.4 veto (§6.15).
+- **Gross profit:** the tagged `GrossProfit`, else revenue − cost of revenue
+  (`CostOfRevenue` → `CostOfGoodsAndServicesSold` → `CostOfServices` → `CostOfGoodsSold` →
+  `CostOfSales`). Filers need not present a gross-profit line, and the Q gross-margin leg is
+  REQUIRED (§4.6), so without the derivation real names suspend (§6.16).
 
 ### 5.10 `backtest.py`
 `python backtest.py [--start 2021-03-01] [--end today] [--top-n 15] [--cost-bp 10]`
@@ -490,3 +565,45 @@ implementation contradicted them.
     and datasheet stay honest. A supplied `yahoo_ev` always wins. In the PIT/backtest world
     market cap is *defined* as shares × price, so the derived reference equals own EV and
     the gap is identically 0 — the flags stay silent there, as before.
+14. **PIT splits** (§3.6, §5.9) — deviation 8 split-adjusts share counts from the cache's
+    `splits`, but PIT bundles had none: EDGAR `dei` counts are as-reported, so a 2:1 split
+    read as +100%/yr dilution at every backtest tick and could trip the §4.4 hard veto on
+    any splitter. Rather than inferring a factor from the close/adj_close ratio (dividends
+    move it smoothly, special dividends jump it), the events are captured exactly — both
+    weekly fetches already pass `actions=True`, so Yahoo's "Stock Splits" column costs no
+    extra call — stored in the price file and filtered to `<= as_of` before use.
+15. **Debt on a repaid balance sheet** (§5.9) — found by running real SEC filings through
+    the adapter: EDGAR stops carrying `LongTermDebt*` once a filer repays, so Exelixis and
+    Medpace had NO debt tag at their recent balance dates, EV was incomputable, and both
+    were suspended as INSUFFICIENT at every tick. Net-cash fortress balance sheets — the
+    ones this framework prizes most, and the ones the chat celebrates by name ("net cash,
+    inkoop") — were exactly the ones silently dropped from the backtest. A properly tagged
+    date (assets AND cash present) with no debt tag now reads as zero, with a 400-day
+    carry-forward of any earlier debt first so the error always leans toward more leverage.
+16. **Derived gross profit** (§5.9) — same real-filing run: filers need not present a
+    gross-profit line, and because the Q gross-margin leg is a REQUIRED metric (§4.6) an
+    untagged line suspended the whole name. Gross profit is now derived from revenue minus
+    cost of revenue when not tagged directly. A filer that tags neither (Medpace, a CRO
+    reporting direct costs under a custom tag) still suspends — honestly, not silently.
+
+---
+
+## 7. What has and has not been validated
+
+**Offline:** 188 tests over synthetic fixtures cover every module and the cross-module
+seams, including one case per finding above.
+
+**Real data:** SEC EDGAR is reachable and was used to validate the point-in-time path
+end-to-end on genuine filings for ADBE, EXEL, RMD, MEDP and CRM (five of the chat's
+top-10). The adapter reads 19 annual and 73 quarterly periods for Adobe and assembles TTM
+through **2026-05-29** — the same May-2026 freshness msg 28 reports — and Adobe does file
+under the `Revenues` tag, independently confirming the msg-44 adversarial fix. Deviations
+15 and 16 were both discovered by that run, not by review.
+
+**Not validated:** a live Yahoo populate. Yahoo rate-limits (HTTP 429) the datacenter IP
+this reconstruction was built on, and yfinance's HTTP layer does not route through the
+sandbox proxy, so no end-to-end live grading run has been executed here. The code paths are
+unchanged in kind from the ones that produced the 2026-07-29/30 runs on the owner's own
+box; they are simply unexercised in this environment. Grades printed by the EDGAR smoke run
+are plumbing evidence only — the prices are synthetic and a five-name cohort makes
+sector-relative percentiles close to meaningless.

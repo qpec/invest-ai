@@ -4,6 +4,7 @@ grades JSON schema, report md sections (De Formatie, veto breakdown, NL call-out
 formation-state.json creation and same-date idempotence. No network, no real caches."""
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 
@@ -268,6 +269,123 @@ def test_summary_head_stops_before_first_section(first_run):
     assert head.startswith("# Stock Scout — run")
     assert "Veto-verdeling:" in head
     assert "## " not in head
+
+
+# ------------------------------------------- corrupt cache tolerance (§5.5 step 1)
+
+def _corrupt_the_cache(rundir):
+    """Two ways a cache entry goes bad in the field, both fatal before the fix:
+    a torn/truncated write and an entry that lost its "ticker"."""
+    (rundir / "cache" / "BBB.json").write_text('{"ticker": "BBB", "annu',
+                                               encoding="utf-8")
+    entry = json.loads((rundir / "cache" / "CCC.json").read_text(encoding="utf-8"))
+    entry.pop("ticker")
+    (rundir / "cache" / "CCC.json").write_text(json.dumps(entry), encoding="utf-8")
+
+
+def test_load_bundles_survives_corrupt_entries_and_names_them(rundir):
+    bundles, universe_n, uncached, unreadable = grade.load_bundles(
+        rundir / "universe.csv", rundir / "cache")
+    assert (universe_n, uncached, unreadable) == (7, 1, [])
+    _corrupt_the_cache(rundir)
+    bundles, universe_n, uncached, unreadable = grade.load_bundles(
+        rundir / "universe.csv", rundir / "cache")
+    assert {b["symbol"] for b in bundles} == {"AAA", "FLGX", "PHIA.AS", "VETX"}
+    assert (universe_n, uncached) == (7, 1)       # MISS is still merely uncached
+    assert [u["symbol"] for u in unreadable] == ["BBB", "CCC"]
+    assert "corrupte JSON" in unreadable[0]["reason"]
+    assert "ticker" in unreadable[1]["reason"]
+
+
+def test_run_completes_and_reports_corrupt_cache_entries(rundir, capsys):
+    _corrupt_the_cache(rundir)
+    assert grade.main(["--date", RUN_DATE]) == 0   # one bad file is never fatal
+    doc = json.loads((rundir / "reports" / f"scout-grades-{RUN_DATE}.json")
+                     .read_text(encoding="utf-8"))
+    md = (rundir / "reports" / f"scout-run-{RUN_DATE}.md").read_text(encoding="utf-8")
+    assert {r["symbol"] for r in doc["names"]} == {"AAA", "FLGX", "PHIA.AS", "VETX"}
+    assert doc["universe"] == 7                    # the universe is unchanged...
+    assert "niet in cache 1 · onleesbaar in cache 2" in md      # ...and both counted
+    assert "- BBB — corrupte JSON" in md           # symbol + reason, never swallowed
+    assert "- CCC — ontbrekend veld 'ticker'" in md
+    assert "BBB" in capsys.readouterr().err        # and the operator sees it on stderr
+
+
+# ------------------------------------------------- veto breakdown by sub-reason (§5.5)
+
+def _veto_row(symbol, **kw):
+    """A vetoed §3.3 row whose reason string comes from scoring.veto_check itself —
+    the grouping must work off the real wording, never a copy of it."""
+    base = dict(net_debt_to_ebitda=None, ebitda=None, net_debt=None, credit_loss=None,
+                ocf=None, share_trend_pct=None, share_class=False,
+                annual_all_negative=False, ttm_owner_fcf=None, roic_pct=None,
+                revenue_growth_pct=None)
+    veto, _ = scoring.veto_check(**(base | kw))
+    assert veto["vetoed"], "fixture must actually trigger a veto"
+    return {"symbol": symbol, "grade": "VETOED", "veto": veto}
+
+
+def test_veto_breakdown_splits_the_two_leverage_branches():
+    scored = [
+        _veto_row("LEV1", net_debt_to_ebitda=6.1),
+        _veto_row("LEV2", net_debt_to_ebitda=4.4),          # same branch, other value
+        _veto_row("LEV3", ebitda=0.0, net_debt=1e9),        # the OTHER leverage branch
+        _veto_row("CFQ1", ocf=1e8, credit_loss=2.8e7),
+        _veto_row("CFQ2", ocf=1e8, credit_loss=7.7e7),      # same branch, other value
+        {"symbol": "OK", "grade": "B", "veto": {"vetoed": False, "reason": "", "penalty": 0}},
+    ]
+    lines = grade._veto_breakdown(scored)
+    assert lines[0] == "Veto-verdeling:"
+    assert "- leverage veto: 3" in lines             # family rollup
+    subs = [ln for ln in lines if ln.startswith("  - ")]
+    assert len(subs) == 2                            # msg-10's split, not one bucket
+    assert any("net debt/EBITDA" in s and s.endswith(": 2") for s in subs)
+    assert any("EBITDA <= 0" in s and s.endswith(": 1") for s in subs)
+    # Different measured percentages collapse onto ONE cash-flow-quality sub-reason.
+    assert "- cash-flow quality: 2" in lines
+
+
+def test_canonical_veto_reason_elides_measurements_keeps_thresholds():
+    canon = grade.canonical_veto_reason
+    assert canon("leverage veto: net debt/EBITDA 6.1 > 4.0") == \
+        canon("leverage veto: net debt/EBITDA 12.9 > 4.0")
+    assert "> 4.0" in canon("leverage veto: net debt/EBITDA 6.1 > 4.0")
+    assert canon("leverage veto: EBITDA <= 0 while carrying net debt") != \
+        canon("leverage veto: net debt/EBITDA 6.1 > 4.0")
+    assert canon("dilution veto: shares +909.0%/yr (>20%/yr)") == \
+        canon("dilution veto: shares +21.4%/yr (>20%/yr)")
+    assert canon("") == "veto zonder opgegeven reden"
+
+
+def test_report_md_shows_the_leverage_split(rundir):
+    doc = {"run_date": RUN_DATE, "version": grade.VERSION, "universe": 3, "graded": 0,
+           "vetoed": 2, "insufficient": 0, "formation": None,
+           "names": [_veto_row("LEV1", net_debt_to_ebitda=6.1),
+                     _veto_row("LEV2", ebitda=-1.0, net_debt=1e9)]}
+    for row in doc["names"]:
+        row.update(composite=None, pillars={}, flags=[], tier="Core", name=row["symbol"])
+    md = grade.render_report(doc, [], uncached=0, formation_updated=False)
+    assert "- leverage veto: 2" in md
+    assert md.count("\n  - ") == 2
+
+
+# --------------------------------------------------------------- --date validation
+
+def test_bad_date_is_rejected_before_anything_is_written(rundir, capsys):
+    for bad in ("30-07-2026", "2026-7-30", "20260730", "2026-02-31", "vandaag"):
+        with pytest.raises(SystemExit) as excinfo:
+            grade.main(["--date", bad])
+        assert excinfo.value.code == 2                 # argparse usage error
+        assert "--date" in capsys.readouterr().err
+    assert not (rundir / "reports").exists()           # no half-run left behind
+    assert not (rundir / "formation-state.json").exists()
+
+
+def test_iso_date_accepts_and_normalizes_a_real_iso_date():
+    assert grade.iso_date(" 2026-07-30 ") == "2026-07-30"
+    assert grade.iso_date("2024-02-29") == "2024-02-29"    # a real leap day passes
+    with pytest.raises(argparse.ArgumentTypeError):
+        grade.iso_date("2026-02-29")                       # right shape, no such day
 
 
 def test_newest_datasheet_picked_by_date(tmp_path):

@@ -297,10 +297,12 @@ def test_bt_fetch_prices_payload_carries_both_prices_and_the_true_symbol():
     idx = pd.to_datetime(["2019-12-27", "2020-01-03", "2020-01-10"], utc=True)
     frame = pd.DataFrame({"close": [2.0, 4.0, 6.0], "adj_close": [1.0, 2.0, 3.0],
                           "currency": "USD"}, index=idx)
-    assert bt_fetch.prices_payload(frame, "2020-01-01", "BRK/B") == {
+    assert bt_fetch.prices_payload(frame, "2020-01-01", "BRK/B",
+                                   {"2020-01-06": 2.0}) == {
         "symbol": "BRK/B",
         "bars": {"2020-01-03": {"close": 4.0, "adj_close": 2.0},
-                 "2020-01-10": {"close": 6.0, "adj_close": 3.0}}}
+                 "2020-01-10": {"close": 6.0, "adj_close": 3.0}},
+        "splits": {"2020-01-06": 2.0}}
     # An adjusted-only frame (today's vendored fetch_weekly_bars shape) degrades honestly.
     legacy = pd.DataFrame({"adj_close": [1.0, 2.0, 3.0], "currency": "USD"}, index=idx)
     degraded = bt_fetch.prices_payload(legacy, "2020-01-01", "SYN")
@@ -321,14 +323,15 @@ def test_weekly_frame_takes_raw_closes_and_degrades_only_when_they_are_absent(mo
     monkeypatch.setattr(bt_fetch.yf_fetch, "fetch_weekly_bars",
                         lambda symbol, **kw: vendor.copy())
     # Today's vendor keeps only Adj Close -> bt_fetch's own paced call supplies raw Close.
-    monkeypatch.setattr(bt_fetch, "_raw_weekly_closes",
-                        lambda symbol, **kw: pd.Series([100.0, 110.0], index=idx))
-    frame, degraded = bt_fetch.weekly_frame("SYN", state_dir=Path("."), period="2y")
-    assert not degraded
+    monkeypatch.setattr(bt_fetch, "_raw_weekly_frame",
+                        lambda symbol, **kw: (pd.Series([100.0, 110.0], index=idx),
+                                              {"2024-05-01": 2.0}))
+    frame, degraded, splits = bt_fetch.weekly_frame("SYN", state_dir=Path("."), period="2y")
+    assert not degraded and splits == {"2024-05-01": 2.0}   # split events ride the same call
     assert list(frame["close"]) == [100.0, 110.0] and list(frame["adj_close"]) == [50.0, 55.0]
     # No raw closes to be had -> adjusted-only (never a fake raw close), and the run says so.
-    monkeypatch.setattr(bt_fetch, "_raw_weekly_closes", lambda symbol, **kw: None)
-    frame, degraded = bt_fetch.weekly_frame("SYN", state_dir=Path("."), period="2y")
+    monkeypatch.setattr(bt_fetch, "_raw_weekly_frame", lambda symbol, **kw: (None, {}))
+    frame, degraded, _ = bt_fetch.weekly_frame("SYN", state_dir=Path("."), period="2y")
     assert degraded and "close" not in frame.columns
     assert pit.grid_is_degraded(bt_fetch.prices_payload(frame, "2020-01-01", "SYN")["bars"])
     # A future vendor that returns close itself is used as-is (no supplementary call).
@@ -338,8 +341,8 @@ def test_weekly_frame_takes_raw_closes_and_degrades_only_when_they_are_absent(mo
     def _never(*a, **kw):
         raise AssertionError("vendor already exposes raw closes — no second fetch")
 
-    monkeypatch.setattr(bt_fetch, "_raw_weekly_closes", _never)
-    frame, degraded = bt_fetch.weekly_frame("SYN", state_dir=Path("."), period="2y")
+    monkeypatch.setattr(bt_fetch, "_raw_weekly_frame", _never)
+    frame, degraded, _ = bt_fetch.weekly_frame("SYN", state_dir=Path("."), period="2y")
     assert not degraded and list(frame["close"]) == [100.0, 110.0]
 
 
@@ -451,3 +454,53 @@ def test_multi_class_fallback_grades_with_a_neutral_share_trend_leg():
     # The share-trend leg is neutral: suspended, so M rests on the accruals leg alone.
     assert row["legs"]["m_shares"]["score"] is None
     assert row["pillars"]["m"] == pytest.approx(row["legs"]["m_accruals"]["score"], abs=0.06)
+
+
+# ---------------------- real-filing coverage gaps (found by the EDGAR smoke run)
+
+def test_a_repaid_borrowing_leaves_a_properly_tagged_date_unlevered_not_absent():
+    # EDGAR stops carrying LongTermDebt* once a filer repays: Exelixis and Medpace both had
+    # NO debt tag at their recent balance dates on real filings, which made EV incomputable
+    # and suspended the name at every tick — the fortress balance sheets this framework
+    # prizes were the ones dropped. A properly tagged date (assets AND cash) reads as zero.
+    gaap = {
+        "Assets": [ifact("2024-03-31", 900.0, "2024-04-15"),
+                   ifact("2026-03-31", 1000.0, "2026-04-15")],
+        "CashAndCashEquivalentsAtCarryingValue": [ifact("2024-03-31", 400.0, "2024-04-15"),
+                                                  ifact("2026-03-31", 500.0, "2026-04-15")],
+        "LongTermDebt": [ifact("2024-03-31", 300.0, "2024-04-15")],   # repaid, never re-tagged
+    }
+    maps = pit._balance_maps(facts_of(gaap=gaap), "2026-07-30")
+    assert maps["Total Debt"]["2024-03-31"] == 300.0     # while it was still outstanding
+    assert maps["Total Debt"]["2026-03-31"] == 0.0       # two years later: genuinely unlevered
+
+
+def test_a_recent_debt_balance_is_carried_forward_rather_than_called_zero():
+    # The error must always lean toward MORE leverage: a tagging gap one quarter after a
+    # reported borrowing carries the debt forward, so it can never sneak a levered company
+    # past the §4.4 leverage veto.
+    gaap = {
+        "Assets": [ifact("2026-03-31", 1000.0, "2026-04-15"),
+                   ifact("2026-06-30", 1000.0, "2026-07-15")],
+        "CashAndCashEquivalentsAtCarryingValue": [ifact("2026-03-31", 100.0, "2026-04-15"),
+                                                  ifact("2026-06-30", 100.0, "2026-07-15")],
+        "LongTermDebt": [ifact("2026-03-31", 800.0, "2026-04-15")],   # untagged next quarter
+    }
+    maps = pit._balance_maps(facts_of(gaap=gaap), "2026-07-30")
+    assert maps["Total Debt"]["2026-06-30"] == 800.0
+
+
+def test_gross_profit_is_derived_when_only_the_cost_side_is_tagged():
+    # Filers need not present a gross-profit line; Exelixis tags CostOfGoodsAndServicesSold
+    # and no recent GrossProfit. Since the Q gross-margin leg is REQUIRED (§4.6), an
+    # untagged line suspended the whole name on real filings.
+    income = {
+        "Total Revenue": {"2026-03-31": 1000.0, "2026-06-30": 1200.0},
+        "Cost Of Revenue": {"2026-03-31": 400.0, "2026-06-30": 500.0},
+        "Gross Profit": {"2026-03-31": 555.0},          # a tagged value always wins
+    }
+    out = pit._gross_profit(income)
+    assert out["2026-03-31"] == 555.0
+    assert out["2026-06-30"] == 700.0                   # 1200 - 500, derived
+    # Neither side tagged (Medpace's shape) -> no gross profit, and the name suspends honestly.
+    assert pit._gross_profit({"Total Revenue": {"2026-06-30": 1200.0}}) == {}

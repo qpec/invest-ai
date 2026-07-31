@@ -182,6 +182,14 @@ def test_w_or_u_suffixed_symbol_loses_to_its_ordinary_sibling_in_the_same_group(
     assert list(universe.filter_universe(pd.DataFrame(lone))["symbol"]) == ["AUROW"]
 
 
+def test_filter_universe_survives_an_empty_result(equities_df):
+    empty = equities_df.iloc[0:0]
+    for out in (universe.filter_universe(empty),
+                universe.filter_universe(equities_df[equities_df["country"] == "Germany"])):
+        assert out.empty
+        assert list(out.columns) == universe.COLUMNS
+
+
 def test_equities_url_uses_the_compression_path():
     # §3.1 pins compression/ and calls database/ WRONG (it 404s): with data/equities.bz2
     # gitignored, a fresh checkout's default run downloads from this URL or dies.

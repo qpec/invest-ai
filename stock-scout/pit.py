@@ -37,6 +37,7 @@ MULTICLASS_SPREAD_DAYS = 45    # cover-page class rows this close still sum to o
 PRICE_FIELDS = ("close", "adj_close")   # raw (share-count math) / adjusted (total return)
 DEFAULT_PRICE_FIELD = "close"
 BARS_KEY, SYMBOL_KEY = "bars", "symbol"  # §3.6 price-file envelope (true symbol inside)
+SPLITS_KEY = "splits"                    # §3.6 split events, captured on the same bar fetch
 
 # §5.9 tag fallback chains (msg 44 adversarial fixes pinned; first present wins per period).
 _INCOME_CONCEPTS = {
@@ -44,7 +45,9 @@ _INCOME_CONCEPTS = {
                       "Revenues", "SalesRevenueNet"),        # ADBE reports Revenues
     "EBIT": ("OperatingIncomeLoss",),
     "Operating Income": ("OperatingIncomeLoss",),            # §4.1 Buffett-checklist chain head
-    "Gross Profit": ("GrossProfit",),                        # absent -> the Q gm leg degrades
+    "Gross Profit": ("GrossProfit",),                        # absent -> derived from cost of revenue
+    "Cost Of Revenue": ("CostOfRevenue", "CostOfGoodsAndServicesSold",   # gross-profit fallback
+                        "CostOfServices", "CostOfGoodsSold", "CostOfSales"),
     "Net Income": ("NetIncomeLoss",),
     "Net Income Including Noncontrolling Interests": ("ProfitLoss", "NetIncomeLoss"),
 }
@@ -164,6 +167,56 @@ def quarterly_flows(periods: dict) -> dict:
     return quarters
 
 
+def _gross_profit(income: dict) -> dict:
+    """Gross profit per period: the tagged GrossProfit, else revenue minus cost of revenue.
+
+    Filers are not required to present a gross-profit line, and many tag only the cost
+    side (Exelixis: CostOfGoodsAndServicesSold, no recent GrossProfit). Because the Q
+    gross-margin leg is a REQUIRED metric (§4.6), an untagged line suspended the whole
+    name as INSUFFICIENT on real filings — so the derivation is what keeps EDGAR-fed names
+    scoreable. A filer that tags neither (Medpace, a CRO reporting direct costs under a
+    custom tag) genuinely has no gross margin and still suspends — honest, not silent."""
+    tagged = income.get("Gross Profit") or {}
+    revenue = income.get("Total Revenue") or {}
+    cost = income.get("Cost Of Revenue") or {}
+    out = dict(tagged)
+    for end, rev in revenue.items():
+        if end not in out and end in cost:
+            out[end] = rev - cost[end]
+    return out
+
+
+DEBT_CARRY_FORWARD_DAYS = 400   # a debt balance is assumed to persist about a year
+
+
+def _debt_with_unlevered_dates(debt: dict, maps: dict) -> dict:
+    """Fill Total Debt on properly-tagged balance dates that carry no debt tag at all.
+
+    EDGAR simply stops carrying LongTermDebt* once a filer has repaid its borrowings, so a
+    net-cash company (Exelixis, Medpace — both verified on real filings) had NO Total Debt
+    at its recent balance dates. That made EV incomputable and the name INSUFFICIENT at
+    every tick: the fortress balance sheets this framework prizes most were the ones
+    silently dropped from the backtest.
+
+    A date is treated as unlevered ONLY when the filing is otherwise properly tagged (total
+    assets AND cash present) — an untagged filing stays absent rather than being called
+    debt-free. The most recent earlier debt observation within DEBT_CARRY_FORWARD_DAYS is
+    carried forward first, so the error always leans toward MORE leverage, never less: a
+    tagging gap can therefore never sneak a levered company past the §4.4 leverage veto."""
+    assets, cash = maps.get("Total Assets") or {}, maps.get("Cash And Cash Equivalents") or {}
+    observed = sorted(debt)
+    out = dict(debt)
+    for end in sorted(set(assets) & set(cash)):
+        if end in out:
+            continue
+        prior = [d for d in observed if d < end]
+        if prior and _days(prior[-1], end) <= DEBT_CARRY_FORWARD_DAYS:
+            out[end] = debt[prior[-1]]          # conservative: assume the debt persists
+        else:
+            out[end] = 0.0                      # properly tagged and no debt in sight
+    return out
+
+
 def _flow_maps(facts: dict, concepts: dict, as_of: str) -> tuple[dict, dict]:
     """Per-label annual and quarterly {end: value} maps for one statement's concepts."""
     annual, quarterly = {}, {}
@@ -192,7 +245,7 @@ def _balance_maps(facts: dict, as_of: str) -> dict:
     for end in sorted(set(ltd) | set(noncur) | set(cur)):
         debt[end] = ltd[end] if end in ltd else (
             noncur.get(end, 0.0) + cur.get(end, 0.0) + short.get(end, 0.0))
-    maps["Total Debt"] = debt
+    maps["Total Debt"] = _debt_with_unlevered_dates(debt, maps)
     equity = maps["Stockholders Equity"]
     maps["Minority Interest"] = {end: incl_nci[end] - equity[end]
                                  for end in incl_nci if end in equity}
@@ -208,18 +261,25 @@ def _section(maps: dict) -> dict:
     return {end: {label: m[end] for label, m in maps.items() if end in m} for end in ends}
 
 
-def shares_series(facts: dict, as_of) -> list:
-    """§5.9 dei EntityCommonStockSharesOutstanding -> ascending [[date, count], ...]:
-    class rows summed per filed date, latest filed wins per measurement date; a filing
-    reporting more than one measurement date is inconsistent -> [] (empty series, so the
-    M share-trend leg suspends to neutral in scoring, msg 44)."""
-    as_of = _iso(as_of)
+def _shares_by_filed(facts: dict, as_of: str) -> dict:
+    """Visible dei share rows grouped per filed date: {filed: [(measurement date, count)]},
+    filed-date discipline applied (filed > as_of does not exist)."""
     by_filed = {}
     for entry in _unit_entries(facts, "dei", _SHARES_TAG):
         filed, end, val = entry.get("filed"), entry.get("end"), entry.get("val")
         if filed is None or end is None or val is None or filed > as_of:
             continue
         by_filed.setdefault(filed, []).append((end, float(val)))
+    return by_filed
+
+
+def shares_series(facts: dict, as_of) -> list:
+    """§5.9 dei EntityCommonStockSharesOutstanding -> ascending [[date, count], ...]:
+    class rows summed per filed date, latest filed wins per measurement date; a filing
+    reporting more than one measurement date is inconsistent -> [] (empty series, so the
+    M share-trend leg suspends to neutral in scoring, msg 44 — the market cap then comes
+    from shares_fallback, so the name still grades)."""
+    by_filed = _shares_by_filed(facts, _iso(as_of))
     series = {}
     for filed in sorted(by_filed):                 # ascending: the latest filed wins per end
         observations = by_filed[filed]
@@ -239,13 +299,7 @@ def shares_fallback(facts: dict, as_of) -> tuple[float | None, str | None]:
     ("fallback-largest"). Returns (count, basis), (None, None) when nothing is knowable.
     The SERIES stays empty either way — the M share-trend leg stays neutral — but the name
     keeps a market cap and therefore GRADES instead of silently suspending."""
-    as_of = _iso(as_of)
-    by_filed = {}
-    for entry in _unit_entries(facts, "dei", _SHARES_TAG):
-        filed, end, val = entry.get("filed"), entry.get("end"), entry.get("val")
-        if filed is None or end is None or val is None or filed > as_of:
-            continue
-        by_filed.setdefault(filed, []).append((end, float(val)))
+    by_filed = _shares_by_filed(facts, _iso(as_of))
     if not by_filed:
         return None, None
     observations = by_filed[max(by_filed)]
@@ -303,22 +357,44 @@ def price_at(prices: dict, symbol: str, day, field: str = DEFAULT_PRICE_FIELD) -
 
 # ----------------------------------------------- §3.6 cache-file shapes (writer + reader)
 
-def price_file(symbol: str, bars: dict) -> dict:
+def price_file(symbol: str, bars: dict, splits: dict | None = None) -> dict:
     """The §3.6 prices/<SYM>.json payload: the TRUE symbol next to the date-keyed bars, so
-    a sanitized filename ("BRK/B" -> BRK-B.json) round-trips back to its universe symbol."""
-    return {SYMBOL_KEY: symbol, BARS_KEY: bars}
+    a sanitized filename ("BRK/B" -> BRK-B.json) round-trips back to its universe symbol,
+    plus the split events Yahoo returned on the same actions=True bar fetch (§3.6 splits)."""
+    return {SYMBOL_KEY: symbol, BARS_KEY: bars, SPLITS_KEY: dict(splits or {})}
 
 
-def load_price_file(payload: dict) -> tuple[str | None, dict]:
-    """A prices/<SYM>.json payload -> (symbol or None, {date: bar}). Accepts the current
-    envelope and both legacy shapes (a bare date-keyed map of floats or of bars), where the
-    symbol is unknown and the caller falls back to the filename stem."""
+def load_price_file(payload: dict) -> tuple[str | None, dict, dict]:
+    """A prices/<SYM>.json payload -> (symbol or None, {date: bar}, {date: split ratio}).
+    Accepts the current envelope and both legacy shapes (a bare date-keyed map of floats or
+    of bars), where the symbol is unknown (the caller falls back to the filename stem) and
+    no splits were recorded."""
     if not isinstance(payload, dict):
-        return None, {}
+        return None, {}, {}
     if BARS_KEY in payload:
-        return payload.get(SYMBOL_KEY), payload.get(BARS_KEY) or {}
+        return (payload.get(SYMBOL_KEY), payload.get(BARS_KEY) or {},
+                payload.get(SPLITS_KEY) or {})
     return (payload.get(SYMBOL_KEY),
-            {key: val for key, val in payload.items() if key != SYMBOL_KEY})
+            {key: val for key, val in payload.items()
+             if key not in (SYMBOL_KEY, SPLITS_KEY)},
+            payload.get(SPLITS_KEY) or {})
+
+
+def splits_as_of(splits: dict, as_of) -> dict:
+    """§5.9 point-in-time split history: only events ON OR BEFORE as_of. A split after
+    as_of was unknowable then and must never restate a share count at that tick; scoring's
+    `adjusted_shares_series` then rescales each observation into as_of's share terms
+    (it counts only splits strictly after each observation's own date)."""
+    day = _iso(as_of)
+    out = {}
+    for event, raw in (splits or {}).items():
+        try:
+            ratio = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if ratio > 0 and str(event) <= day:
+            out[str(event)] = ratio
+    return out
 
 
 def cache_stem(symbol: str) -> str:
@@ -349,7 +425,8 @@ def quarter_ends(spy_prices: dict, start, end) -> list:
     return [by_quarter[key] for key in sorted(by_quarter)]
 
 
-def as_of_bundle(facts: dict, symbol: str, meta: dict, as_of, prices: dict) -> dict | None:
+def as_of_bundle(facts: dict, symbol: str, meta: dict, as_of, prices: dict,
+                 splits: dict | None = None) -> dict | None:
     """§5.9: EDGAR companyfacts -> the §4.1 Bundle as it was knowable on as_of, or None
     when no annual income period is visible yet (a pre-first-10-K name is not scoreable).
     market_cap = share count at as_of x the RAW weekly close at as_of — as-reported dei
@@ -358,7 +435,12 @@ def as_of_bundle(facts: dict, symbol: str, meta: dict, as_of, prices: dict) -> d
     The share count comes from the trend series, else from shares_fallback; `shares_basis`
     ("series" | "fallback-sum" | "fallback-largest" | None) records which, so the multi-
     class path is auditable. yahoo_ev is None by construction (no Yahoo in the PIT world —
-    the EV_GAP flag never fires)."""
+    the EV_GAP flag never fires).
+
+    `splits` ({symbol: {date: ratio}}, §3.6) carries the split events Yahoo returned on the
+    same bar fetch; only those ON OR BEFORE as_of reach the bundle, so scoring restates the
+    as-reported dei share counts into as_of's share terms. Without it a 2:1 split reads as
+    +100%/yr dilution at every tick and trips the §4.4 hard dilution veto (§6.14)."""
     as_of = _iso(as_of)
     if not facts or not (facts.get("facts") or {}):
         return None
@@ -367,6 +449,9 @@ def as_of_bundle(facts: dict, symbol: str, meta: dict, as_of, prices: dict) -> d
     for cf in (cashflow_a, cashflow_q):   # EDGAR payments are outflow-positive; Yahoo is negative
         cf["Capital Expenditure"] = {end: -val
                                      for end, val in cf["Capital Expenditure"].items()}
+    for income in (income_a, income_q):   # gross profit: tagged, else revenue - cost of revenue
+        income["Gross Profit"] = _gross_profit(income)
+        income.pop("Cost Of Revenue", None)
     for income, cf in ((income_a, cashflow_a), (income_q, cashflow_q)):  # §5.9 EBITDA = EBIT + D&A
         da = cf["Depreciation And Amortization"]
         income["EBITDA"] = {end: val + da[end]
@@ -388,6 +473,7 @@ def as_of_bundle(facts: dict, symbol: str, meta: dict, as_of, prices: dict) -> d
         "market_cap": shares * px if shares is not None and px is not None else None,
         "yahoo_ev": None, "price": px,
         "shares_series": series, "shares_basis": shares_basis,
+        "splits": splits_as_of((splits or {}).get(symbol) or {}, as_of),
         "annual": {"income": annual_income,
                    "balance": {end: payload for end, payload in balance.items()
                                if end in annual_income},
