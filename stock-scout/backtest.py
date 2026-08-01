@@ -32,11 +32,14 @@ BT_DIR = Path("bt_cache")
 REPORTS_DIR = Path("reports")
 
 
-def disclosures(cost_bp: float, degraded: list[str] | None = None) -> list[str]:
+def disclosures(cost_bp: float, degraded: list[str] | None = None,
+                split_unadjusted: list[str] | None = None) -> list[str]:
     """The §5.10 disclosure set (msg 44): PIT discipline, survivorship both directions,
     cost model, data caveats — printed in full under every report. `degraded` names the
     symbols whose price grid still lacks raw closes (legacy §3.6 files), which adds the
-    split-contamination caveat to the set."""
+    split-contamination caveat to the set; `split_unadjusted` names those whose grid is
+    declared in today's share terms but carries no split history, so pit could not put the
+    share count in the same terms (`market_cap_split_unadjusted`, §6.17)."""
     extra = []
     if degraded:
         extra.append(
@@ -46,6 +49,17 @@ def disclosures(cost_bp: float, degraded: list[str] | None = None) -> list[str]:
             "zonder ruwe close; hun marktkapitalisatie is met een aangepaste "
             "(split/dividend-gecorrigeerde) koers gebouwd en draagt dus latere "
             "corporate actions in zich — draai bt_fetch.py opnieuw om ze te verversen.")
+    if split_unadjusted:
+        extra.append(
+            f"Splits niet verrekend: {len(split_unadjusted)} symbolen "
+            f"({', '.join(sorted(split_unadjusted)[:8])}"
+            f"{', ...' if len(split_unadjusted) > 8 else ''}) hebben een koersrooster in "
+            f"basis '{pit.BASIS_SPLIT_ADJUSTED_TODAY}' zonder splitshistorie (de keyless "
+            "bron levert er geen). pit kan het aandelenaantal dan niet in dezelfde termen "
+            "zetten, dus wie sinds de tick gesplitst is, krijgt een marktkapitalisatie die "
+            "precies de splitfactor te laag is — en dat maakt hem in de §4.3-waarderings"
+            "benen kunstmatig goedkoop. Wie niet gesplitst is, klopt exact; welke van de "
+            "twee het is, is met deze data niet vast te stellen.")
     return extra + [
         "PIT-discipline: alleen EDGAR-facts met filed-datum <= de tick zijn zichtbaar; "
         "per periode geldt de laatst-gefilede waarde (restatements zoals toen bekend) — "
@@ -71,6 +85,16 @@ def degraded_price_symbols(prices: dict) -> list[str]:
     """Symbols whose §3.6 grid is still legacy (plain floats, no raw close of its own) —
     their PIT market caps carry later splits/dividends. Fed to disclosures()."""
     return sorted(sym for sym, grid in prices.items() if pit.grid_is_degraded(grid))
+
+
+def split_unadjusted_symbols(splits: dict, price_basis: dict | None) -> list[str]:
+    """Symbols whose grid declares a non-raw basis but records no split events — exactly
+    the condition under which pit.market_cap_at cannot restate the share count and hands
+    back `market_cap_split_unadjusted` True (§6.17). Computed from the cache's own
+    declarations rather than harvested from the bundles, because it is a property of the
+    FILES: the same symbol answers the same way at every tick. Fed to disclosures()."""
+    return sorted(sym for sym, basis in (price_basis or {}).items()
+                  if basis != pit.BASIS_RAW and not (splits or {}).get(sym))
 
 
 # ---------------------------------------------------------------- pure price helpers
@@ -129,17 +153,24 @@ def avg_turnover_pct(turnovers: list[float]) -> float | None:
 # ------------------------------------------------------------- tick scoring (§5.10)
 
 def score_ticks(facts: dict, prices: dict, meta: dict, ticks: list[str],
-                splits: dict | None = None) -> dict:
+                splits: dict | None = None, price_basis: dict | None = None) -> dict:
     """Per tick: PIT bundles for every symbol with facts -> scoring.score_universe
     (the shared decision layer, §4). Returns {tick: §3.3 scored rows}. `splits` is the
     §3.6 {symbol: {date: ratio}} map; as_of_bundle keeps only the events knowable at the
-    tick, so a splitter is not mistaken for a serial diluter (§6.14)."""
+    tick, so a splitter is not mistaken for a serial diluter (§6.14).
+
+    `price_basis` is the {symbol: basis} map load_bt_cache read off the price files
+    (§3.6). It MUST travel with the grids: a cache is mixed by design (one grid per
+    vendor, each declaring its own share terms), and dropping the declaration makes every
+    today-basis grid read as raw — a market cap understated by the whole split factor,
+    published with `market_cap_basis: "raw"` as if that were a fact. None declares raw for
+    every symbol, which is what a pre-declaration cache means."""
     out = {}
     for tick in ticks:
         bundles = []
         for symbol in sorted(facts):
             bundle = pit.as_of_bundle(facts[symbol], symbol, meta.get(symbol), tick,
-                                      prices, splits)
+                                      prices, splits, price_basis)
             if bundle is not None:
                 bundles.append(bundle)
         out[tick] = scoring.score_universe(bundles)
@@ -239,14 +270,17 @@ def band_cohorts(scored_by_tick: dict, prices: dict, ticks: list[str]) -> dict:
 
 def run_backtest(facts: dict, prices: dict, meta: dict, *, start: str, end: str,
                  top_n: int = 15, cost_bp: float = DEFAULT_COST_BP,
-                 splits: dict | None = None) -> dict:
+                 splits: dict | None = None, price_basis: dict | None = None) -> dict:
     """The pure §5.10 end-to-end core over preloaded dicts: SPY quarter grid ->
     score_ticks -> strategy/pool/SPY tracks + band cohorts + tick log + disclosures.
-    `splits` (§3.6) keeps a stock split from reading as dilution at a tick (§6.14)."""
+    `splits` (§3.6) keeps a stock split from reading as dilution at a tick (§6.14);
+    `price_basis` (§3.6) declares the share terms of each symbol's closes, without which
+    a fallback-sourced grid grades on a market cap wrong by its split factor."""
     ticks = pit.quarter_ends(prices.get("SPY") or {}, start, end)
     if len(ticks) < 2:
         raise ValueError("fewer than 2 rebalance ticks on the SPY grid for this range")
-    scored_by_tick = score_ticks(facts, prices, meta, ticks, splits)
+    scored_by_tick = score_ticks(facts, prices, meta, ticks, splits, price_basis)
+    unadjusted = split_unadjusted_symbols(splits, price_basis)
     strategy = simulate(scored_by_tick, prices, ticks, top_n=top_n, cost_bp=cost_bp)
     pool = simulate(scored_by_tick, prices, ticks, top_n=None, cost_bp=0.0)
     pool.pop("tick_log")
@@ -260,7 +294,9 @@ def run_backtest(facts: dict, prices: dict, meta: dict, *, start: str, end: str,
             "bands": band_cohorts(scored_by_tick, prices, ticks),
             "tick_log": strategy["tick_log"],
             "degraded_price_symbols": degraded_price_symbols(prices),
-            "disclosures": disclosures(cost_bp, degraded_price_symbols(prices))}
+            "split_unadjusted_symbols": unadjusted,
+            "disclosures": disclosures(cost_bp, degraded_price_symbols(prices),
+                                       unadjusted)}
 
 
 # ------------------------------------------------------------------- report (§5.10)
@@ -270,9 +306,13 @@ def pct(x, spec: str = "+.1f") -> str:
 
 
 def render_report(result: dict) -> str:
-    """The §5.10 report md (pure): track table, msg 44 band table, tick log, disclosures."""
+    """The §5.10 report md (pure): track table, msg 44 band table, tick log, disclosures.
+    The header carries the FIRST and LAST rebalance tick, not the requested range: a grid
+    that starts later than --start (a price vendor with a shallower history) would
+    otherwise be reported under a window three years wider than the one actually run."""
+    ticks = result["ticks"]
     lines = [
-        f"# PIT-backtest {result['start']} → {result['end']} "
+        f"# PIT-backtest {ticks[0]} → {ticks[-1]} "
         f"(v2 composite top-{result['top_n']})", "",
         f"{result['quarters']} kwartalen · rebalance-grid = laatste SPY-weekbar per "
         f"kalenderkwartaal · kosten {result['cost_bp']:g} bp op omzet", "",
@@ -308,16 +348,38 @@ def render_report(result: dict) -> str:
 
 # --------------------------------------------------------------------- I/O + CLI
 
+class LoadedCache(tuple):
+    """load_bt_cache's result: still exactly the (facts, prices, meta, splits) 4-tuple
+    every call site unpacks, carrying the price files' declared share terms as the
+    {symbol: basis} map `.price_basis` (pit.LoadedPriceFile's trick, one level up). A
+    fifth tuple slot would break four-way unpacking in backtest3 and in the tests; an
+    attribute extends the result without touching a single one of them."""
+
+    price_basis: dict
+
+    def __new__(cls, facts: dict, prices: dict, meta: dict, splits: dict,
+                price_basis: dict):
+        loaded = super().__new__(cls, (facts, prices, meta, splits))
+        loaded.price_basis = price_basis
+        return loaded
+
+
 def load_bt_cache(bt_dir: str | Path = BT_DIR,
-                  universe_path: str | Path = "universe.csv") -> tuple[dict, dict, dict, dict]:
+                  universe_path: str | Path = "universe.csv") -> LoadedCache:
     """bt_cache/ + universe.csv -> ({symbol: facts}, {symbol: price grid incl. SPY},
-    {symbol: meta}, {symbol: split events}) for the pure cores (§3.6, §5.10).
+    {symbol: meta}, {symbol: split events}) for the pure cores (§3.6, §5.10), plus the
+    declared {symbol: price basis} map on `.price_basis`.
 
     Every dict is keyed by the TRUE universe symbol, never by the filename stem: the
     writer sanitizes '/' to '-' (BRK/B -> BRK-B.json), so a stem key would miss its meta
     row (no sector -> wrong tier, wrong sector cohort) and mismatch the universe symbol
     everywhere downstream. The symbol is read from inside the payload, with the universe's
-    own sanitized-name map as the fallback for files written before that annotation."""
+    own sanitized-name map as the fallback for files written before that annotation.
+
+    One unreadable price file (corrupt JSON, or a basis declaration this version does not
+    know) SKIPS that symbol with a warning instead of aborting the run: a symbol without a
+    grid degrades cleanly to unpriced -> INSUFFICIENT, whereas the exception took down all
+    2,900 others over one file."""
     bt_dir = Path(bt_dir)
     meta, by_stem = {}, {}
     universe_path = Path(universe_path)
@@ -328,17 +390,22 @@ def load_bt_cache(bt_dir: str | Path = BT_DIR,
                             "industry": row.get("industry")}
             by_stem[pit.cache_stem(symbol)] = symbol
 
-    facts, prices, splits = {}, {}, {}
+    facts, prices, splits, bases = {}, {}, {}, {}
     for path in sorted((bt_dir / "facts").glob("*.json")):
         payload = json.loads(path.read_text(encoding="utf-8"))
         facts[pit.facts_symbol(payload) or by_stem.get(path.stem) or path.stem] = payload
     for path in sorted((bt_dir / "prices").glob("*.json")):
-        symbol, grid, events = pit.load_price_file(
-            json.loads(path.read_text(encoding="utf-8")))
+        try:
+            loaded = pit.load_price_file(json.loads(path.read_text(encoding="utf-8")))
+        except (ValueError, OSError) as e:
+            print(f"{path.name} overgeslagen: {e}", file=sys.stderr)
+            continue
+        symbol, grid, events = loaded
         key = symbol or by_stem.get(path.stem) or path.stem
         prices[key] = grid
         splits[key] = events
-    return facts, prices, meta, splits
+        bases[key] = loaded.price_basis
+    return LoadedCache(facts, prices, meta, splits, bases)
 
 
 def write_reports(result: dict, md: str, stem: str,
@@ -364,7 +431,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--universe", default="universe.csv")
     args = ap.parse_args(argv)
 
-    facts, prices, meta, splits = load_bt_cache(args.bt_cache, args.universe)
+    loaded = load_bt_cache(args.bt_cache, args.universe)
+    facts, prices, meta, splits = loaded
     if not facts or "SPY" not in prices:
         print("bt_cache is leeg of mist SPY — draai eerst bt_fetch.py", file=sys.stderr)
         return 1
@@ -373,8 +441,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"LET OP: {len(legacy)} koersroosters zonder ruwe close — marktkapitalisatie "
               f"draagt latere splits/dividenden; draai bt_fetch.py opnieuw. "
               f"(staat ook in de disclosures)", file=sys.stderr)
+    unadjusted = split_unadjusted_symbols(splits, loaded.price_basis)
+    if unadjusted:
+        print(f"LET OP: {len(unadjusted)} koersroosters staan in basis "
+              f"'{pit.BASIS_SPLIT_ADJUSTED_TODAY}' zonder splitshistorie — wie sinds de "
+              f"tick gesplitst is, krijgt een te lage marktkapitalisatie. "
+              f"(staat ook in de disclosures)", file=sys.stderr)
     result = run_backtest(facts, prices, meta, start=args.start, end=args.end,
-                          splits=splits,
+                          splits=splits, price_basis=loaded.price_basis,
                           top_n=args.top_n, cost_bp=args.cost_bp)
     md_path, json_path = write_reports(result, render_report(result),
                                        f"backtest-{args.start}-{args.end}")

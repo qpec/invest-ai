@@ -114,6 +114,7 @@ needs an identity column the vendor does not reliably supply.
   "meta": {"name": "...", "sector": "...", "industry": "...", "country": "..."},   // from universe row
   "currency": "USD",
   "price": {"close": 123.4, "date": "2026-07-30"},
+  "price_basis": "raw",                                // share terms of that close (§3.6); always written
   "fast_info": { "last_price": ..., "market_cap": ..., "shares": ..., "currency": "USD", ... },  // plain floats/strings
   "shares": {"2025-07-01": 430000000.0, ...},          // get_shares_full, deduped last-per-date
   "splits": {"2025-01-15": 2.0, ...},                  // split events from the SAME bar call (ratio per effective date)
@@ -123,6 +124,15 @@ needs an identity column the vendor does not reliably supply.
 ```
 Statement payloads keep **every row Yahoo returns** (the datasheet shows the exact matched
 labels). Period ends are ISO dates. NaN → null.
+
+`price_basis` (deviation 17): the share terms of `price.close`, in the §3.6 vocabulary —
+`"raw"` (as traded that day; Yahoo's bars, and what every entry written before the key
+holds) or `"split_adjusted_today"` (restated into today's share terms; what the keyless
+vendors serve). It is **declared by the fetcher, never sniffed**, and always written out.
+For a live entry the two coincide — "adjusted to today" *is* today's as-traded price — so
+a market cap off a `split_adjusted_today` close is exact here; the distinction only bites
+on historical bars (§3.6). A fallback vendor with no split feed leaves `splits` empty, so
+deviation 8's restatement is inert for that entry and populate reports how many.
 
 `splits` (deviation 8): `get_shares_full` counts are point-in-time and split-**unadjusted**,
 so the raw series reads a 2-for-1 as +100% dilution. The events ride the existing
@@ -227,7 +237,8 @@ row (no sector → wrong tier and wrong sector cohort). The price file:
 ```jsonc
 { "symbol": "BRK/B",
   "bars":   {"YYYY-MM-DD": {"close": <raw>, "adj_close": <adjusted>}, ...},
-  "splits": {"YYYY-MM-DD": <ratio>, ...} }      // e.g. 2.0 on a 2-for-1 effective date
+  "splits": {"YYYY-MM-DD": <ratio>, ...},       // e.g. 2.0 on a 2-for-1 effective date
+  "price_basis": "raw" | "split_adjusted_today" }   // share terms of every close in `bars`
 ```
 
 Both prices are stored because they do different jobs: **anything multiplied by a share
@@ -238,6 +249,22 @@ every historical tick; total-return math (NAV, forward returns, the benchmark tr
 both fields — degraded, detectable, and disclosed in the report. Splits ride the same
 `actions=True` fetch (no extra Yahoo call) and let the backtest tell a 2:1 split from
 100%/yr dilution; `--keep-legacy-prices` opts out of refetching old grids.
+
+`price_basis` (deviation 17) closes the second, invisible ambiguity: "raw close" pins down
+dividends but **not splits**, and vendors disagree. `"raw"` means the price as it traded on
+the bar's own day (Yahoo's Close, and the meaning of every file written before the key).
+`"split_adjusted_today"` means that same price divided by every split since (what the
+keyless vendors serve: NVDA's 2024-05-28 bar reads ≈109.6 there, ≈1096 is what traded).
+The writer **declares** it; a reader never infers it, because nothing in a price series
+reveals it and reading a today-basis close as raw understates a historical market cap by
+the whole split factor. `pit.as_of_bundle` takes the declaration (one basis, or a
+`{symbol: basis}` map for a cache written by several sources) and puts **both sides** of
+`shares × price` into the same terms — for a today-basis close the as-reported dei count is
+restated into today's share terms via `scoring.adjusted_shares_series`, after which the
+future-split factor cancels exactly and the product is the true historical market cap in
+dollars. Grids from different sources may therefore sit side by side; each file answers for
+itself. Without split history the restatement cannot run: the bundle carries
+`market_cap_split_unadjusted` and the fetcher counts those grids at the end of the run.
 
 ---
 
@@ -388,7 +415,7 @@ first**; None never reaches `percentileofscore`. Vetoed names are suppressed, ne
 universe size + NL names kept. Downloads to `data/equities.bz2` once, reuses thereafter.
 
 ### 5.2 `populate.py`
-`python populate.py [--universe universe.csv] [--limit N] [--only SYM,SYM] [--fresh] [--annual-only]`
+`python populate.py [--universe universe.csv] [--limit N] [--only SYM,SYM] [--fresh] [--annual-only] [--price-source {auto,yahoo,stockanalysis}]`
 - Per symbol (default: annual **and** quarterly in one pass — msg 62 "nu mét kwartaaldata in
   één pass"; `--annual-only` reproduces the v1 behavior): fast_info, daily bars (close,
   currency **and split events** — one `history(actions=True)` call widened to `period="5y"`,
@@ -400,6 +427,19 @@ universe size + NL names kept. Downloads to `data/equities.bz2` once, reuses the
   dead tickers are logged and skipped).
 - `--fresh` (msg 62): move existing `cache/` to `cache-<YYYY-MM-DD>/` first.
 - Writes `progress.json` after every symbol; marks `finished` at the end.
+- `--price-source` (default `auto`, deviation 17) picks the vendor behind the §3.2 `price`
+  block only — fast_info, shares and statements are always Yahoo's. `auto` runs Yahoo's
+  daily bars first and steps down to `pricesrc`'s keyless source once Yahoo throttles (a
+  rate limit retires the Yahoo price leg for the rest of the run instead of ending it);
+  `yahoo` keeps the old behavior including stopping the run on a rate limit. Every entry
+  records `price_basis` (§3.2).
+- **The live path is where the alternative source is a full substitute, not a compromise.**
+  A `split_adjusted_today` close is the as-traded price *divided by every split since*, and
+  no split can lie after today, so for a run priced today the two bases are the same number
+  and `shares × close` is exact to the cent. Only historical bars need the restatement of
+  §3.6. What is lost is the split *feed*: the keyless vendor has none, so such entries carry
+  no `splits`, deviation 8's restatement is inert for them, and a name that split recently
+  reads as dilution until Yahoo is reachable again. populate says how many at the end.
 
 ### 5.3 `augment.py`
 `python augment.py [--universe universe.csv]` — add `quarterly` to cache entries that lack
@@ -525,10 +565,31 @@ degrades to its stored `detail` string, and a grades JSON without a `scorecard` 
 older run) renders the rest of the card with a named note rather than failing the build.
 
 ### 5.8 `bt_fetch.py`
-`python bt_fetch.py [--universe universe.csv] [--start 2020-01-01] [--limit N]`
+`python bt_fetch.py [--universe universe.csv] [--start 2020-01-01] [--limit N] [--price-source {auto,yahoo,stockanalysis}]`
 SEC `company_tickers.json` → CIK map (cached); `companyfacts` per symbol → `bt_cache/facts/`;
-weekly adj-close via yfinance (`SPY` + universe) → `bt_cache/prices/`. Paced, resumable,
+weekly raw+adj close (`SPY` + universe) → `bt_cache/prices/`. Paced, resumable,
 progress.json contract so `reporter.py` works for it too.
+
+`--price-source` (default `auto`, deviation 17) selects the weekly price vendor; EDGAR is
+untouched by it.
+- `yahoo` is the unchanged raw+adjusted path: the vendored `fetch_weekly_bars` supplies
+  `adj_close`, a supplementary paced `actions=True` call supplies the raw Close **and** the
+  split events, the grid declares `price_basis: "raw"`, and a rate limit still stops the run.
+- `stockanalysis` is `pricesrc`'s keyless source:
+  `GET https://stockanalysis.com/api/symbol/s/<SYM>/history?range=<span>&period=Weekly`,
+  no key, ~0.3 s/request, a browser `User-Agent` **required** (urllib's default is answered
+  403). `c` → `close`, `a` → `adj_close`, and the grid declares
+  `price_basis: "split_adjusted_today"`. **Range caveat:** only the spans the API honors may
+  be used (`6M`, `YTD`, `5Y`, `10Y`) — `MAX`, `ALL`, `20Y` and the like are not errors there,
+  they silently return 52 weekly bars, which would grade a ten-year backtest on one year of
+  prices. `10Y` is the default and reaches 2016 (521 weekly bars for ADBE/NVDA, verified).
+  The source has **no split feed**, so its grids carry no `splits`.
+- `auto` runs the Yahoo path first and steps down to the keyless source when it refuses; a
+  rate limit retires the Yahoo leg for the rest of the run rather than ending the run, which
+  is the point on a 429'd box. Files from different sources coexist — each declares its own
+  basis (§3.6) — and the run ends by reporting how many grids are today-basis and how many
+  of those have no split history (those market caps come back
+  `market_cap_split_unadjusted`).
 
 ### 5.9 `pit.py`
 `as_of_bundle(facts, symbol, meta, as_of, prices) -> Bundle|None` — EDGAR→Bundle with
@@ -673,6 +734,34 @@ implementation contradicted them.
     untagged line suspended the whole name. Gross profit is now derived from revenue minus
     cost of revenue when not tagged directly. A filer that tags neither (Medpace, a CRO
     reporting direct costs under a custom tag) still suspends — honestly, not silently.
+
+**Second price source (2026-08-01).** Yahoo answers HTTP 429 to this box, so the pipeline
+could obtain no prices at all — and per `docs/SCORECARD-DESIGN.md` §4.1 a price-less run is a
+quality profile and explicitly **not** a verdict, i.e. the entire scorecard withheld.
+
+17. **Declared price basis** (§3.2, §3.6, §5.2, §5.8) — the fetchers gained
+    `--price-source {auto,yahoo,stockanalysis}` over a small `pricesrc` layer in which every
+    vendor DECLARES what its closes are. stockanalysis.com serves keyless weekly history (10
+    years, ~0.3 s/request, browser `User-Agent` required, and only the spans it honors —
+    anything else silently returns 52 bars), but its `c` is **split-adjusted to today**, not
+    as traded: NVDA's 2024-05-28 bar reads ≈109.6 where ≈1096 traded. Multiplying an
+    as-reported dei share count (≈2.46bn pre-split) by such a close understates the market cap
+    by the whole split factor — ≈$270bn where the market said ≈$2.7tn — and nothing in the
+    numbers says so, which is why the basis is written into every price file and cache entry
+    and is **never inferred**. Against a today-basis close the share count is restated into
+    today's split terms as well (`scoring.adjusted_shares_series`, already built for deviation
+    8); the future-split factor then cancels exactly between the two sides, so the product is
+    the true historical market cap **in dollars**. That is an identity, not lookahead: only the
+    units the two sides are quoted in change, and they change identically — and ratio metrics
+    were indifferent all along, since a factor common to two share observations cancels in the
+    trend. Live runs are the easy case: "adjusted to today" *is* today's as-traded price, so
+    there the alternative source is a full substitute rather than a compromise. What the
+    keyless vendor lacks is a split feed, so its files carry no `splits`: the restatement
+    cannot run, `pit.market_cap_at` returns `market_cap_split_unadjusted` for those bundles,
+    and both fetchers count them in their closing report — an honest "unverified" instead of a
+    silently wrong number. Files from different sources coexist, each declaring its own basis,
+    and an absent declaration means `"raw"`, so every pre-existing cache keeps its original
+    meaning exactly.
 
 ---
 

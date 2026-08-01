@@ -34,7 +34,7 @@ NAME_KEYS = {"symbol", "name", "sector", "industry", "tier", "grade", "composite
              "quality_score", "pillars", "legs", "veto", "flags", "ev", "ttm",
              "mos", "buffett", "scorecard"}
 SCORECARD_KEYS = {"score", "available_max", "pct", "band", "band_meaning", "blocks",
-                  "metrics", "why", "consensus", "coverage", "veto", "notes"}
+                  "metrics", "why", "consensus", "coverage", "evidence", "veto", "notes"}
 
 
 def cache_entry(symbol, sector, industry, name, *, q_ocf=70e6, total_debt=100e6,

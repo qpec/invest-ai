@@ -480,3 +480,28 @@ def test_a_row_for_another_symbol_is_refused():
     with pytest.raises(ValueError, match="scored_row is for"):
         scorecard.scorecard(wonderful("AAA"),
                             scored_row=scoring.score_universe([wonderful("BBB")])[0])
+
+
+# ---------------- evidence tiers: a percentage of AVAILABLE points is not a rank
+
+def test_evidence_tier_boundaries_follow_the_share_of_the_full_card():
+    assert scorecard.evidence_tier(100) == "full"
+    assert scorecard.evidence_tier(87) == "full"        # the export's realistic ceiling
+    assert scorecard.evidence_tier(84) == "partial"
+    assert scorecard.evidence_tier(60) == "partial"
+    assert scorecard.evidence_tier(59) == "thin"
+    assert scorecard.evidence_tier(0) == "thin"
+
+
+def test_a_thin_card_never_outranks_a_fully_measured_one_on_percentage():
+    # The real failure this guards: on live data a name measured on 64 points scored 97%
+    # and outranked one measured on 87 points scoring 94% — ignorance read as excellence.
+    thin = {"symbol": "THIN", "pct": 97, "available_max": 64, "evidence": scorecard.evidence_tier(64)}
+    full = {"symbol": "FULL", "pct": 94, "available_max": 87, "evidence": scorecard.evidence_tier(87)}
+    assert sorted([thin, full], key=scorecard.rank_key)[0]["symbol"] == "FULL"
+    # within a tier the higher percentage still leads
+    other = {"symbol": "FULL2", "pct": 96, "available_max": 90, "evidence": "full"}
+    assert sorted([full, other], key=scorecard.rank_key)[0]["symbol"] == "FULL2"
+    # a card with no verdict sorts last, never among the ranked names
+    none = {"symbol": "NOPRICE", "pct": None, "available_max": 75, "evidence": "partial"}
+    assert sorted([none, thin, full], key=scorecard.rank_key)[-1]["symbol"] == "NOPRICE"

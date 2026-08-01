@@ -9,11 +9,16 @@ tests/test_pit.py already pins.
 import csv
 import json
 
+import pandas as pd
 import pytest
 
+import bt_fetch
 import pit
+import populate
+import pricesrc
 import scoring
 import secsv
+from vendor import yf_fetch
 
 OBS_HEADER = ["symbol", "namespace", "tag", "label", "unit", "start", "end", "filed",
               "form", "fy", "fp", "frame", "value"]
@@ -392,3 +397,173 @@ def test_cli_with_prices_reports_market_caps(tmp_path, capsys):
     captured = capsys.readouterr()
     assert "1 met market_cap" in captured.out
     assert "KWALITEITSPROFIEL" not in captured.err
+
+
+# ------------------------ price-source wiring in the fetchers (§3.6, §5.2, §5.8, §6.17)
+#
+# Yahoo answers 429 on this box, so both fetchers can be pointed at another vendor through
+# pricesrc. What has to be proven here is the WIRING, not pricesrc's parsing (tests/
+# test_pricesrc.py) or pit's basis arithmetic (tests/test_pit.py): that whoever served says
+# so in the file, that the Yahoo path is untouched, and that a rate limit steps down to the
+# fallback instead of ending the run. Nothing here touches the network.
+
+class ScriptedSource(pricesrc.PriceSource):
+    """A non-Yahoo price source that DECLARES a basis like any real one, records every
+    call, and carries a split feed or none at all (the keyless vendors carry none)."""
+
+    name = "scripted"
+    basis = pit.BASIS_SPLIT_ADJUSTED_TODAY
+
+    def __init__(self, bars, splits=None):
+        self.bars, self._splits, self.calls = bars, splits or {}, []
+
+    def weekly(self, symbol, *, start=None, state_dir=None):
+        self.calls.append((symbol, start, state_dir))
+        return {day: bar for day, bar in self.bars.items()
+                if start is None or day >= start}
+
+    def splits(self, symbol):
+        return dict(self._splits)
+
+
+def scripted_ladder(name, bars, splits=None):
+    """A PriceLadder of `name` with its pricesrc source swapped for a scripted one."""
+    ladder = populate.PriceLadder(name)
+    ladder.fallback = ScriptedSource(bars, splits)
+    return ladder
+
+
+WEEKLY = {"2026-07-20": {"close": 320.0, "adj_close": 318.0},
+          "2026-07-27": {"close": 334.54, "adj_close": 334.54}}
+
+
+def test_price_source_names_mirror_the_pricesrc_registry():
+    assert list(populate.PRICE_SOURCES) == pricesrc.available()
+    assert populate.FALLBACK_SOURCE in pricesrc.available()
+    # --price-source yahoo has nothing to fall back to, so it keeps the old contract:
+    # only the vendor's rate limit exists, and it still stops the run.
+    yahoo = populate.PriceLadder(populate.YAHOO_SOURCE)
+    assert yahoo.yahoo and yahoo.fallback is None
+    assert yahoo.rate_limited == (yf_fetch.RateLimited,)
+    auto = populate.PriceLadder()                       # the default
+    assert auto.name == populate.AUTO_SOURCE and auto.yahoo
+    assert auto.fallback.name == populate.FALLBACK_SOURCE
+    assert auto.fallback.basis == pit.BASIS_SPLIT_ADJUSTED_TODAY
+    assert pricesrc.RateLimited in auto.rate_limited    # both layers can throttle now
+    named = populate.PriceLadder(populate.FALLBACK_SOURCE)
+    assert not named.yahoo                              # no Yahoo request is even attempted
+    with pytest.raises(ValueError, match="unknown price source"):
+        populate.PriceLadder("quandl")
+
+
+def test_bt_fetch_price_file_declares_the_basis_of_whoever_served(tmp_path):
+    ladder = scripted_ladder(populate.FALLBACK_SOURCE, WEEKLY, {"2024-06-10": 10.0})
+    payload = bt_fetch.price_payload("BRK/B", ladder, state_dir=tmp_path,
+                                     start="2026-07-25", period="10y")
+    assert payload == {"symbol": "BRK/B",                      # the TRUE symbol, §3.6
+                       "bars": {"2026-07-27": {"close": 334.54, "adj_close": 334.54}},
+                       "splits": {"2024-06-10": 10.0},
+                       "price_basis": pit.BASIS_SPLIT_ADJUSTED_TODAY}
+    assert ladder.fallback.calls == [("BRK/B", "2026-07-25", tmp_path)]  # start is honored
+    assert pit.load_price_file(payload).price_basis == pit.BASIS_SPLIT_ADJUSTED_TODAY
+
+
+def test_bt_fetch_yahoo_leg_is_untouched_and_declares_raw(monkeypatch, tmp_path):
+    index = pd.to_datetime(["2026-07-20", "2026-07-27"])
+    frame = pd.DataFrame({"close": [320.0, 334.54], "adj_close": [318.0, 334.54]},
+                         index=index)
+    monkeypatch.setattr(bt_fetch, "weekly_frame",
+                        lambda symbol, **kw: (frame, False, {"2024-06-10": 10.0}))
+    ladder = scripted_ladder(populate.AUTO_SOURCE, WEEKLY)
+    payload = bt_fetch.price_payload("NVDA", ladder, state_dir=tmp_path,
+                                     start="2026-07-01", period="10y")
+    assert payload["price_basis"] == pit.BASIS_RAW      # Yahoo's Close is as-traded
+    assert payload["bars"]["2026-07-20"] == {"close": 320.0, "adj_close": 318.0}
+    assert ladder.fallback.calls == []                  # the fallback is never consulted
+
+
+def test_bt_fetch_auto_steps_down_to_the_fallback_and_retires_yahoo(monkeypatch, tmp_path):
+    attempts = []
+
+    def throttled(symbol, **kw):
+        attempts.append(symbol)
+        raise yf_fetch.RateLimited("429 after the full ladder")
+
+    monkeypatch.setattr(bt_fetch, "weekly_frame", throttled)
+    ladder = scripted_ladder(populate.AUTO_SOURCE, WEEKLY)
+    first = bt_fetch.price_payload("NVDA", ladder, state_dir=tmp_path,
+                                   start="2026-07-01", period="10y")
+    assert first["price_basis"] == pit.BASIS_SPLIT_ADJUSTED_TODAY
+    assert not ladder.yahoo                     # retired for the rest of the run
+    bt_fetch.price_payload("MSFT", ladder, state_dir=tmp_path, start="2026-07-01",
+                           period="10y")
+    assert attempts == ["NVDA"]                 # the 30s->5min->30min ladder is paid once
+    # --price-source yahoo has nowhere to step down to, so the rate limit still propagates
+    # and main() stops the run on it, exactly as before.
+    alone = populate.PriceLadder(populate.YAHOO_SOURCE)
+    with pytest.raises(yf_fetch.RateLimited):
+        bt_fetch.price_payload("NVDA", alone, state_dir=tmp_path, start="2026-07-01",
+                               period="10y")
+    assert alone.yahoo
+
+
+def test_bt_fetch_resumability_reports_the_basis_of_the_file_it_kept(tmp_path):
+    ladder = scripted_ladder(populate.FALLBACK_SOURCE, WEEKLY)
+    written = bt_fetch._fetch_prices("SYN", tmp_path, ladder, state_dir=tmp_path,
+                                     start="2026-07-01", period="10y")
+    on_disk = json.loads((tmp_path / "SYN.json").read_text(encoding="utf-8"))
+    assert on_disk == written and on_disk["price_basis"] == pit.BASIS_SPLIT_ADJUSTED_TODAY
+    again = bt_fetch._fetch_prices("SYN", tmp_path, ladder, state_dir=tmp_path,
+                                   start="2026-07-01", period="10y")
+    assert len(ladder.fallback.calls) == 1                  # existing file, no refetch
+    assert again["price_basis"] == pit.BASIS_SPLIT_ADJUSTED_TODAY
+    # A legacy file has no envelope at all; it is still returned in the §3.6 shape the
+    # caller reports on, declaring the "raw" every pre-field cache holds.
+    (tmp_path / "OLD.json").write_text(json.dumps({"2026-07-27": 10.0}), encoding="utf-8")
+    legacy = bt_fetch._fetch_prices("OLD", tmp_path, ladder, state_dir=tmp_path,
+                                    start="2026-07-01", period="10y", refresh_legacy=False)
+    assert legacy == {"symbol": "OLD", "bars": {"2026-07-27": 10.0}, "splits": {},
+                      "price_basis": pit.BASIS_RAW}
+    assert pit.grid_is_degraded(legacy["bars"])             # and still visibly degraded
+
+
+def test_populate_live_close_from_a_today_basis_source_is_the_as_traded_price(tmp_path):
+    ladder = scripted_ladder(populate.AUTO_SOURCE, WEEKLY)
+    ladder.yahoo = False                        # a 429 retired it earlier in the run
+    bars, splits, basis = populate.price_bars("ADBE", ladder, state_dir=tmp_path)
+    assert basis == pit.BASIS_SPLIT_ADJUSTED_TODAY
+    assert splits == {}                         # no split feed: none KNOWN, never faked
+    annual = {st: pd.DataFrame() for st in populate.STATEMENT_TYPES}
+    entry = populate.build_cache_entry("ADBE", {}, {"currency": "USD"}, bars, None, annual,
+                                       splits=splits, price_basis=basis)
+    assert entry["price"] == {"close": 334.54, "date": "2026-07-27"}
+    assert entry["price_basis"] == pit.BASIS_SPLIT_ADJUSTED_TODAY
+    assert entry["currency"] == "USD"           # no currency invented -> fast_info's
+    # Subtlety (a): "split-adjusted to today" IS today's as-traded price, because only
+    # splits AFTER an observation restate it and none can lie after today. So the live
+    # market cap off this close equals the raw-basis one to the cent — a full substitute.
+    shares = 430_000_000.0
+    today_basis = pit.market_cap_at("2026-07-27", shares, 334.54,
+                                    pit.BASIS_SPLIT_ADJUSTED_TODAY, {"2024-06-10": 10.0})
+    assert today_basis == (pit.market_cap_at("2026-07-27", shares, 334.54,
+                                             pit.BASIS_RAW, {})[0], False)
+    assert today_basis[0] == shares * 334.54
+
+
+def test_populate_cache_entry_always_declares_a_known_price_basis():
+    index = pd.to_datetime(["2026-07-30"])
+    bars = pd.DataFrame({"close": [11.5], "currency": ["USD"], "split": [0.0]}, index=index)
+    annual = {st: pd.DataFrame() for st in populate.STATEMENT_TYPES}
+    entry = populate.build_cache_entry("TST", {}, {}, bars, None, annual)
+    assert entry["price_basis"] == pit.BASIS_RAW        # Yahoo's bars, and the §3.2 default
+    with pytest.raises(ValueError, match="unknown price basis"):
+        populate.build_cache_entry("TST", {}, {}, bars, None, annual, price_basis="vendor")
+
+
+def test_populate_latest_frame_falls_back_to_an_adjusted_only_bar():
+    # A vendor bar that carries one usable price is written on that field alone; the live
+    # price block still needs a close, and pit.bar_value's fallback supplies it.
+    frame = populate.latest_frame({"2026-07-20": {"close": 320.0},
+                                   "2026-07-27": {"adj_close": 334.54}})
+    assert list(frame["close"]) == [334.54]
+    assert pd.Timestamp(frame.index[-1]).date().isoformat() == "2026-07-27"

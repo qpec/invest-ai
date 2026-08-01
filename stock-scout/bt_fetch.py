@@ -1,19 +1,22 @@
 """EDGAR point-in-time fetcher: companyfacts + weekly price grid (RECONSTRUCTION.md §5.8, §3.6).
 
 python bt_fetch.py [--universe universe.csv] [--start 2020-01-01] [--limit N] [--only SYM,SYM]
+                   [--price-source {auto,yahoo,stockanalysis}]
 
 SEC company_tickers.json -> CIK map, cached once at bt_cache/company_tickers.json;
 per symbol the raw companyfacts payload -> bt_cache/facts/<SYM>.json and the weekly
 price grid (SPY first — it is the §5.10 rebalance clock — then the universe) ->
 bt_cache/prices/<SYM>.json. Every EDGAR request carries the pinned User-Agent and
->=0.15 s spacing (§3.6, well under 8 req/s); prices go through
-vendor.yf_fetch.fetch_weekly_bars under the same box-wide pacing lock as populate.py.
+>=0.15 s spacing (§3.6, well under 8 req/s); Yahoo prices go through
+vendor.yf_fetch.fetch_weekly_bars under the same box-wide pacing lock as populate.py, any
+other vendor through pricesrc (--price-source below).
 
 Two file-shape rules the backtest depends on:
 - Every bar carries BOTH prices, {"close": raw, "adj_close": adjusted}. The adjusted
   close is retroactively rescaled by every later split/dividend, so a market cap built
-  from it embeds the future; pit.py multiplies share counts by the RAW close and keeps
-  adj_close for total-return math. The vendored fetch_weekly_bars keeps only Adj Close
+  from it embeds the future; pit.py multiplies share counts by the close field — in the
+  share terms the file declares — and keeps adj_close for total-return math. The
+  vendored fetch_weekly_bars keeps only Adj Close
   and vendor/ is owned elsewhere, so the raw column is taken through bt_fetch's own paced
   call (weekly_frame) on the same lock/ladder — and simply reused when a future vendor
   version returns "close" itself. If the raw column cannot be had, the grid degrades to
@@ -21,10 +24,20 @@ Two file-shape rules the backtest depends on:
 - The TRUE symbol lives INSIDE both payloads, because the filename sanitizes '/' to '-'
   ("BRK/B" -> BRK-B.json) and the loader must map back to the universe symbol.
 
+Price source (--price-source, §5.8): Yahoo is served by the raw+adjusted path above,
+unchanged. Any other vendor comes from pricesrc, whose sources DECLARE the share terms of
+their closes, and that declaration is written into every file as `price_basis` (§3.6) —
+a "split_adjusted_today" grid is only a correct historical market cap because pit restates
+the share count into the same terms, so the basis may never be guessed by a reader. Under
+the default `auto`, a Yahoo rate limit retires the Yahoo leg and the run continues on the
+fallback instead of stopping, which is the point on a 429'd box; grids from different
+sources may sit side by side, each declaring its own basis. The keyless fallback has no
+split feed, so its files carry no splits and the run reports how many (§6.17).
+
 Resumable: existing files are never refetched (except legacy adjusted-only price grids,
 which are refetched unless --keep-legacy-prices); failures land in failures.log and
 progress.json carries task "bt_fetch" (§3.2 contract) so reporter.py works unchanged;
-a RateLimited stops the run exactly like populate.py.
+a RateLimited with no source left to fall back on stops the run exactly like populate.py.
 """
 from __future__ import annotations
 
@@ -72,11 +85,22 @@ def cik_map(raw: dict) -> dict[str, int]:
 
 def prices_payload(frame: pd.DataFrame, start: str, symbol: str | None = None,
                    splits: dict | None = None) -> dict:
-    """Weekly frame -> the §3.6 prices/<SYM>.json payload: the true symbol next to
+    """Weekly YAHOO frame -> the §3.6 prices/<SYM>.json payload: the true symbol next to
     {"YYYY-MM-DD": {"close": raw, "adj_close": adjusted}} bars at/after start. A frame
     without a raw "close" column (or with a NaN in it) writes that bar adjusted-ONLY rather
     than pretending the adjusted value is a raw close — readers fall back to it anyway
-    (pit.bar_value) but pit.grid_is_degraded can then still see the degradation."""
+    (pit.bar_value) but pit.grid_is_degraded can then still see the degradation.
+
+    The basis DECLARED is the basis of what is actually in the file. With the raw column
+    present that is "raw": Yahoo's Close is the price as it traded on the bar's own day.
+    With NO bar carrying one — the shape this box writes whenever the supplementary raw
+    call fails, and it fails for exactly the reason the fallback exists — every effective
+    close is an Adj Close, i.e. restated into today's share terms, and declaring it "raw"
+    would make pit skip the share restatement and understate every historical market cap by
+    the split factor. So that file declares "split_adjusted_today", which is true of its
+    splits; its closes carry a dividend adjustment on top, and `grid_is_degraded` is what
+    reports THAT (the backtest discloses it). A partly-raw grid keeps "raw" — most bars are
+    as-traded, and the degraded flag again covers the rest."""
     bars = {}
     has_close = "close" in frame.columns
     for ts, row in frame.iterrows():
@@ -86,7 +110,10 @@ def prices_payload(frame: pd.DataFrame, start: str, symbol: str | None = None,
         adj = float(row["adj_close"])
         raw = float(row["close"]) if has_close and not pd.isna(row["close"]) else None
         bars[day] = {"adj_close": adj} if raw is None else {"close": raw, "adj_close": adj}
-    return pit.price_file(symbol, dict(sorted(bars.items())), splits)
+    basis = (pit.BASIS_SPLIT_ADJUSTED_TODAY
+             if bars and all("close" not in bar for bar in bars.values())
+             else pit.BASIS_RAW)
+    return pit.price_file(symbol, dict(sorted(bars.items())), splits, basis)
 
 
 def _paced(state_dir: Path, fn):
@@ -121,17 +148,16 @@ def _raw_weekly_frame(symbol: str, *, state_dir: Path, period: str):
 
 
 def splits_payload(frame) -> dict:
-    """Yahoo's "Stock Splits" column -> the §3.6 {date: ratio} map (0.0 rows dropped).
-    Pure; a frame without the column yields {} (no splits known, never a fake ratio)."""
+    """Yahoo's "Stock Splits" column -> the §3.6 {date: ratio} map through `pit.split_ratio`
+    (0.0 on an ordinary week and an inert 1.0 both dropped — one filter for every writer of
+    this map). Pure; a frame without the column yields {} (no splits known, never a fake
+    ratio)."""
     if frame is None or "Stock Splits" not in getattr(frame, "columns", []):
         return {}
     out = {}
     for ts, raw in frame["Stock Splits"].items():
-        try:
-            ratio = float(raw)
-        except (TypeError, ValueError):
-            continue
-        if ratio > 0:
+        ratio = pit.split_ratio(raw)
+        if ratio is not None:
             out[pd.Timestamp(ts).date().isoformat()] = ratio
     return dict(sorted(out.items()))
 
@@ -199,22 +225,73 @@ def _fetch_facts(symbol: str, ciks: dict, facts_dir: Path) -> None:
     populate.atomic_write_json(path, payload)
 
 
-def _fetch_prices(symbol: str, prices_dir: Path, state_dir: Path, start: str,
-                  period: str, *, refresh_legacy: bool = True) -> bool:
-    """Weekly raw+adjusted grid for one symbol -> bt_cache/prices/<SYM>.json (§3.6);
-    resumable. A legacy adjusted-only grid is refetched (it cannot yield an uncontaminated
-    market cap) unless refresh_legacy is off. Returns True when the written grid is
-    degraded (no raw closes available)."""
+def price_payload(symbol: str, ladder: populate.PriceLadder, *, state_dir: Path,
+                  start: str, period: str) -> dict:
+    """The §3.6 prices/<SYM>.json payload for one symbol from the run's price ladder
+    (§5.8 --price-source): bars, split events and the basis they are stated in.
+
+    The Yahoo leg is weekly_frame, untouched — it is the only path that can supply a raw
+    close per bar. A pricesrc source hands back the §3.6 bar map directly, together with
+    its split feed ({} for the keyless ones: no events KNOWN, never a fake ratio) and its
+    own declared basis, which is written into the file so a mixed cache stays readable."""
+    if ladder.yahoo:
+        try:
+            frame, _degraded, splits = weekly_frame(symbol, state_dir=state_dir,
+                                                    period=period)
+        except Exception as e:
+            ladder.yahoo_leg_failed(e)     # re-raises unless a fallback can take over
+        else:
+            return prices_payload(frame, start, symbol, splits)
+    source = ladder.fallback
+    return pit.price_file(symbol, source.weekly(symbol, start=start, state_dir=state_dir),
+                          source.splits(symbol), source.basis)
+
+
+def _stale(grid: dict, basis: str, *, refresh_legacy: bool, refresh_basis: bool) -> bool:
+    """Should an existing §3.6 grid be refetched rather than kept? (§5.8 resumability.)
+
+    - An EMPTY grid is not a finished symbol. It is what a delisted name whose last bar
+      predates --start writes, and what a vendor hiccup writes, and the two are
+      indistinguishable on disk — so it never counts as done.
+    - A legacy adjusted-only grid is refetched (it cannot yield an uncontaminated market
+      cap) unless the caller keeps it.
+    - A non-raw grid is refetched only on request (--refresh-basis): it is a complete,
+      correctly declared file, but it was written while Yahoo was throttling and a healthy
+      Yahoo can now replace it with as-traded closes AND a split feed."""
+    if not grid:
+        return True
+    if pit.grid_is_degraded(grid) and refresh_legacy:
+        return True
+    return basis != pit.BASIS_RAW and refresh_basis
+
+
+def _fetch_prices(symbol: str, prices_dir: Path, ladder: populate.PriceLadder, *,
+                  state_dir: Path, start: str, period: str,
+                  refresh_legacy: bool = True, refresh_basis: bool = False) -> dict:
+    """Weekly grid for one symbol -> bt_cache/prices/<SYM>.json (§3.6); resumable per
+    `_stale`. Returns the §3.6 payload now standing for the symbol — the one just written,
+    or the existing file normalized through the loader (so a legacy shape still answers for
+    its bars, splits and declared basis) — and the caller reports on what it declares
+    rather than on what the fetch happened to know.
+
+    A file that will not load — corrupt JSON, or a basis declaration this version does not
+    know — is treated as absent and REFETCHED. Letting the exception out here would count
+    the symbol as a failure without ever rewriting the file, so every later run failed on
+    it identically and the cache never healed itself."""
     path = prices_dir / populate.cache_filename(symbol)
     if path.exists():
-        _, grid, _events = pit.load_price_file(
-            json.loads(path.read_text(encoding="utf-8")))
-        stale = bool(grid) and pit.grid_is_degraded(grid)
-        if not (stale and refresh_legacy):
-            return stale
-    frame, degraded, splits = weekly_frame(symbol, state_dir=state_dir, period=period)
-    populate.atomic_write_json(path, prices_payload(frame, start, symbol, splits))
-    return degraded
+        try:
+            loaded = pit.load_price_file(json.loads(path.read_text(encoding="utf-8")))
+        except (ValueError, OSError) as e:
+            print(f"{path.name} onleesbaar ({e}) — opnieuw ophalen", file=sys.stderr)
+        else:
+            _, grid, events = loaded
+            if not _stale(grid, loaded.price_basis, refresh_legacy=refresh_legacy,
+                          refresh_basis=refresh_basis):
+                return pit.price_file(symbol, grid, events, loaded.price_basis)
+    payload = price_payload(symbol, ladder, state_dir=state_dir, start=start, period=period)
+    populate.atomic_write_json(path, payload)
+    return payload
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -227,8 +304,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--keep-legacy-prices", action="store_true",
                     help="keep adjusted-only price grids instead of refetching them "
                          "(they cannot yield an uncontaminated PIT market cap)")
+    ap.add_argument("--price-source", default=populate.AUTO_SOURCE,
+                    choices=populate.PRICE_SOURCES,
+                    help="weekly price vendor: auto (yahoo, then the keyless fallback once "
+                         "yahoo throttles), yahoo, or stockanalysis; every grid records the "
+                         "basis its closes are stated in (§3.6 price_basis)")
     args = ap.parse_args(argv)
 
+    ladder = populate.PriceLadder(args.price_source)
     facts_dir, prices_dir = BT_DIR / "facts", BT_DIR / "prices"
     facts_dir.mkdir(parents=True, exist_ok=True)
     prices_dir.mkdir(parents=True, exist_ok=True)
@@ -245,7 +328,7 @@ def main(argv: list[str] | None = None) -> int:
 
     symbols = ["SPY"] + [str(r["symbol"]) for r in rows]   # the benchmark grid comes first
     total, done, failed = len(symbols), 0, 0
-    degraded = []
+    degraded, today_basis, without_splits = [], [], []
     started_at = datetime.now(timezone.utc).isoformat()
     populate.write_progress(populate.PROGRESS_FILE, task="bt_fetch", total=total,
                             done=done, failed=failed, started_at=started_at)
@@ -254,11 +337,17 @@ def main(argv: list[str] | None = None) -> int:
         try:
             if symbol != "SPY":
                 _fetch_facts(symbol, ciks, facts_dir)
-            if _fetch_prices(symbol, prices_dir, state_dir, args.start, period,
-                             refresh_legacy=not args.keep_legacy_prices):
+            payload = _fetch_prices(symbol, prices_dir, ladder, state_dir=state_dir,
+                                    start=args.start, period=period,
+                                    refresh_legacy=not args.keep_legacy_prices)
+            if pit.grid_is_degraded(payload[pit.BARS_KEY]):
                 degraded.append(symbol)
+            if payload[pit.BASIS_KEY] != pit.BASIS_RAW:
+                today_basis.append(symbol)
+                if not payload[pit.SPLITS_KEY]:
+                    without_splits.append(symbol)
             done += 1
-        except yf_fetch.RateLimited as e:
+        except ladder.rate_limited as e:
             failed += 1
             populate.append_failure(populate.FAILURES_FILE, symbol, f"rate-limited: {e}")
             populate.write_progress(populate.PROGRESS_FILE, task="bt_fetch", total=total,
@@ -281,6 +370,13 @@ def main(argv: list[str] | None = None) -> int:
               f"({', '.join(degraded[:5])}{'...' if len(degraded) > 5 else ''}) — hun "
               f"marktkapitalisatie draagt latere splits/dividenden; de backtest meldt dit "
               f"in zijn disclosures.", file=sys.stderr)
+    if today_basis:    # ook oudere bestanden uit een eerdere run tellen mee, niet alleen deze
+        print(f"LET OP: {len(today_basis)} koersroosters staan in basis "
+              f"'{pit.BASIS_SPLIT_ADJUSTED_TODAY}' — pit zet de aandelenaantallen in "
+              f"dezelfde termen, dus de marktkapitalisatie klopt in dollars; "
+              f"{len(without_splits)} daarvan zonder splitshistorie, en die herrekening kan "
+              f"dan niet draaien (pit vlagt market_cap_split_unadjusted, §6.17).",
+              file=sys.stderr)
     return 0
 
 

@@ -846,16 +846,28 @@ def margin_of_safety(bundle: dict) -> dict | None:
             "growth": growth, "base_fcf": base}
 
 
+BUFFETT_WINDOW_YEARS = 8        # the reference implementation's `limit=8` on annual data
+
+
 def buffett_checklist(bundle: dict) -> dict | None:
     """§4.8 13-point Buffett checklist on the annual series (newest first): fundamentals 7
     (ROE>15% +2, D/E<0.5 +2, operating margin>15% +2, current ratio>1.5 +1), consistency 3
     (annual NI non-decreasing +3), moat 3 (ROE>15% in >=80% of periods +2 / >=60% +1;
-    avg operating margin>20% with recent >= older +1). None when no annual income exists."""
+    avg operating margin>20% with recent >= older +1). None when no annual income exists.
+
+    The window is the most recent BUFFETT_WINDOW_YEARS annual periods, matching the
+    `limit=8` the ai-hedge-fund agents pass when they build these same legs. That cap is
+    load-bearing, not cosmetic: EDGAR serves ~19 years, and over 19 periods "net income
+    non-decreasing every year" and "ROE > 15% in >=80% of years" are all but unreachable —
+    Adobe scored 0/3 and 1/2 on them. Two of the three legs, 6 of the 13 points, silently
+    became dead, and the §5 consensus lens they feed could never turn green (18 of 1,097
+    names on a real run). Judging a decade is the intent; judging two is a different test."""
     inc = (bundle.get("annual") or {}).get("income") or {}
     bal = (bundle.get("annual") or {}).get("balance") or {}
-    periods = sorted(inc, reverse=True)
+    periods = sorted(inc, reverse=True)[:BUFFETT_WINDOW_YEARS]
     if not periods:
         return None
+    window = set(periods)
     items = []
 
     def add(name, points, mx, detail):
@@ -889,7 +901,7 @@ def buffett_checklist(bundle: dict) -> dict | None:
     add("Current ratio > 1.5", 1 if cr is not None and cr > 1.5 else 0, 1,
         f"current ratio {cr:.2f}" if cr is not None else "not computable")
 
-    ni_series = [ni for pe in sorted(inc)
+    ni_series = [ni for pe in sorted(window)
                  if (ni := _row(inc[pe], "net_income")) is not None]
     consistent = (len(ni_series) >= 2
                   and all(b >= a for a, b in zip(ni_series, ni_series[1:])))

@@ -163,12 +163,15 @@ def half_ticks(ticks: list[str]) -> dict[str, list[str]]:
 def walk_forward(scored_by_tick: dict, prices: dict, ticks: list[str], *,
                  top_n: int = scoring.SLOTS,
                  cost_bp: float = backtest.DEFAULT_COST_BP,
-                 calibrate_halves: tuple[str, ...] = ("A", "B")) -> dict:
+                 calibrate_halves: tuple[str, ...] = ("A", "B"),
+                 split_unadjusted: list[str] | None = None) -> dict:
     """§5.11 harness (pure): per direction, run the 18-option grid on the calibration
     half, pick the winner (criterion met first, then annualized return, then the
     smallest combo — deterministic), evaluate it blind on the other half against
     v2 / pool / SPY, and report the pre-registered verdict. Both directions by
-    default (msg 47 'en andersom')."""
+    default (msg 47 'en andersom'). `split_unadjusted` names the symbols whose §3.6 grid
+    is in today's share terms without a split feed (backtest.split_unadjusted_symbols),
+    so the same caveat rides this report as the §5.10 one."""
     halves = half_ticks(ticks)
     directions = []
     for cal in calibrate_halves:
@@ -210,8 +213,9 @@ def walk_forward(scored_by_tick: dict, prices: dict, ticks: list[str], *,
             "halves": {h: {"ticks": t} for h, t in halves.items()},
             "directions": directions,
             "degraded_price_symbols": backtest.degraded_price_symbols(prices),
+            "split_unadjusted_symbols": sorted(split_unadjusted or []),
             "disclosures": backtest.disclosures(
-                cost_bp, backtest.degraded_price_symbols(prices)) + [
+                cost_bp, backtest.degraded_price_symbols(prices), split_unadjusted) + [
                 "Owner-mode posities: instap 1/slots van NAV (begrensd door beschikbare "
                 "cash), zittende posities driften onaangeroerd tot een exit; open "
                 "plekken en exits blijven cash; pool- en SPY-tracks frictieloos.",
@@ -342,7 +346,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--universe", default="universe.csv")
     args = ap.parse_args(argv)
 
-    facts, prices, meta, splits = backtest.load_bt_cache(args.bt_cache, args.universe)
+    loaded = backtest.load_bt_cache(args.bt_cache, args.universe)
+    facts, prices, meta, splits = loaded
     if not facts or "SPY" not in prices:
         print("bt_cache is leeg of mist SPY — draai eerst bt_fetch.py", file=sys.stderr)
         return 1
@@ -356,7 +361,14 @@ def main(argv: list[str] | None = None) -> int:
         print("minder dan 2 ticks op het SPY-grid — te weinig prijshistorie",
               file=sys.stderr)
         return 1
-    scored_by_tick = backtest.score_ticks(facts, prices, meta, ticks, splits)
+    unadjusted = backtest.split_unadjusted_symbols(splits, loaded.price_basis)
+    if unadjusted:
+        print(f"LET OP: {len(unadjusted)} koersroosters staan in basis "
+              f"'{pit.BASIS_SPLIT_ADJUSTED_TODAY}' zonder splitshistorie — hun "
+              f"marktkapitalisatie mist de splitfactor (staat ook in de disclosures).",
+              file=sys.stderr)
+    scored_by_tick = backtest.score_ticks(facts, prices, meta, ticks, splits,
+                                          loaded.price_basis)
     span = f"{HALF_A[0]}-{HALF_B[1]}"
 
     if args.cohorts:
@@ -366,7 +378,8 @@ def main(argv: list[str] | None = None) -> int:
     else:
         halves = ("A", "B") if args.calibrate_half is None else (args.calibrate_half,)
         result = walk_forward(scored_by_tick, prices, ticks, top_n=args.top_n,
-                              cost_bp=args.cost_bp, calibrate_halves=halves)
+                              cost_bp=args.cost_bp, calibrate_halves=halves,
+                              split_unadjusted=unadjusted)
         for d in result["directions"]:
             v = d["criterion"]
             print(f"kalibratie {d['calibrate_half']} → blind {d['blind_half']}: "

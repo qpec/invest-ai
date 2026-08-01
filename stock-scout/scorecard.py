@@ -107,6 +107,32 @@ BLOCKS = {"quality": 35, "price": 25, "safety": 25, "stewardship": 15}
 FULL_MAX = sum(BLOCKS.values())         # 100 — the design's undiminished denominator
 NOISE_FLOOR = 5.0                       # §4.4 — differences under this are not meaningful
 
+# Evidence tiers — how much of the 100-point card could actually be measured. A percentage
+# of the AVAILABLE points (§4.2) silently rewards ignorance: a name measured on 64 points
+# scoring 97% outranks one measured on 87 scoring 94%, though the second is the better
+# evidenced business. Ranking must therefore respect the tier first and the score second,
+# so a thinly-evidenced name can never outrank a fully-measured one on a technicality.
+EVIDENCE_TIERS = (("full", 0.85), ("partial", 0.60), ("thin", 0.0))
+
+
+def evidence_tier(available_max: float) -> str:
+    """The §4.2 evidence tier for a card's available_max (share of the full 100 points)."""
+    share = (available_max or 0.0) / FULL_MAX
+    for name, floor in EVIDENCE_TIERS:
+        if share >= floor:
+            return name
+    return "thin"
+
+
+def rank_key(card: dict) -> tuple:
+    """Sort key for presenting cards: evidence tier first, then percentage, so more-measured
+    names lead. Vetoed/no-verdict cards sort last. Use with reverse=False."""
+    order = {name: i for i, (name, _) in enumerate(EVIDENCE_TIERS)}
+    pct = card.get("pct")
+    if pct is None:
+        return (len(order) + 1, 0.0, card.get("symbol") or "")
+    return (order.get(card.get("evidence"), len(order)), -float(pct), "")
+
 VETOED_BAND = "VETOED"
 NO_PRICE_BAND = "NO PRICE"
 NO_PRICE_MEANING = ("Quality profile only — no price data, so this is NOT a verdict: the "
@@ -438,7 +464,7 @@ def scorecard(bundle: dict, *, scored_row: dict | None = None) -> dict:
 
     card = {"score": score, "available_max": available_max, "pct": pct, "band": band,
             "band_meaning": meaning, "blocks": blocks, "metrics": metrics, "why": why,
-            "consensus": None, "coverage": coverage,
+            "evidence": evidence_tier(available_max), "consensus": None, "coverage": coverage,
             "veto": {"vetoed": bool(veto.get("vetoed")), "reason": veto.get("reason", ""),
                      "penalty": veto.get("penalty", 0)},
             "notes": notes}
