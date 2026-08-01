@@ -149,7 +149,18 @@ plus `failures.log` (one `symbol<TAB>reason` per line; 404/dead tickers land her
     "ev": {"own": ..., "yahoo": ..., "gap_pct": ..., "yahoo_source": "field|derived|null"},
     "ttm": {"quarters": 4, "through": "YYYY-MM-DD", "basis": "quarterly|annual"},
     "mos": {"intrinsic_value": ..., "market_cap": ..., "mos_pct": ..., "wacc": ..., "growth": ..., "base_fcf": ...} | null,
-    "buffett": {"score": 6, "max": 13, "items": [{"name": "...", "points": 2, "max": 2, "pass": true, "detail": "..."}]} | null
+    "buffett": {"score": 6, "max": 13, "items": [{"name": "...", "points": 2, "max": 2, "pass": true, "detail": "..."}]} | null,
+    "scorecard": {                                    // the Owner's Scorecard, docs/SCORECARD-DESIGN.md
+      "score": 78.5, "available_max": 97, "pct": 81,  // score/available_max; pct = whole % OF THE AVAILABLE max
+      "band": "Exceptional|Strong|Mixed|Weak|Pass|VETOED|NO PRICE", "band_meaning": "...",
+      "blocks": {"quality": {"points": 29.0, "max": 35, "metrics": ["roic", ...]}, "price": {...}, "safety": {...}, "stewardship": {...}},
+      "metrics": {"<anchor_id>": {"value": ..., "points": 9.6, "max": 12, "pct": 80, "detail": "..."}},   // points/pct null = not computable
+      "why": {"strongest": {"metric": ..., "label": ..., "value": ..., "points": ..., "max": ..., "pct": ..., "sentence": "..."}, "weakest": {...} },
+      "consensus": {"green": 3, "of": 3, "lenses": {"scorecard": true, "margin_of_safety": true, "buffett": true}, "label": "...", "evidence": {"<lens>": "..."}},
+      "coverage": {"available_max": 97, "full_max": 100, "scored": [...], "missing": [{"metric": ..., "label": ..., "block": ..., "points": 3, "reason": "..."}], "missing_points": 3},
+      "veto": {"vetoed": false, "reason": "", "penalty": 0},
+      "notes": ["..."]
+    } | null                                          // null for VETOED/INSUFFICIENT names
   } ],
   "portfolio": {"positions": [{"symbol": ..., "weight": ..., "conviction": ...}], "cash": ..., "clamps": [...]},
   "formation": { ...contents of formation-state.json after this run... }
@@ -163,6 +174,27 @@ Units are NOT uniform and must be passed explicitly to any formatter: `ev.gap_pc
 the unit from magnitude renders a sub-1.5% EV gap 100× too large and a margin of safety
 above +150% 100× too small.) `ev.yahoo_source` is `"field"` when a Yahoo enterprise value
 was supplied and `"derived"` when the listed-class reference EV was reconstructed (§6.13).
+
+`scorecard` is written by `grade.py` for **every graded name** (A–F) as
+`scorecard.scorecard(bundle, scored_row=row)` — the card is built from the row that was
+just scored, so the absolute card and the percentile legs read one computation and cannot
+disagree. It is `null` for VETOED and INSUFFICIENT names, exactly like `mos`/`buffett`.
+Its `metrics` keys are the ids of `scorecard.ANCHORS` (`roic`, `gross_margin`,
+`gross_margin_cv`, `owner_fcf_margin`, `revenue_growth`, `owner_fcf_yield`,
+`margin_of_safety`, `net_debt_ebitda`, `self_funding`, `sbc`, `current_ratio`,
+`share_count_trend`, `accruals`, `capital_returned`), and the anchor table itself (label,
+floor, target, points, unit, provenance) is **not** duplicated into the JSON — consumers
+read it from `scorecard.ANCHORS`, which is the source of truth for the design's §3
+provenance table.
+
+Three units-and-honesty rules bind every consumer of this field, and they are the reason
+the block/coverage detail is stored rather than recomputed downstream: `pct` is a
+percentage of `available_max`, **not** of 100 (a name scoring 48 of an available 75
+reports `48/75 (64%)`, never `48/100`); a `points`/`pct` of `null` means "not computable",
+which shrinks `available_max` and is named in `coverage.missing` — never a silent zero;
+and the two special bands carry no verdict at all — `VETOED` has `score`/`pct` `null` and
+must never be ranked, `NO PRICE` is a quality profile that must never be rendered as an
+x/100 verdict (design §4.1, the single most important rule in that document).
 
 ### 3.4 `formation-state.json` (v3, msgs 57-58, 62)
 ```jsonc
@@ -386,7 +418,7 @@ it (v2.2 path for an annual-only cache). Same pacing/progress/failure contracts.
 `python grade.py [--universe universe.csv] [--cache cache] [--date YYYY-MM-DD] [--no-formation] [--telegram]`
 1. Load universe + cache → bundles (skip uncached; count them).
 2. `scoring.score_universe` → scored names (+flags, veto, legs, EV, TTM basis).
-3. MoS + Buffett for every graded name (cheap; datasheet shows top-10).
+3. MoS + Buffett + the Owner's Scorecard for every graded name (cheap; datasheet shows top-10).
 4. Portfolio proposal (§4.8).
 5. Formation update via `formation.py` (v3 live mode, msg 58) unless `--no-formation`.
 6. Write `reports/scout-run-<date>.md` + `reports/scout-grades-<date>.json`.
@@ -399,11 +431,39 @@ and "EBITDA ≤ 0 with net debt". The header reports uncached AND unreadable cac
 separately, with a named block listing each unreadable symbol and its reason — one corrupt
 file must never abort a run.
 
-Report md sections (msgs 10, 28, 32, 57): header with counts by grade + veto breakdown by
-reason; tier-sectioned A-F table (symbol, name, grade, composite, V/Q/G/D/M, MoS%, flags);
-NL names call-out; **De Formatie** section (squad with since/streak/rank, transfers with
-reasons, bench with needed-quarters, open slots as cash) replacing the old top-15 ranking;
-honest-evidence footer (a grade is a research shortlist, not a buy list).
+Report md sections (msgs 10, 28, 32, 57; re-ordered for the Owner's Scorecard, 2026-08-01
+— nothing was deleted, the scorecard was put in front and the percentile view relabelled):
+
+1. **Header** — counts (universe/graded/veto/insufficient/uncached/unreadable), band
+   occupancy from the scorecard, then the grade counts explicitly labelled *"rang in
+   sector (context)"*.
+2. **"Hoe je dit leest"** — five lines rendered from `scorecard`'s own constants: the score
+   is absolute; read bands, not ranks (`scorecard.NOISE_FLOOR`, ±5 points); what consensus
+   n/3 counts and at which thresholds; that NO PRICE is a quality profile and not a verdict
+   (§4.1) and that a veto suppresses rather than ranks (§4.3); and that grade+composite is
+   context. It sits above the first `## ` heading, so `summary_head` carries it to Telegram.
+3. **Veto breakdown** by distinct sub-reason, and the named unreadable-cache block.
+4. **`## Scorecard — absolute punten`** — the main table, sorted by `pct` descending but
+   printed as `### <band> <range> (n) — <meaning>` groups so the output cannot invite
+   reading rank 9 against rank 11 (design §1.2). Columns, in this order: symbol · name ·
+   score · band · consensus · Q · P · S · St · flags · *rang in sector (context)*. There is
+   deliberately **no rank column**. The score cell reads `81/100`, or
+   `81/100 · 78.5/97 pt` when a metric was not computable (§4.2). Empty bands are skipped;
+   the header line already reports the occupancy of all of them.
+5. **`## Zonder band (geen oordeel)`** — everything that carries no verdict, kept out of the
+   ordering on purpose: `### NO PRICE` (its own table, points out of what was available,
+   never x/100, with the §4.1 disclaimer printed verbatim), `### VETOED` (name + reason,
+   capped at `grade.VETOED_LIST_MAX` with the tail counted) and any graded name whose card
+   is missing.
+6. **`## Sectorrelatieve context (rang binnen sector)`** — the unchanged tier-sectioned A-F
+   tables (`### Core|Adjacent|Outside`; symbol, name, grade, composite, V/Q/G/D/M, MoS%,
+   flags), now under a heading that says what they are: where a name stands among its
+   sector peers, still the engine under De Formatie and the only walk-forward-validated
+   ranking the system owns (SCORECARD-DESIGN §6).
+7. **NL names call-out** — now scorecard-first per line, with the sector rank in brackets.
+8. **De Formatie** (squad with since/streak/rank, transfers with reasons, bench with
+   needed-quarters, open slots as cash) replacing the old top-15 ranking.
+9. **Honest-evidence footer** (a grade is a research shortlist, not a buy list).
 
 ### 5.6 `formation.py`
 Library + CLI (`python formation.py --show`). `update(state, scored, run_date) -> (state', transfers)`
@@ -424,17 +484,45 @@ kandidaat zonder bewijs").
 
 ### 5.7 `datasheet.py`
 `python datasheet.py [--grades reports/scout-grades-<date>.json] [--top 10] [--out reports/datasheet-<date>.html]`
-Self-contained HTML (inline CSS/JS, no external requests), theme-aware, ~top-10 cards:
-- Header: run date, version, counts, veto breakdown, formation one-liner.
-- Per card (msg 13): Stage-2 analysis block on top when available (msg 39); score build-up
-  table — every leg: raw value → sector percentile (with cohort size) → leg score; pillar ×
-  weight → composite; the veto/penalty checks with their actual values; flags with
+Self-contained HTML (inline CSS/JS, no external requests), theme-aware, ~top-10 cards
+(selected, as before, by the percentile composite — the datasheet audits the run the
+formation was built from):
+- Header: run date, version, counts, band occupancy, grade chips labelled as sector-rank
+  context, veto breakdown, formation one-liner, and one collapsible **anchor-provenance
+  table** rendered from `scorecard.ANCHORS` (metric, block, floor, target, points, where
+  the line comes from) — the design's §3 ledger, once per page rather than per card.
+- Per card, the **Owner's Scorecard first** (design §5): headline `pct/100` + band + the
+  band's plain-language meaning; the four block bars (points out of the block's *available*
+  maximum, with the full maximum named when a metric dropped out); the "why" sentences
+  (strongest and weakest metric, named with their values); the consensus badge with its
+  per-lens evidence; a coverage line naming every metric that was not computable, worth how
+  many points, and why (§4.2); the run notes; and a table of all 14 metrics — label, raw
+  value **in its own unit**, the floor→target ramp it was scored on, and the points earned
+  — rendered from `scorecard.ANCHORS`, never hardcoded, so a point can be audited exactly
+  the way a percentile already could. A `VETOED` card shows no score and a `NO PRICE` card
+  shows its points out of what was available with the §4.1 disclaimer — neither is ever
+  rendered as an x/100 verdict.
+- Then, unchanged, the whole pre-existing evidence chain (msg 13): Stage-2 analysis block
+  when available (msg 39); score build-up table — every leg: raw value → sector percentile
+  (with cohort size) → leg score; pillar × weight → composite (both now labelled as
+  sector-relative context); the veto/penalty checks with their actual values; flags with
   explanations (msg 18); own-EV vs Yahoo-EV line; owner-FCF per period table; the exact
   statement rows used (which label matched, per period); fast_info snapshot; MoS block
   (inputs + intrinsic vs market cap); Buffett checklist items with pass/fail.
-- Independent recompute: composite re-derived in the page's JS from the stored legs/weights
-  and compared to the run's value → "✓ komt overeen" / "✗ afwijking" per card (msg 13).
+- Independent recompute, **twice** — a scorecard the reader cannot verify is no better than
+  the number it replaces: the composite re-derived in the page's JS from the stored
+  legs/weights/penalty (msg 13), and the scorecard re-derived from the embedded per-metric
+  points (block sums, available maximum, total) plus each metric's own §2 ramp from its
+  embedded value and anchors. Both render "✓ komt overeen" / "✗ afwijking" per card, and
+  the scorecard check names what disagreed.
 - "Alles uitklappen" button; first card pre-opened.
+
+`datasheet.py` is stdlib-only except for `from scorecard import ANCHORS, …`. That import is
+the anchor **table** — labels, floors, targets, points, units, provenance — not the
+computation under audit: every number on the page still comes from the grades JSON, and the
+re-derivation still happens in the page's own JS. A metric id the table does not know
+degrades to its stored `detail` string, and a grades JSON without a `scorecard` key (an
+older run) renders the rest of the card with a named note rather than failing the build.
 
 ### 5.8 `bt_fetch.py`
 `python bt_fetch.py [--universe universe.csv] [--start 2020-01-01] [--limit N]`

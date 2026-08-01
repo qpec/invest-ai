@@ -5,18 +5,35 @@ reports/), optionally the cache dir (§3.2 — per-period statement-row evidence
 + fast_info snapshot; a missing cache entry degrades that name's evidence
 sections, never the build), and the Stage-2 layer (§3.5 — the file matching
 the run date, else the newest ≤ run date; msg 39). Emits an expandable card
-per top-N graded name with the full evidence chain: score build-up per leg
-(raw → sector-percentiel met cohortgrootte → legscore), pijlers × gewichten →
-composite, veto/straf-checks met werkelijke waarden, flags met uitleg, eigen
-EV vs Yahoo-EV, owner-FCF per periode, de exact gematchte jaarrekening-regels,
+per top-N graded name that LEADS with the Owner's Scorecard (the absolute,
+anchored composite — docs/SCORECARD-DESIGN.md §5: headline pct/100 + band,
+the four block bars, the "why" sentences, the consensus badge with per-lens
+evidence and a coverage line naming every metric that was not computable and
+why), then per metric the raw value, the floor→target ramp it was scored on
+and the points earned — so a point can be audited exactly the way a
+percentile already could. Below that the card keeps its whole existing
+evidence chain: Stage-2 analysis, score build-up per leg (raw → sector-
+percentiel met cohortgrootte → legscore), pijlers × gewichten → composite,
+veto/straf-checks met werkelijke waarden, flags met uitleg, eigen EV vs
+Yahoo-EV, owner-FCF per periode, de exact gematchte jaarrekening-regels,
 fast_info, MoS-blok en de Buffett-checklist (msgs 17-19, 27, 33, 38-39).
 
-The page's JS RE-DERIVES every card's composite from the embedded legs +
-weights + penalty (JSON island, zero external requests, works from file://)
-and renders "✓ komt overeen" / "✗ afwijking" per card (msg 13). Inline
-CSS/JS only; light + dark via prefers-color-scheme; "Alles uitklappen"
-button; first card pre-opened. Stdlib only — no network, no imports of the
-scoring runtime (the grades JSON is the contract).
+The page's JS RE-DERIVES both composites (JSON island, zero external
+requests, works from file://) and renders "✓ komt overeen" / "✗ afwijking"
+per card: the percentile composite from the embedded legs + weights +
+penalty (msg 13), and the scorecard from the embedded per-metric points —
+block sums, available maximum, total, plus each metric's own §2 ramp. A
+scorecard the reader cannot verify is no better than the number it replaces.
+Inline CSS/JS only; light + dark via prefers-color-scheme; "Alles
+uitklappen" button; first card pre-opened.
+
+Stdlib only apart from `scorecard.ANCHORS`, which is imported rather than
+copied: it is the anchor TABLE (label, floor, target, points, unit,
+provenance), not the computation under audit. Every number on the page still
+comes from the grades JSON, and the re-derivation still happens in the
+page's own JS — the anchors only say which line each point was earned
+against, and a metric id the table does not know degrades to its stored
+detail string instead of failing the build.
 """
 from __future__ import annotations
 
@@ -27,6 +44,8 @@ import re
 import sys
 from collections import Counter
 from pathlib import Path
+
+from scorecard import ANCHORS, BLOCKS, FULL_MAX, NO_PRICE_BAND, NOISE_FLOOR, VETOED_BAND
 
 # Composite weights + neutral-G, mirrored from the scoring layer (spec §4.6;
 # vendored grader W_V..W_M / NEUTRAL_G). Duplicated BY DESIGN: the datasheet
@@ -60,6 +79,28 @@ LEG_LABELS = {
 }
 PILLAR_LABELS = {"v": "V · Waardering", "q": "Q · Kwaliteit", "g": "G · Groei",
                  "d": "D · Degelijkheid", "m": "M · Management"}
+# The scorecard's four blocks (design §2) in their scoring order, with the NL heading and
+# the question each block answers. Maxima come from scorecard.BLOCKS, never from here.
+BLOCK_LABELS = (
+    ("quality", "Kwaliteit", "Wil ik deze onderneming bezitten?"),
+    ("price", "Prijs", "Betaal ik een faire prijs?"),
+    ("safety", "Veiligheid", "Kan dit permanent stuklopen?"),
+    ("stewardship", "Rentmeesterschap", "Staat het management aan mijn kant?"),
+)
+LENS_LABELS = {"scorecard": "Scorecard", "margin_of_safety": "DCF-veiligheidsmarge",
+               "buffett": "Buffett-checklist"}
+# NL renderers per scorecard unit, one per ANCHORS[*]["unit"]. Presentation lives here (the
+# scorecard's own sentences are English); the datasheet shows MORE precision than the
+# report on purpose — this is the surface on which the ramp arithmetic gets checked by hand.
+UNIT_RENDER = {
+    "pct": lambda v: f"{v:.2f}%",
+    "pct_of_revenue": lambda v: f"{v:.2f}% van omzet",
+    "pct_per_year": lambda v: f"{v:+.2f}%/jr",
+    "yield_pct": lambda v: f"{100.0 * v:.2f}%",
+    "mos_pct": lambda v: f"{100.0 * v:+.1f}%",
+    "ratio": lambda v: f"{v:.3f}",
+    "share_of_periods": lambda v: f"{100.0 * v:.0f}% van de jaarperioden",
+}
 # Optional §3.3 ev.yahoo_source (absent in older grades JSON -> the neutral label).
 EV_SOURCE_LABELS = {"field": "Yahoo-EV (fast_info)",
                     "derived": "Referentie-EV (afgeleid: koers × aandelen + schuld − kas)"}
@@ -320,14 +361,64 @@ thead th { background:var(--chip); }
 td.txt { text-align:left; white-space:normal; }
 .recheck-ok { color:var(--ok); } .recheck-bad { color:var(--bad); font-weight:600; }
 footer { margin-top:1.2rem; color:var(--muted); font-size:.85em; }
+/* --- Owner's Scorecard (design par. 5) — the top block of every card --- */
+.scorecard { border:1px solid var(--line); border-left:4px solid var(--accent);
+             border-radius:0 8px 8px 0; padding:.55rem .8rem .7rem; margin:.5rem 0 .8rem; }
+.sc-head { display:flex; flex-wrap:wrap; align-items:baseline; gap:.5rem; }
+.sc-score { font-size:1.6rem; font-weight:700; }
+.sc-max { color:var(--muted); font-size:1rem; }
+.sc-band { background:var(--accent); color:#fff; border-radius:10px;
+           padding:.1rem .6rem; font-weight:600; font-size:.9em; }
+.sc-band.noverdict { background:var(--warn); color:#1a1e22; }
+.sc-why { margin:.35rem 0; }
+.bar { display:block; width:150px; height:.55rem; background:var(--chip);
+       border-radius:4px; overflow:hidden; }
+.bar > i { display:block; height:100%; background:var(--accent); }
+td.barcell { width:170px; }
+.lens-yes { color:var(--ok); } .lens-no { color:var(--bad); } .lens-unknown { color:var(--muted); }
 """
 
 # The independent client-side recompute (msg 13): composite re-derived from the
 # embedded legs + weights + penalty — genuinely recomputed, never a baked string.
+# The scorecard gets the same treatment (design par. 5): block sums, available maximum,
+# total AND every metric's own par. 2 ramp, all re-derived from the embedded per-metric
+# points. The ramp check compares against the UNROUNDED ramp, so it can never disagree
+# with the stored value merely over a rounding mode.
 _JS = """
 (function () {
   "use strict";
   var data = JSON.parse(document.getElementById("scout-data").textContent);
+
+  function recomputeScorecard(sc) {
+    var blocks = {}, total = 0, available = 0, offRamp = [];
+    Object.keys(sc.metrics).forEach(function (id) {
+      var m = sc.metrics[id];
+      if (m.points === null || m.points === undefined) { return; }
+      if (m.value !== null && m.value !== undefined && m.target !== m.floor) {
+        var frac = (m.value - m.floor) / (m.target - m.floor);
+        frac = Math.max(0, Math.min(1, frac));
+        if (Math.abs(frac * m.max - m.points) > data.tolerance) { offRamp.push(id); }
+      }
+      blocks[m.block] = (blocks[m.block] || 0) + m.points;
+      total += m.points;
+      available += m.max;
+    });
+    return { blocks: blocks, total: total, available: available, offRamp: offRamp };
+  }
+
+  function checkScorecard(sc) {
+    var re = recomputeScorecard(sc), problems = re.offRamp.slice();
+    Object.keys(sc.blocks).forEach(function (b) {
+      var got = re.blocks[b] || 0;
+      if (Math.abs(got - sc.blocks[b].points) > data.tolerance) { problems.push(b); }
+    });
+    if (Math.abs(re.available - sc.available_max) > data.tolerance) {
+      problems.push("beschikbaar maximum");
+    }
+    if (sc.score !== null && sc.score !== undefined &&
+        Math.abs(re.total - sc.score) > data.tolerance) { problems.push("totaal"); }
+    return { total: re.total, available: re.available, problems: problems };
+  }
 
   function recomputeComposite(card, weights, neutralG) {
     var groups = { v: [], q: [], g: [], d: [], m: [] };
@@ -367,6 +458,25 @@ _JS = """
         el.className = "recheck-bad";
       }
     });
+
+    var el2 = document.getElementById("sc-recheck-" + card.symbol);
+    if (!el2) { return; }
+    if (!card.scorecard) {
+      el2.textContent = "geen scorecard in deze grades-JSON";
+      el2.className = "muted";
+      return;
+    }
+    var check = checkScorecard(card.scorecard);
+    var sums = "blokken + totaal " + check.total.toFixed(1) + "/" + check.available +
+               " uit de punten per metriek";
+    if (check.problems.length === 0) {
+      el2.textContent = "\\u2713 komt overeen (" + sums + ")";
+      el2.className = "recheck-ok";
+    } else {
+      el2.textContent = "\\u2717 afwijking (" + sums + "; wijkt af: " +
+                        check.problems.join(", ") + ")";
+      el2.className = "recheck-bad";
+    }
   });
 
   var btn = document.getElementById("expand-all");
@@ -378,6 +488,189 @@ _JS = """
   });
 })();
 """
+
+
+def _unit(metric_id: str, value) -> str:
+    """One scorecard value in its own unit (design's units are NOT uniform, §3.3). An
+    anchor id the table does not know renders as a plain number rather than crashing."""
+    if value is None:
+        return "—"
+    unit = (ANCHORS.get(metric_id) or {}).get("unit")
+    render = UNIT_RENDER.get(unit)
+    return render(float(value)) if render else f"{float(value):.4g}"
+
+
+def _ramp_text(metric_id: str) -> str:
+    """'0 bij 5.00% · vol bij 25.00%' — the floor→target ramp the metric was scored on,
+    rendered FROM scorecard.ANCHORS so the page can never advertise a line the scorecard
+    no longer holds (design §3: the code is the source of truth)."""
+    a = ANCHORS.get(metric_id)
+    if not a:
+        return "—"
+    return (f"0 bij {_unit(metric_id, a['floor'])} · "
+            f"vol bij {_unit(metric_id, a['target'])}")
+
+
+def _sc_pts(value) -> str:
+    return "—" if value is None else f"{float(value):g}"
+
+
+def _scorecard_headline(card: dict) -> str:
+    """§5's five-second headline. A numeric pct/100 verdict is printed ONLY for a real
+    band: a VETOED card has no score to show (§4.3) and a NO PRICE card shows its points
+    out of what was available with the disclaimer attached, never a verdict (§4.1)."""
+    band = card.get("band") or "—"
+    meaning = card.get("band_meaning") or ""
+    pts = f"{_sc_pts(card.get('score'))}/{card.get('available_max', '?')} pt"
+    if band == VETOED_BAND:
+        head = ("<span class='sc-score bad'>—</span>"
+                "<span class='sc-max'>score onderdrukt</span>")
+        cls = "sc-band noverdict"
+    elif band == NO_PRICE_BAND:
+        head = f"<span class='sc-score'>{_e(pts)}</span>"
+        cls = "sc-band noverdict"
+    else:
+        head = (f"<span class='sc-score'>{_e(card.get('pct'))}</span>"
+                f"<span class='sc-max'>/100</span>")
+        cls = "sc-band"
+    return (f"<div class='sc-head'>{head}<span class='{cls}'>{_e(band)}</span></div>"
+            f"<p class='muted'>{_e(meaning)}</p>")
+
+
+def _sc_blocks_table(card: dict) -> str:
+    """The four block bars (design §5). The denominator is the block's AVAILABLE maximum;
+    when a metric dropped out the full block maximum is named next to it (§4.2)."""
+    blocks = card.get("blocks") or {}
+    rows = []
+    for key, label, question in BLOCK_LABELS:
+        b = blocks.get(key) or {}
+        got, avail, full = b.get("points"), b.get("max") or 0, BLOCKS[key]
+        share = (100.0 * got / avail) if (avail and got is not None) else 0.0
+        short = (f" <span class='muted'>(van {full} — "
+                 f"{full - avail} pt niet meetelbaar)</span>" if avail < full else "")
+        rows.append(
+            f"<tr><td>{_e(label)} <span class='muted'>{_e(question)}</span></td>"
+            f"<td>{_sc_pts(got)}/{_e(avail)}{short}</td>"
+            f"<td class='barcell'><span class='bar'><i style='width:{share:.0f}%'></i>"
+            f"</span></td><td>{share:.0f}%</td></tr>")
+    return ("<div class='scroll'><table><thead><tr><th>Blok</th><th>Punten</th>"
+            "<th></th><th>Aandeel</th></tr></thead><tbody>"
+            + "".join(rows) + "</tbody></table></div>")
+
+
+def _sc_why(card: dict) -> str:
+    why = card.get("why") or {}
+    parts = [why.get(k) or {} for k in ("strongest", "weakest")]
+    said = " · ".join(_e(p["sentence"]) for p in parts if p.get("sentence"))
+    return f"<p class='sc-why'><b>Waarom:</b> {said}</p>" if said else ""
+
+
+def _sc_consensus(card: dict) -> str:
+    """§5 consensus: how many of three INDEPENDENT lenses call the name good, each with
+    the evidence that decided it. Three-of-three is the signal, not the first place."""
+    c = card.get("consensus") or {}
+    if not c:
+        return ""
+    lenses, evidence = c.get("lenses") or {}, c.get("evidence") or {}
+    items = []
+    for lens, note in evidence.items():
+        state = lenses.get(lens)
+        mark, cls = ({True: ("✓", "lens-yes"), False: ("✗", "lens-no")}
+                     .get(state, ("?", "lens-unknown")))
+        items.append(f"<li><span class='{cls}'>{mark}</span> "
+                     f"{_e(LENS_LABELS.get(lens, lens))} — {_e(note)}</li>")
+    return (f"<p><span class='chip'>Consensus {_e(c.get('green'))}/{_e(c.get('of'))}"
+            f"</span> {_e(c.get('label') or '')}</p><ul>{''.join(items)}</ul>")
+
+
+def _sc_coverage(card: dict) -> str:
+    """§4.2 made visible: what was NOT computable, worth how many points, and why."""
+    cov = card.get("coverage") or {}
+    missing = cov.get("missing") or []
+    avail, full = cov.get("available_max"), cov.get("full_max", FULL_MAX)
+    if not missing:
+        return (f"<p class='muted'>Dekking: alle {len(cov.get('scored') or [])} metrieken "
+                f"gescoord — {_e(avail)} van {_e(full)} punten beschikbaar.</p>")
+    items = "".join(f"<li><b>{_e(m.get('label') or m.get('metric'))}</b> "
+                    f"({_e(m.get('points'))} pt, blok {_e(m.get('block'))}) — "
+                    f"{_e(m.get('reason') or 'geen reden vastgelegd')}</li>"
+                    for m in missing)
+    return (f"<p>Dekking: <b>{_e(avail)} van {_e(full)}</b> punten beschikbaar; "
+            f"{len(missing)} metriek(en) niet meetelbaar — geen stille nul, een kleinere "
+            f"noemer (§4.2):</p><ul>{items}</ul>")
+
+
+def _sc_metrics_table(card: dict) -> str:
+    """Every metric auditable the way a percentile already was: raw value in its own unit,
+    the floor→target ramp it was scored on, and the points earned. Rows come from
+    scorecard.ANCHORS (order, label, ramp, unit, provenance); values and points come from
+    the run's grades JSON — the two are never mixed."""
+    metrics = card.get("metrics") or {}
+    ids = [m for m in ANCHORS if m in metrics] + [m for m in metrics if m not in ANCHORS]
+    rows = []
+    for mid in ids:
+        m = metrics.get(mid) or {}
+        anchor = ANCHORS.get(mid) or {}
+        got = m.get("points")
+        earned = ("<span class='muted'>—</span>" if got is None
+                  else f"<b>{_sc_pts(got)}</b>/{_e(m.get('max', anchor.get('points', '?')))}")
+        note = "" if got is not None else _e(m.get("detail") or "")
+        rows.append(
+            f"<tr title=\"{_e(anchor.get('provenance', ''))}\">"
+            f"<td>{_e(anchor.get('label', mid))} <span class='muted'>{_e(mid)}</span></td>"
+            f"<td>{_e(_unit(mid, m.get('value')))}</td>"
+            f"<td class='txt'>{_e(_ramp_text(mid))}</td>"
+            f"<td>{earned}</td>"
+            f"<td>{_e(m['pct']) if m.get('pct') is not None else '—'}</td>"
+            f"<td class='txt muted'>{note}</td></tr>")
+    return ("<h3>Punten per metriek (absolute ankers)</h3><div class='scroll'><table>"
+            "<thead><tr><th>Metriek</th><th>Waarde</th><th>Ramp (§2, lineair, geen "
+            "klif)</th><th>Punten</th><th>%</th><th>Notitie</th></tr></thead><tbody>"
+            + "".join(rows) + "</tbody></table></div>")
+
+
+def _scorecard_block(row: dict) -> str:
+    """The Owner's Scorecard as the TOP block of the card (design §5) — the interpretable
+    number first, its build-up under it, and an independent JS recheck at the bottom."""
+    card = row.get("scorecard")
+    head = "<h3>Owner's Scorecard — absolute punten</h3>"
+    if not card:
+        return (head + "<p class='muted'>Geen scorecard in deze grades-JSON (oudere run) "
+                       "— de sectorrelatieve opbouw hieronder is volledig.</p>")
+    sym = _e(row.get("symbol", ""))
+    notes = "".join(f"<li>{_e(n)}</li>" for n in card.get("notes") or [])
+    return (head + "<div class='scorecard'>"
+            + _scorecard_headline(card)
+            + _sc_blocks_table(card)
+            + _sc_why(card)
+            + _sc_consensus(card)
+            + _sc_coverage(card)
+            + f"<p class='muted'>Onafhankelijke hercheck (JS): <span id='sc-recheck-{sym}'"
+              f" class='muted'>JavaScript vereist</span></p>"
+            + (f"<details class='sec'><summary>Run-notities</summary><ul>{notes}</ul>"
+               f"</details>" if notes else "")
+            + "</div>" + _sc_metrics_table(card))
+
+
+def _anchor_reference() -> str:
+    """The anchored metrics and where each ramp comes from (design §3 — 14 metrics, 28
+    endpoints), rendered ONCE per page from scorecard.ANCHORS rather than per card: the
+    provenance ledger the anti-complexity rule (HN2) demands, without 10× duplication."""
+    rows = "".join(
+        f"<tr><td>{_e(a['label'])} <span class='muted'>{_e(mid)}</span></td>"
+        f"<td>{_e(a['block'])}</td><td>{_e(_unit(mid, a['floor']))}</td>"
+        f"<td>{_e(_unit(mid, a['target']))}</td><td>{_e(a['points'])}</td>"
+        f"<td class='txt'>{_e(a['provenance'])}</td></tr>"
+        for mid, a in ANCHORS.items())
+    return ("<details class='sec'><summary>De ankers en hun herkomst "
+            f"(§3) — {len(ANCHORS)} metrieken, {FULL_MAX} punten</summary>"
+            "<div class='scroll'><table><thead><tr><th>Metriek</th><th>Blok</th>"
+            "<th>Vloer (0 pt)</th><th>Doel (vol)</th><th>Punten</th><th>Herkomst</th>"
+            "</tr></thead><tbody>" + rows + "</tbody></table></div>"
+            f"<p class='muted'>Verschillen onder {NOISE_FLOOR:.0f} punten zijn niet "
+            f"betekenisvol (§4.4). {NO_PRICE_BAND} is een kwaliteitsprofiel, geen oordeel "
+            f"(§4.1); een veto onderdrukt de score, het rangschikt niet (§4.3).</p>"
+            "</details>")
 
 
 def _stage2_block(analysis: dict | None) -> str:
@@ -406,7 +699,8 @@ def _legs_table(legs: dict) -> str:
             f"<td>{_num(pct)}{_e(cohort)}</td>"
             f"<td>{_num(leg.get('score'))}</td>"
             f"<td class='txt'>{_e(leg.get('note') or '')}</td></tr>")
-    return ("<h3>Score-opbouw per leg</h3><div class='scroll'><table><thead><tr>"
+    return ("<h3>Score-opbouw per leg <span class='muted'>— sectorrelatief, rang binnen "
+            "sector, geen oordeel</span></h3><div class='scroll'><table><thead><tr>"
             "<th>Leg</th><th>Ruw</th><th>Sectorpercentiel</th><th>Legscore</th><th>Notitie</th>"
             "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>")
 
@@ -432,7 +726,9 @@ def _pillar_table(row: dict) -> str:
     quality = row.get("quality_score")
     tail = (f"<p class='muted'>v3-kwaliteitsscore ({_e(_weight_formula(W_QUALITY))}): "
             f"{_num(quality)}</p>" if quality is not None else "")
-    return ("<h3>Pijlers × gewichten → composite</h3><div class='scroll'><table><thead><tr>"
+    return ("<h3>Pijlers × gewichten → composite <span class='muted'>— context; nog "
+            "steeds de motor onder De Formatie en de walk-forward-validatie</span></h3>"
+            "<div class='scroll'><table><thead><tr>"
             "<th>Pijler</th><th>Score</th><th>Gewicht</th><th>Bijdrage</th></tr></thead>"
             "<tbody>" + "".join(body) + "</tbody></table></div>" + tail)
 
@@ -646,9 +942,23 @@ def _card(rank: int, row: dict, entry: dict | None, stage2: dict | None,
     flags = " ".join(f"<span class='chip flag'>{_e(f.get('code', ''))}</span>"
                      for f in row.get("flags") or [])
     mos = (row.get("mos") or {}).get("mos_pct")
+    card = row.get("scorecard") or {}
+    band = card.get("band")
+    if not card:
+        sc_chip = ""
+    elif band in (VETOED_BAND, NO_PRICE_BAND):     # never a numeric verdict (§4.1/§4.3)
+        sc_chip = (f"<span class='chip'><b>{_e(band)}</b> · {_sc_pts(card.get('score'))}/"
+                   f"{_e(card.get('available_max'))} pt</span>")
+    else:
+        sc_chip = (f"<span class='chip'><b>{_e(card.get('pct'))}/100</b> · "
+                   f"{_e(band)}</span>")
+    cons = card.get("consensus") or {}
+    cons_chip = (f"<span class='chip'>consensus {_e(cons.get('green'))}/"
+                 f"{_e(cons.get('of'))}</span>" if cons else "")
     summary = (
-        f"<b>{rank}. {sym}</b> — {_e(row.get('name', ''))} "
-        f"<span class='chip'>{_e(row.get('grade', ''))} {_num(row.get('composite'))}</span>"
+        f"<b>{rank}. {sym}</b> — {_e(row.get('name', ''))} {sc_chip}{cons_chip}"
+        f"<span class='chip muted'>rang in sector: {_e(row.get('grade', ''))} "
+        f"{_num(row.get('composite'))}</span>"
         f"<span class='chip'>{_e(row.get('tier', ''))}</span>"
         f"<span class='chip'>MoS {_pct(mos, stored='fraction', signed=True)}</span>{flags} "
         f"<span id='recheck-{sym}' class='muted'>hercheck: JavaScript vereist</span>")
@@ -656,6 +966,7 @@ def _card(rank: int, row: dict, entry: dict | None, stage2: dict | None,
             f" · {_e(ttm_txt)}{_e(price_txt)}</p>")
     body = (
         meta
+        + _scorecard_block(row)
         + _stage2_block(stage2)
         + _legs_table(row.get("legs") or {})
         + _pillar_table(row)
@@ -693,17 +1004,45 @@ def _header(grades: dict, stage2_path: Path | None) -> str:
                  f"opgesteld · {len(bench)} op de bank · {len(transfers)} transfers deze run · "
                  f"{max(0, int(slots) - len(squad))} slots open (cash)</p>")
     s2 = (f" · Stage-2-laag: {_e(stage2_path.name)}" if stage2_path else "")
+    bands = Counter((n.get("scorecard") or {}).get("band") for n in names
+                    if n.get("scorecard"))
+    band_chips = "".join(f"<span class='chip'>{_e(b)} × {c}</span>"
+                         for b, c in bands.most_common())
+    band_line = (f"<p>Banden (Owner's Scorecard): {band_chips}</p>" if band_chips else "")
     return (
         "<header><h1>Stock Scout · audit-datasheet</h1>"
         f"<p class='muted'>Run {_e(grades.get('run_date', '?'))} · versie "
         f"{_e(grades.get('version', '?'))} · universum {_e(grades.get('universe', '?'))} · "
         f"gegradeerd {_e(grades.get('graded', '?'))} · veto {_e(grades.get('vetoed', '?'))} · "
         f"onvoldoende data {_e(grades.get('insufficient', '?'))}{s2}</p>"
-        f"<p>{chips}</p>{veto_line}{fline}"
-        "<button id='expand-all' type='button'>Alles uitklappen</button></header>")
+        f"{band_line}<p class='muted'>Rang in sector (context) — {chips}</p>"
+        f"{veto_line}{fline}"
+        + _anchor_reference()
+        + "<button id='expand-all' type='button'>Alles uitklappen</button></header>")
 
 
 # ---------------------------------------------------------------- builder + CLI
+
+def _island_scorecard(card: dict | None) -> dict | None:
+    """The scorecard reduced to exactly what the page's JS needs to re-derive it: the
+    stored per-metric points (the block sums and the total come from these) plus each
+    metric's raw value and ramp endpoints (so the §2 ramp itself is re-checked too).
+    Nothing derived is baked in — the totals travel only as the values to compare against."""
+    if not card:
+        return None
+    return {
+        "score": card.get("score"), "available_max": card.get("available_max"),
+        "pct": card.get("pct"), "band": card.get("band"),
+        "blocks": {b: {"points": (v or {}).get("points"), "max": (v or {}).get("max")}
+                   for b, v in (card.get("blocks") or {}).items()},
+        "metrics": {mid: {"points": m.get("points"), "max": m.get("max"),
+                          "value": m.get("value"),
+                          "block": (ANCHORS.get(mid) or {}).get("block"),
+                          "floor": (ANCHORS.get(mid) or {}).get("floor"),
+                          "target": (ANCHORS.get(mid) or {}).get("target")}
+                    for mid, m in (card.get("metrics") or {}).items()},
+    }
+
 
 def build(grades_path: Path | str, *, cache_dir: Path | str | None = None,
           stage2_dir: Path | str | None = None, top: int = 10,
@@ -733,7 +1072,8 @@ def build(grades_path: Path | str, *, cache_dir: Path | str | None = None,
                    "penalty": (n.get("veto") or {}).get("penalty") or 0,
                    "legs": {lid: (leg or {}).get("score")
                             for lid, leg in (n.get("legs") or {}).items()},
-                   "pillars": n.get("pillars") or {}}
+                   "pillars": n.get("pillars") or {},
+                   "scorecard": _island_scorecard(n.get("scorecard"))}
                   for n in ranked],
     }
     island_json = json.dumps(island, ensure_ascii=False).replace("</", "<\\/")

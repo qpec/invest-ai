@@ -5,7 +5,8 @@ are mapped to §4.1 Bundles by build_bundle() — own market_cap from fast_info,
 yahoo_ev from fast_info when present, shares dict -> ascending series, statements
 straight through — and fed to scoring.score_universe, the same pure code the
 backtests use. Then per graded name the §4.8 shadow layers (margin of safety +
-Buffett checklist — never in the composite), the proposal portfolio, and the v3
+Buffett checklist — never in the composite), the Owner's Scorecard (the absolute
+anchored composite, docs/SCORECARD-DESIGN.md), the proposal portfolio, and the v3
 formation update (§5.6, the live mode per msg 58) unless --no-formation.
 
 A cache file that cannot be read (torn JSON, missing "ticker") is skipped like an
@@ -13,11 +14,15 @@ uncached one and named with its reason in the report — one bad file never take
 the run down.
 
 Outputs (§3.3): reports/scout-run-<date>.md + reports/scout-grades-<date>.json.
-The md carries the §5.5 sections: header counts by grade + veto breakdown by
-distinct sub-reason, tier-sectioned A-F tables (V/Q/G/D/M, MoS%, flags), the NL-names
-call-out, "De Formatie" (squad/transfers/bench/open slots — replacing the old
-top-15 ranking) and the honest-evidence footer. --telegram sends the md summary
-head via tg.py and attaches the newest datasheet when present.
+The md LEADS with the scorecard, because that is the interpretable number: a
+"hoe je dit leest" block, then the banded scorecard tables (score/band/consensus/
+blocks, with grade+composite demoted to a rank-within-sector context column), then
+the names that carry no band at all (NO PRICE, VETOED) in their own section — never
+mixed into the ordering (§4.1/§4.3). Behind that the report keeps everything it had:
+the veto breakdown by distinct sub-reason, the tier-sectioned A-F tables (now
+labelled as sector-relative context), the NL-names call-out, "De Formatie" and the
+honest-evidence footer. --telegram sends the md summary head via tg.py and attaches
+the newest datasheet when present.
 """
 from __future__ import annotations
 
@@ -33,6 +38,7 @@ from pathlib import Path
 import pandas as pd
 
 import formation
+import scorecard
 import scoring
 import tg
 from populate import cache_filename
@@ -41,6 +47,16 @@ VERSION = "v2.3+v3"
 GRADE_LETTERS = ("A", "B", "C", "D", "F")
 TIERS = ("Core", "Adjacent", "Outside")
 _DATASHEET_RE = re.compile(r"^datasheet-(\d{4}-\d{2}-\d{2})\.html$")
+
+# The §5 band table drives the report's grouping. Only the bands with a numeric floor
+# are ordered against each other; the two special bands (VETOED, NO PRICE) get their own
+# section so nothing without a verdict is ever sorted next to something with one.
+BAND_ORDER = tuple(e["band"] for e in scorecard.BANDS if e["floor"] is not None)
+BAND_FLOOR = {e["band"]: e["floor"] for e in scorecard.BANDS}
+BAND_MEANING = {e["band"]: e["meaning"] for e in scorecard.BANDS}
+# Block -> the short column head in the main table (design §5 "Blocks").
+BLOCK_COLS = (("quality", "Q"), ("price", "P"), ("safety", "S"), ("stewardship", "St"))
+VETOED_LIST_MAX = 25          # a 2k-name universe vetoes hundreds; the tail is counted
 
 
 # ---------------------------------------------------------------- cache -> Bundle
@@ -109,6 +125,174 @@ def _fmt(value, spec: str = ".1f", suffix: str = "") -> str:
 def _mos_pct(row: dict) -> str:
     mos = row.get("mos")
     return "—" if not mos else f"{100.0 * mos['mos_pct']:+.0f}%"
+
+
+def _pts(value) -> str:
+    """Points without false precision: 29 stays 29, 9.6 stays 9.6, None is an em dash."""
+    return "—" if value is None else f"{value:g}"
+
+
+def _band_range(band: str) -> str:
+    """'80–100', '65–79' — derived from the §5 floors themselves, so the report can never
+    advertise a band boundary the scorecard no longer holds."""
+    i = BAND_ORDER.index(band)
+    top = 100 if i == 0 else BAND_FLOOR[BAND_ORDER[i - 1]] - 1
+    return f"{BAND_FLOOR[band]}–{top}"
+
+
+def _how_to_read() -> list[str]:
+    """The §5 interpretation layer in five lines, rendered from the scorecard's own
+    constants. It sits above the first '## ' so it rides along in the Telegram head."""
+    lenses = len(scorecard.CONSENSUS_LENSES)
+    return [
+        "Hoe je dit leest:",
+        f"- De score is absoluut: {scorecard.FULL_MAX} punten tegen vaste ankers, niet "
+        "tegen wie er toevallig meedraait. Dezelfde onderneming scoort morgen hetzelfde.",
+        f"- Lees banden, geen rangen. Verschillen onder ±{scorecard.NOISE_FLOOR:.0f} punten "
+        "zijn niet betekenisvol — binnen één band is de volgorde ruis.",
+        f"- Consensus n/{lenses}: hoeveel van {lenses} onafhankelijke brillen deze naam goed "
+        f"noemen (scorecard ≥ {scorecard.CONSENSUS_SCORECARD_PCT:.0f}%, DCF-veiligheidsmarge "
+        f"> 0, Buffett-checklist ≥ {scorecard.CONSENSUS_BUFFETT_SCORE}). "
+        f"{lenses} van {lenses} is het signaal, niet de eerste plek.",
+        f"- {scorecard.NO_PRICE_BAND} is géén oordeel maar een kwaliteitsprofiel: zonder "
+        "prijsdata zegt de scorecard niets over kopen (§4.1). Een veto onderdrukt de "
+        "score, het rangschikt niet (§4.3).",
+        "- \"rang in sector\" (grade + composite) staat er als context — waar een naam "
+        "tussen zijn sectorgenoten staat — en is nadrukkelijk niet het oordeel.",
+    ]
+
+
+def _score_cell(card: dict) -> str:
+    """The headline score for one banded name. `pct` is a percentage of the AVAILABLE
+    maximum, so a name with an unavailable metric shows both (§4.2: 48/75, never 48/100)."""
+    if card.get("pct") is None:
+        return "—"
+    if card["available_max"] >= scorecard.FULL_MAX:
+        return f"{card['pct']}/100"
+    return f"{card['pct']}/100 · {_pts(card['score'])}/{card['available_max']} pt"
+
+
+def _block_cells(card: dict) -> list[str]:
+    """Quality/Price/Safety/Stewardship as points-of-available-points (design §5)."""
+    blocks = card.get("blocks") or {}
+    out = []
+    for block, _ in BLOCK_COLS:
+        b = blocks.get(block) or {}
+        out.append("—" if not b.get("max") else f"{_pts(b['points'])}/{b['max']}")
+    return out
+
+
+def _consensus_cell(card: dict) -> str:
+    c = card.get("consensus") or {}
+    return "—" if not c else f"{c['green']}/{c['of']}"
+
+
+def _context_cell(row: dict) -> str:
+    """grade + composite — the sector-relative rank, kept as context, never as verdict."""
+    grade = row.get("grade") or "—"
+    return f"{grade} {_fmt(row.get('composite'))}"
+
+
+def _scorecard_table(rows: list[dict], *, banded: bool = True) -> list[str]:
+    """The main table: score and band first, blocks and consensus next to them, the
+    percentile composite last and labelled. No rank column — §1.2 is the whole reason the
+    scorecard exists, and a '#' invites reading #9 against #11 as if it meant something."""
+    head = "score" if banded else "punten"
+    lines = [f"| symbool | naam | {head} | band | consensus | Q | P | S | St | flags "
+             "| rang in sector (context) |",
+             "|---|------|-------|------|-----------|---|---|---|----|-------|--------|"]
+    for r in rows:
+        card = r.get("scorecard") or {}
+        flags = ", ".join(f["code"] for f in r.get("flags") or []) or "—"
+        score = (_score_cell(card) if banded
+                 else f"{_pts(card.get('score'))}/{card.get('available_max', '—')} pt")
+        lines.append(
+            f"| {r['symbol']} | {r.get('name') or '—'} | {score} | {card.get('band', '—')} "
+            f"| {_consensus_cell(card)} | " + " | ".join(_block_cells(card)) +
+            f" | {flags} | {_context_cell(r)} |")
+    return lines
+
+
+def _band_counts(graded: list[dict]) -> Counter:
+    return Counter((r.get("scorecard") or {}).get("band") for r in graded
+                   if r.get("scorecard"))
+
+
+def _scorecard_section(graded: list[dict]) -> list[str]:
+    """§5's banded groups: sorted by pct descending, but printed per band so the output
+    never invites reading rank 9 against rank 11 (design §1.2). Empty bands are skipped;
+    the header line above already reports the full band occupancy."""
+    banded = {band: [] for band in BAND_ORDER}
+    for r in graded:
+        card = r.get("scorecard")
+        if card and card.get("band") in banded:
+            banded[card["band"]].append(r)
+    total = sum(len(v) for v in banded.values())
+    lines = ["", f"## Scorecard — absolute punten ({total})", "",
+             "Gesorteerd op score, gegroepeerd in banden. Binnen een band is de volgorde "
+             f"ruis (±{scorecard.NOISE_FLOOR:.0f} punten); tussen banden zit het verschil."]
+    if not total:
+        return lines + ["", "_Geen naam met een band deze run._"]
+    for band in BAND_ORDER:
+        rows = sorted(banded[band], key=lambda r: (-r["scorecard"]["pct"], r["symbol"]))
+        if not rows:
+            continue
+        lines += ["", f"### {band} {_band_range(band)} ({len(rows)}) — "
+                      f"{BAND_MEANING[band]}", ""]
+        lines += _scorecard_table(rows)
+    return lines
+
+
+def _unbanded_section(scored: list[dict], graded: list[dict]) -> list[str]:
+    """Everything the scorecard refuses to band, kept out of the ordering on purpose:
+    NO PRICE names (a quality profile, explicitly not a verdict — §4.1), VETOED names
+    (score suppressed, never ranked — §4.3) and any graded name whose card is absent."""
+    no_price = [r for r in graded
+                if (r.get("scorecard") or {}).get("band") == scorecard.NO_PRICE_BAND]
+    vetoed = [r for r in scored if (r.get("veto") or {}).get("vetoed")]
+    cardless = [r for r in graded if not r.get("scorecard")]
+    lines = ["", "## Zonder band (geen oordeel)", ""]
+    if not (no_price or vetoed or cardless):
+        return lines + ["Geen namen buiten de banden deze run."]
+
+    if no_price:
+        lines += [f"### {scorecard.NO_PRICE_BAND} ({len(no_price)})", "",
+                  scorecard.NO_PRICE_MEANING.rstrip(".") + ". Deze namen staan bewust "
+                  "buiten de bandvolgorde: er valt niets te rangschikken.", ""]
+        lines += _scorecard_table(
+            sorted(no_price, key=lambda r: r["symbol"]), banded=False)
+        lines += [""]
+    if vetoed:
+        lines += [f"### {scorecard.VETOED_BAND} ({len(vetoed)})", "",
+                  BAND_MEANING[scorecard.VETOED_BAND].rstrip(".") + ".", ""]
+        lines += [f"- {r['symbol']} — {r.get('name') or '—'} — "
+                  f"{(r.get('veto') or {}).get('reason') or 'geen reden opgegeven'}"
+                  for r in vetoed[:VETOED_LIST_MAX]]
+        if len(vetoed) > VETOED_LIST_MAX:
+            lines.append(f"- … en {len(vetoed) - VETOED_LIST_MAX} meer — zie de "
+                         "veto-verdeling hierboven.")
+        lines += [""]
+    if cardless:
+        lines += [f"### Geen scorecard ({len(cardless)})", "",
+                  "Gegradeerd, maar zonder scorecard in deze run:",
+                  ", ".join(r["symbol"] for r in cardless), ""]
+    while lines and not lines[-1]:            # the next section supplies its own blank
+        lines.pop()
+    return lines
+
+
+def _nl_line(row: dict) -> str:
+    """One NL call-out line, scorecard first and the sector rank in brackets behind it."""
+    card = row.get("scorecard") or {}
+    band = card.get("band")
+    if not card:
+        return f"- {row['symbol']} — {row.get('grade') or '—'} (geen scorecard)"
+    if band in BAND_ORDER:
+        head = f"{_score_cell(card)} · {band}"
+    else:                                     # NO PRICE / VETOED carry no verdict (§4.1)
+        head = f"{band} — {_pts(card.get('score'))}/{card.get('available_max')} pt"
+    return (f"- {row['symbol']} — {head} · consensus {_consensus_cell(card)} "
+            f"(rang in sector: {_context_cell(row)})")
 
 
 def _grade_table(names: list[dict]) -> list[str]:
@@ -209,33 +393,49 @@ def _unreadable_block(unreadable: list[dict]) -> list[str]:
 
 def render_report(doc: dict, transfers: list[dict], uncached: int,
                   formation_updated: bool, unreadable: list[dict] | None = None) -> str:
-    """The §5.5 report md from a §3.3 grades document (pure)."""
+    """The §5.5 report md from a §3.3 grades document (pure).
+
+    Order matters here: the scorecard leads, because it is the number that means the same
+    thing tomorrow (design §2). The percentile composite keeps its tier tables further
+    down, explicitly labelled as sector-relative context — it is still the engine under
+    the formation and the only validated ranking this system owns (design §6)."""
     unreadable = list(unreadable or [])
     scored = doc["names"]
     graded = [r for r in scored if r["grade"] in GRADE_LETTERS]
     grade_counts = Counter(r["grade"] for r in graded)
+    bands = _band_counts(graded)
     lines = [
         f"# Stock Scout — run {doc['run_date']} ({doc['version']})", "",
         f"Universum {doc['universe']} · gegraded {doc['graded']} · veto "
         f"{doc['vetoed']} · insufficient {doc['insufficient']} · niet in cache {uncached}"
         f" · onleesbaar in cache {len(unreadable)}",
-        "Grades: " + " · ".join(f"{g} {grade_counts.get(g, 0)}" for g in GRADE_LETTERS),
+        "Banden: " + " · ".join(f"{b} {bands.get(b, 0)}" for b in BAND_ORDER)
+        + (f" · {scorecard.NO_PRICE_BAND} {bands[scorecard.NO_PRICE_BAND]}"
+           if bands.get(scorecard.NO_PRICE_BAND) else ""),
+        "Rang in sector (context) — grades: "
+        + " · ".join(f"{g} {grade_counts.get(g, 0)}" for g in GRADE_LETTERS),
         "",
     ]
+    lines += _how_to_read()
+    lines += [""]
     lines += _veto_breakdown(scored)
     lines += _unreadable_block(unreadable)
+    lines += _scorecard_section(graded)
+    lines += _unbanded_section(scored, graded)
+    lines += ["", "## Sectorrelatieve context (rang binnen sector)", "",
+              "De percentielmotor: waar een naam staat tussen zijn sectorgenoten. Context, "
+              "geen oordeel — en nog steeds de motor onder De Formatie en de enige "
+              "walk-forward-gevalideerde rangschikking die dit systeem heeft."]
     for tier in TIERS:
         tier_names = sorted((r for r in graded if r["tier"] == tier),
                             key=lambda r: (-r["composite"], r["symbol"]))
         if not tier_names:
             continue
-        lines += ["", f"## {tier} ({len(tier_names)})", ""]
+        lines += ["", f"### {tier} ({len(tier_names)})", ""]
         lines += _grade_table(tier_names)
     nl = [r for r in scored if str(r["symbol"]).endswith(".AS")]
     lines += ["", "## NL-namen", ""]
-    lines += [f"- {r['symbol']} — {r['grade']}" +
-              (f" (composite {r['composite']:.1f})" if r["composite"] is not None else "")
-              for r in nl] or ["Geen NL-namen in deze run."]
+    lines += [_nl_line(r) for r in nl] or ["Geen NL-namen in deze run."]
     lines += [""]
     lines += _formation_section(doc.get("formation"), transfers, formation_updated)
     lines += ["", "---",
@@ -273,6 +473,10 @@ def run(*, universe_path: str | Path, cache_dir: str | Path, run_date: str,
         bundle = by_symbol[row["symbol"]]
         row["mos"] = scoring.margin_of_safety(bundle) if graded else None
         row["buffett"] = scoring.buffett_checklist(bundle) if graded else None
+        # The Owner's Scorecard is built from THIS row, so the absolute card and the
+        # percentile legs read one computation and can never disagree (§3.3).
+        row["scorecard"] = (scorecard.scorecard(bundle, scored_row=row) if graded
+                            else None)
 
     portfolio = scoring.build_portfolio(scored)
 

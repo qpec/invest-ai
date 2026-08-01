@@ -1,8 +1,9 @@
 """Offline tests for datasheet.py (spec §5.7, §3.3, §3.5): synthetic grades JSON
-(one graded name with flags+MoS+Buffett, one vetoed) + cache entry + Stage-2 files;
-assert the HTML carries the evidence chain, the JSON island + JS recompute, no
-external asset references, and that the Stage-2 date-fallback picks the newest
-file ≤ run date. No network, no real caches."""
+(one graded name with flags+MoS+Buffett+Owner's Scorecard, one vetoed) + cache entry +
+Stage-2 files; assert the HTML leads with the scorecard block, renders every ramp from
+scorecard.ANCHORS, carries the whole pre-existing evidence chain, embeds BOTH JSON-island
+recomputes, references no external asset, and that the Stage-2 date-fallback picks the
+newest file ≤ run date. No network, no real caches."""
 from __future__ import annotations
 
 import json
@@ -11,6 +12,7 @@ import re
 import pytest
 
 import datasheet
+import scorecard
 
 RUN_DATE = "2026-07-30"
 
@@ -33,6 +35,81 @@ LEGS = {
     "m_accruals": {"raw": 2.0, "percentile": 55.0, "cohort_n": 12, "score": 55.0, "note": ""},
 }
 COMPOSITE = 79.025
+
+# One raw value per scorecard anchor; capital-returned is deliberately absent so the
+# fixture also exercises §4.2 — a shrinking denominator, never a silent zero.
+SC_VALUES = {
+    "roic": 45.3, "gross_margin": 62.0, "gross_margin_cv": 0.04,
+    "owner_fcf_margin": 30.1, "revenue_growth": 12.4, "owner_fcf_yield": 0.082,
+    "margin_of_safety": 0.214, "net_debt_ebitda": -0.5, "self_funding": 1.0,
+    "sbc": 4.2, "current_ratio": 1.5, "share_count_trend": -1.2, "accruals": 2.0,
+    "capital_returned": None,
+}
+CAPITAL_REASON = ("no dividend or buyback row in the newest annual cash-flow statement "
+                  "(the EDGAR/PIT path carries neither)")
+
+
+def _ramp(value: float, floor: float, target: float, points: float) -> float:
+    """The design §2 rule, spelled out HERE: the fixture must not inherit its numbers
+    from the implementation the datasheet is supposed to render faithfully."""
+    frac = (value - floor) / (target - floor)
+    return round(max(0.0, min(1.0, frac)) * points, 1)
+
+
+def _scorecard_card() -> dict:
+    """A §5 card in exactly the shape scorecard.scorecard() emits (§3.3)."""
+    metrics, blocks, missing, scored = {}, {}, [], []
+    for mid, a in scorecard.ANCHORS.items():
+        block = blocks.setdefault(a["block"], {"points": 0.0, "max": 0, "metrics": []})
+        value = SC_VALUES[mid]
+        if value is None:
+            metrics[mid] = {"value": None, "points": None, "max": a["points"],
+                            "pct": None,
+                            "detail": f"{a['label']}: not computable — {CAPITAL_REASON} "
+                                      f"(§4.2)"}
+            missing.append({"metric": mid, "label": a["label"], "block": a["block"],
+                            "points": a["points"], "reason": CAPITAL_REASON})
+            continue
+        pts = _ramp(value, a["floor"], a["target"], a["points"])
+        metrics[mid] = {"value": value, "points": pts, "max": a["points"],
+                        "pct": round(100.0 * pts / a["points"]),
+                        "detail": f"{a['label']} -> {pts}/{a['points']} pts"}
+        block["points"] = round(block["points"] + pts, 1)
+        block["max"] += a["points"]
+        block["metrics"].append(mid)
+        scored.append(mid)
+    score = round(sum(b["points"] for b in blocks.values()), 1)
+    available = sum(b["max"] for b in blocks.values())
+    pct = round(100.0 * score / available)
+    entry = next(e for e in scorecard.BANDS
+                 if e["floor"] is not None and pct >= e["floor"])
+    return {
+        "score": score, "available_max": available, "pct": pct, "band": entry["band"],
+        "band_meaning": entry["meaning"], "blocks": blocks, "metrics": metrics,
+        "why": {"strongest": {"metric": "net_debt_ebitda", "label": "net debt/EBITDA",
+                              "value": -0.5, "points": 10.0, "max": 10, "pct": 100,
+                              "sentence": "carried by net debt/EBITDA at -0.50 (10.0/10)"},
+                "weakest": {"metric": "revenue_growth", "label": "revenue growth",
+                            "value": 12.4, "points": 4.1, "max": 5, "pct": 83,
+                            "sentence": "held back by revenue growth at +12.4%/yr "
+                                        "(4.1/5)"}},
+        "consensus": {"green": 3, "of": 3,
+                      "lenses": {"scorecard": True, "margin_of_safety": True,
+                                 "buffett": True},
+                      "label": "3 of 3 — all three lenses agree",
+                      "evidence": {"scorecard": f"scorecard {pct}% (>= 60%)",
+                                   "margin_of_safety": "margin of safety +21% (> 0%)",
+                                   "buffett": "Buffett 11/13 (>= 9)"}},
+        "coverage": {"available_max": available, "full_max": 100, "scored": scored,
+                     "missing": missing, "missing_points": 3},
+        "veto": {"vetoed": False, "reason": "", "penalty": 0},
+        "notes": ["1 metric(s) not computable — scored out of 97 of 100 possible "
+                  "points (§4.2).",
+                  "Differences under 5 points are not meaningful (§4.4)."],
+    }
+
+
+SCORECARD = _scorecard_card()
 
 
 def _grades() -> dict:
@@ -58,7 +135,8 @@ def _grades() -> dict:
                  {"name": "D/E < 0.5", "points": 2, "max": 2, "pass": True,
                   "detail": "D/E 0.18"},
                  {"name": "Winstconsistentie", "points": 0, "max": 3, "pass": False,
-                  "detail": "NI daalde in 2024"}]}},
+                  "detail": "NI daalde in 2024"}]},
+             "scorecard": json.loads(json.dumps(SCORECARD))},
             {"symbol": "BADCO", "name": "Bad Leverage Co.",
              "sector": "Health Care", "industry": "Health Care Technology", "tier": "Core",
              "grade": "VETOED", "composite": None, "quality_score": None,
@@ -68,7 +146,7 @@ def _grades() -> dict:
                       "reason": "leverage veto: net debt/EBITDA above the §2 floor"},
              "flags": [], "ev": None,
              "ttm": {"quarters": 0, "through": None, "basis": "annual"},
-             "mos": None, "buffett": None},
+             "mos": None, "buffett": None, "scorecard": None},
         ],
         "portfolio": {"positions": [{"symbol": "TEST", "weight": 0.10,
                                      "conviction": COMPOSITE}],
@@ -251,6 +329,177 @@ def test_html_first_card_open_and_evidence_tables(built_html):
     assert "Buffett-checklist" in built_html
     assert "Veiligheidsmarge" in built_html        # MoS shadow block (§4.8)
     assert "prefers-color-scheme" in built_html    # light+dark theme
+
+
+# ------------------------------------------- the Owner's Scorecard block (design §5)
+
+def _card_html(doc: str, symbol: str = "TEST") -> str:
+    """The body of one card, from its summary to the end of the card element."""
+    part = doc.split(f"<b>1. {symbol}</b>", 1)[1]
+    return part.split("</details><details class='card'", 1)[0]
+
+
+def test_scorecard_is_the_top_block_of_the_card(built_html):
+    card = _card_html(built_html)
+    assert "Owner's Scorecard — absolute punten" in card
+    sc_at = card.index("Owner's Scorecard")
+    assert sc_at < card.index("Stage-2-analyse")          # above the Stage-2 layer...
+    assert sc_at < card.index("Score-opbouw per leg")     # ...and the percentile build-up
+    # Headline: pct/100 + band + the band's plain-language meaning (§5).
+    assert f"<span class='sc-score'>{SCORECARD['pct']}</span>" in card
+    assert "<span class='sc-max'>/100</span>" in card
+    assert f"<span class='sc-band'>{SCORECARD['band']}</span>" in card
+    assert SCORECARD["band_meaning"] in card
+    # ...and the collapsed summary leads with it too, with the composite demoted.
+    assert f"<b>{SCORECARD['pct']}/100</b> · {SCORECARD['band']}" in card
+    assert "rang in sector: B 79.0" in card
+
+
+def test_scorecard_block_shows_four_blocks_why_consensus_and_coverage(built_html):
+    card = _card_html(built_html)
+    for _, label, question in datasheet.BLOCK_LABELS:
+        assert label in card and question in card
+    quality = SCORECARD["blocks"]["quality"]
+    assert f"{quality['points']:g}/{quality['max']}" in card       # e.g. 29/35
+    assert "class='bar'" in card                                   # the block bars
+    assert SCORECARD["why"]["strongest"]["sentence"] in card
+    assert SCORECARD["why"]["weakest"]["sentence"] in card
+    assert "Consensus 3/3" in card and "all three lenses agree" in card
+    for lens, note in SCORECARD["consensus"]["evidence"].items():
+        assert datasheet.LENS_LABELS[lens] in card
+        assert datasheet._e(note) in card              # ">= 60%" is escaped, not dropped
+    # Coverage names the metric that was NOT computable, and why (§4.2).
+    assert "97 van 100" in card
+    assert "capital returned / owner-FCF" in card
+    assert CAPITAL_REASON in card
+    assert "geen stille nul" in card
+
+
+def test_every_metric_row_shows_value_ramp_and_points(built_html):
+    card = _card_html(built_html)
+    for mid, anchor in scorecard.ANCHORS.items():
+        assert anchor["label"] in card and mid in card
+        assert datasheet._ramp_text(mid) in card
+    assert "0 bij 5.00% · vol bij 25.00%" in card           # ROIC's ramp, in ROIC's unit
+    assert "45.30%" in card                                 # the raw value with its unit
+    assert f"<b>{SCORECARD['metrics']['roic']['points']:g}</b>/12" in card
+    # An unavailable metric keeps its row, its ramp and its reason — never a silent 0.
+    assert "0 bij 0.000 · vol bij 0.500" in card
+
+
+def test_ramps_are_rendered_from_anchors_not_hardcoded(workdir, tmp_path, monkeypatch):
+    monkeypatch.setitem(datasheet.ANCHORS["roic"], "floor", 7.5)
+    doc = datasheet.build(workdir["grades"], cache_dir=None, top=10,
+                          out=tmp_path / "reanchored.html").read_text(encoding="utf-8")
+    assert "0 bij 7.50% · vol bij 25.00%" in doc            # the page follows the table
+    assert "0 bij 5.00% · vol bij 25.00%" not in doc
+
+
+def test_anchor_provenance_table_is_rendered_once_from_anchors(built_html):
+    assert f"{len(scorecard.ANCHORS)} metrieken, 100 punten" in built_html
+    for mid in ("roic", "net_debt_ebitda", "share_count_trend"):
+        assert datasheet._e(scorecard.ANCHORS[mid]["provenance"]) in built_html
+    assert "Verschillen onder 5 punten zijn niet betekenisvol" in built_html
+
+
+def test_island_carries_the_scorecard_for_an_independent_recompute(built_html):
+    m = re.search(r'<script type="application/json" id="scout-data">(.*?)</script>',
+                  built_html, re.S)
+    island = json.loads(m.group(1))
+    sc = {c["symbol"]: c["scorecard"] for c in island["cards"]}["TEST"]
+    assert sc["score"] == SCORECARD["score"] and sc["pct"] == SCORECARD["pct"]
+    # The island really feeds the recompute: block sums, available max and total all
+    # re-derive from the per-metric points, and each point re-derives from its own ramp.
+    blocks, total, available = {}, 0.0, 0
+    for mid, metric in sc["metrics"].items():
+        if metric["points"] is None:
+            continue
+        assert metric["floor"] == scorecard.ANCHORS[mid]["floor"]
+        assert metric["points"] == pytest.approx(
+            _ramp(metric["value"], metric["floor"], metric["target"], metric["max"]),
+            abs=datasheet.RECHECK_TOLERANCE)
+        blocks[metric["block"]] = blocks.get(metric["block"], 0.0) + metric["points"]
+        total += metric["points"]
+        available += metric["max"]
+    for block, points in blocks.items():
+        assert points == pytest.approx(sc["blocks"][block]["points"],
+                                       abs=datasheet.RECHECK_TOLERANCE)
+    assert total == pytest.approx(sc["score"], abs=datasheet.RECHECK_TOLERANCE)
+    assert available == sc["available_max"]
+
+
+def test_scorecard_recompute_js_present_not_baked(built_html):
+    assert "recomputeScorecard" in built_html and "checkScorecard" in built_html
+    assert "id='sc-recheck-TEST'" in built_html
+    static = built_html.split("<script>")[0]
+    assert "✓ komt overeen" not in static           # the verdict is JS-rendered, per card
+    assert "JavaScript vereist" in static
+
+
+def test_a_no_price_card_never_renders_as_a_verdict(workdir, tmp_path):
+    """§4.1 on the datasheet: the literal NO PRICE band, the disclaimer, points out of
+    what was available — and nowhere an x/100 headline."""
+    grades = _grades()
+    card = json.loads(json.dumps(SCORECARD))
+    for mid in ("owner_fcf_yield", "margin_of_safety"):
+        anchor = scorecard.ANCHORS[mid]
+        card["metrics"][mid] = {"value": None, "points": None, "max": anchor["points"],
+                                "pct": None,
+                                "detail": f"{anchor['label']}: not computable — no market "
+                                          f"cap (§4.2)"}
+        card["coverage"]["missing"].append(
+            {"metric": mid, "label": anchor["label"], "block": "price",
+             "points": anchor["points"], "reason": "no market cap"})
+    card["blocks"]["price"] = {"points": 0.0, "max": 0, "metrics": []}
+    card["score"] = round(sum(b["points"] for b in card["blocks"].values()), 1)
+    card["available_max"] = card["coverage"]["available_max"] = sum(
+        b["max"] for b in card["blocks"].values())
+    card["pct"] = round(100.0 * card["score"] / card["available_max"])
+    card["band"] = scorecard.NO_PRICE_BAND
+    card["band_meaning"] = scorecard.NO_PRICE_MEANING
+    card["consensus"]["lenses"]["scorecard"] = None
+    grades["names"][0]["scorecard"] = card
+    path = tmp_path / "noprice-grades.json"
+    path.write_text(json.dumps(grades), encoding="utf-8")
+    doc = datasheet.build(path, cache_dir=workdir["cache"], top=10,
+                          out=tmp_path / "noprice.html").read_text(encoding="utf-8")
+
+    assert "NO PRICE" in doc                                   # the literal band
+    assert "NOT a verdict" in doc and "Quality profile only" in doc
+    assert "<span class='sc-max'>/100</span>" not in doc       # no 0-100 headline at all
+    assert f"{card['score']:g}/{card['available_max']} pt" in doc
+    assert f"<b>NO PRICE</b> · {card['score']:g}/{card['available_max']} pt" in doc
+    assert "sc-band noverdict" in doc                          # flagged, not badged green
+    assert "Prijs" in doc and "0/0" in doc                     # the empty Price block
+
+
+def test_card_without_a_scorecard_degrades_but_still_builds(workdir, tmp_path):
+    grades = _grades()
+    grades["names"][0].pop("scorecard")
+    path = tmp_path / "nocard-grades.json"
+    path.write_text(json.dumps(grades), encoding="utf-8")
+    doc = datasheet.build(path, cache_dir=workdir["cache"], top=10,
+                          out=tmp_path / "nocard.html").read_text(encoding="utf-8")
+    assert "Geen scorecard in deze grades-JSON" in doc
+    assert "Score-opbouw per leg" in doc                        # everything else survives
+    assert "recomputeComposite" in doc
+    island = json.loads(re.search(
+        r'<script type="application/json" id="scout-data">(.*?)</script>', doc, re.S)
+        .group(1))
+    assert island["cards"][0]["scorecard"] is None              # the JS then skips it
+
+
+def test_the_whole_pre_existing_evidence_chain_still_renders(built_html):
+    """The scorecard is added ABOVE the old card, never in place of it (§5.7)."""
+    for anchor in ("Score-opbouw per leg", "Sectorpercentiel", "Legscore",
+                   "Pijlers × gewichten → composite", "0.40·Q + 0.25·G + 0.20·D + 0.15·M",
+                   "Veto/straf-checks (werkelijke waarden)", "Leverage-veto",
+                   "Dilutiestraf", "Flags", "Eigen EV vs Yahoo-EV",
+                   "Owner-FCF per periode", "Onderhouds-proxy",
+                   "Jaarrekening-regels (gematchte labels)", "fast_info-snapshot",
+                   "Veiligheidsmarge", "Buffett-checklist", "Alles uitklappen",
+                   "prefers-color-scheme", "recomputeComposite", "De Formatie 2026Q3"):
+        assert anchor in built_html, anchor
 
 
 # --------------------------------------------- percent vs fraction units (§3.3)
