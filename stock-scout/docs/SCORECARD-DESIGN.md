@@ -82,23 +82,39 @@ whose inputs are missing scores **no points out of a reduced maximum** — never
 
 ## 3. Every constant, and where it comes from
 
-The anti-complexity ledger (HN2) rejects models with many free assumptions, so each anchor is
-declared. Of 28 anchors, **13 are inherited** from lines the owner already ratified or adopted;
-15 are new and chosen to bracket the inherited line symmetrically or to match standard practice.
+The anti-complexity ledger (HN2) rejects models with many free assumptions, so every anchor is
+declared. There are **14 metrics × 2 endpoints = 28 anchors**. Four ramps are pinned by lines
+the owner already ratified — and in three of those the ratified line sits at the ramp's
+*midpoint*, with the endpoints bracketing it symmetrically, so the inherited judgement is what
+positions the ramp even where the endpoints themselves are new. The rest are new and declared
+as such. This table is generated from `scorecard.ANCHORS`; the code is the source of truth.
 
-| Anchor | Value | Provenance |
-|---|---|---|
-| ROIC reference | 15% | **Inherited** — `scout.QV_ROIC_MIN`, design §1; sits at the ROIC ramp's midpoint |
-| Net debt/EBITDA ceiling | 4.0 | **Inherited** — the §2 leverage veto line, used as the ramp floor |
-| Dilution ceiling | +5%/yr | **Inherited** — the §2 dilution-penalty line, used as the ramp floor |
-| Operating/gross margin, current ratio 1.5, ROE 15%, D/E 0.5 | — | **Inherited** — ai-hedge-fund Buffett checklist, adopted v2.3 |
-| SBC target | 2% | New — conventional "low SBC" for profitable software |
-| Gross-margin band | 20% / 60% | New — spans commodity to software economics |
-| Owner-FCF margin target | 20% | New — a 1-in-5 cash conversion is exceptional |
-| Revenue-growth target | 15% | New — the growth the G pillar already gates at 10% for reinvestors |
-| Owner-FCF yield band | 2% / 8% | New — 8% ≈ 12.5× owner earnings, Buffett's habitual "fair" |
-| MoS band | −25% / +50% | New — mirrors ai-hedge-fund's 25% margin-of-safety convention |
-| Capital-returned target | 0.5 | New — half of owner earnings returned is shareholder-friendly |
+| Metric | Block | Floor → target | Pts | Provenance |
+|---|---|---|---|---|
+| `roic` | quality | 5 → 25 % | 12 | **Inherited** — `scoring.QV_ROIC_MIN` (15%) sits at this ramp's exact midpoint; the endpoints bracket it symmetrically |
+| `gross_margin` | quality | 20 → 60 % | 6 | New — spans commodity to software economics |
+| `gross_margin_cv` | quality | 0.35 → 0.05 | 5 | New — brackets a stable margin (CV ≤ 0.05) against a visibly drifting one (CV ≥ 0.35) |
+| `owner_fcf_margin` | quality | 0 → 20 % | 7 | New — a 1-in-5 cash conversion is exceptional |
+| `revenue_growth` | quality | 0 → 15 %/yr | 5 | New — the G pillar already gates reinvestors at 10%/yr |
+| `owner_fcf_yield` | price | 2 → 8 % | 15 | New — 8% ≈ 12.5× owner earnings, Buffett's habitual "fair" |
+| `margin_of_safety` | price | −25 → +50 % | 10 | New — mirrors ai-hedge-fund's 25% margin-of-safety convention |
+| `net_debt_ebitda` | safety | 4.0 → 0.0 | 10 | **Inherited** — `scoring.NET_DEBT_EBITDA_VETO`, the §4.4 leverage veto line, as the ramp floor |
+| `self_funding` | safety | 0.5 → 1.0 | 8 | New — half the annual periods self-funding is the floor, every period the target |
+| `sbc` | safety | 10 → 2 % | 4 | New — 2% is conventional "low SBC" for profitable software |
+| `current_ratio` | safety | 1.0 → 2.0 | 3 | **Inherited** — the ai-hedge-fund Buffett-checklist line (>1.5) sits at this ramp's midpoint |
+| `share_count_trend` | stewardship | +5 → −2 %/yr | 7 | **Inherited** — `scoring.DILUTION_PENALTY_PCT`, the §4.4 dilution line, as the ramp floor |
+| `accruals` | stewardship | +10 → 0 % of revenue | 5 | New — earnings that fully become cash score full |
+| `capital_returned` | stewardship | 0 → 0.5 × owner-FCF | 3 | New — half of owner earnings returned is shareholder-friendly |
+
+**Two metrics are dropped rather than scored when the evidence is weak**, because an absolute
+scorecard has no "neutral" to fall back on the way a percentile does:
+- *gross-margin stability* when fewer than two usable periods exist — `scoring._gross_margin_cv`
+  returns 0.0 for "no evidence of drift", which is harmless for a percentile but would hand a
+  name with no margin history the full 5 stability points;
+- *share-count trend* on a `SHARE_CLASS`-flagged name — §4.5 parks that leg at neutral 50
+  precisely because the trend is untrustworthy there, and neutral does not exist here.
+
+Both shrink `available_max` and are named in `coverage` (§4.2).
 
 ## 4. Honesty rules (non-negotiable, inherited from the repo's own contracts)
 

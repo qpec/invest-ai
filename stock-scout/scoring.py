@@ -603,6 +603,12 @@ def _evaluate(bundle: dict) -> dict:
 
 # --- Batch scoring (§4.6 -> the §3.3 names[] element) ------------------------------------
 
+# Phase-1 assembly is PUBLIC API: scorecard.py builds its absolute card from exactly the raw
+# metrics that produced this row's leg values, so the two layers agree by construction rather
+# than by coincidence. Renaming or reshaping _evaluate's return breaks that contract.
+evaluate = _evaluate
+
+
 def score_universe(bundles: list[dict]) -> list[dict]:
     """§4.6 two-phase pass over §4.1 Bundles -> §3.3 names[] dicts, universe order
     preserved. Phase 1: metrics + flags, then the §4.4 veto layer (VETOED suppressed,

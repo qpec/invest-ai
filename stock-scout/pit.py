@@ -57,6 +57,13 @@ _CASHFLOW_CONCEPTS = {
     "Stock Based Compensation": ("ShareBasedCompensation",),
     "Depreciation And Amortization": ("DepreciationDepletionAndAmortization",
                                       "DepreciationAndAmortization"),
+    # Capital returned to owners — the scorecard's stewardship leg (SCORECARD-DESIGN.md §2
+    # block 4). Without these the metric was computable live but never in the backtest, so
+    # the two paths' headline percentages were not comparable. EDGAR reports payments as
+    # positive outflows; the consumer is sign-agnostic, so no flip is needed here.
+    "Cash Dividends Paid": ("PaymentsOfDividendsCommonStock", "PaymentsOfDividends",
+                            "PaymentsOfDistributionsToAffiliates"),
+    "Repurchase Of Capital Stock": ("PaymentsForRepurchaseOfCommonStock",),
 }
 _BALANCE_CONCEPTS = {
     "Cash And Cash Equivalents": ("CashAndCashEquivalentsAtCarryingValue",),
