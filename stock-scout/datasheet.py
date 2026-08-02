@@ -88,7 +88,32 @@ BLOCK_LABELS = (
     ("stewardship", "Rentmeesterschap", "Staat het management aan mijn kant?"),
 )
 LENS_LABELS = {"scorecard": "Scorecard", "margin_of_safety": "DCF-veiligheidsmarge",
-               "buffett": "Buffett-checklist"}
+               "buffett": "Buffett-checklist", "survival": "Overleving (inversielaag)"}
+
+# --- the inversion layer (docs/INVERSION-DESIGN.md) ---------------------------------------
+# NL labels for the §3 probes. A probe id this table does not know renders under its own id
+# rather than being dropped: the layer owns its probe set, this page only shows it.
+# Keyed on the probe ids inversion.PROBES actually emits — nothing else. A key the layer
+# never produces is not a harmless spare: it hides the one id that IS wrong (§3.3 shipped
+# as "owner_fcf_drawdown" here while the layer calls it "cash_engine", so the probe §3.3
+# calls "the one that matters most to an owner" was the only unlabelled row on the page).
+PROBE_LABELS = {
+    "price_drawdown": "Ruïne al aangetoond — koersdrawdown (§3.1)",
+    "return_asymmetry": "Rendementsasymmetrie — scheefheid & staartverhouding (§3.2)",
+    "cash_engine": "De kasmotor breekt — owner-FCF-drawdown (§3.3)",
+    "stress": "Gedrag onder stress — 2020 en 2022 (§3.4)",
+    "predictability": "Voorspelbaarheid — Munger's eigen filter (§3.5)",
+    "financing": "Financieringsfragiliteit — herfinancieringsmuur & verwatering (§3.6)",
+    "concentration": "Concentratie — alleen een vlag (§3.7)",
+}
+# §3 severities. "unknown"/absent is its own state and is NEVER rendered as "none": the
+# whole point of §7 is that thin evidence is said out loud instead of read as safety.
+SEVERITY_LABELS = {"severe": "ernstig", "caution": "let op", "none": "geen",
+                   "unknown": "niet gemeten", "not_scored": "niet gemeten",
+                   "unmeasured": "niet gemeten"}
+UNMEASURED_SEVERITIES = {"unknown", "not_scored", "unmeasured", "", "none_measured"}
+# Verdict -> chip class. Unknown deliberately gets the neutral chip, not the calm one.
+VERDICT_CLASS = {"ruinous": "sev", "fragile": "sev", "ordinary": "mid", "robust": "calm"}
 # NL renderers per scorecard unit, one per ANCHORS[*]["unit"]. Presentation lives here (the
 # scorecard's own sentences are English); the datasheet shows MORE precision than the
 # report on purpose — this is the surface on which the ramp arithmetic gets checked by hand.
@@ -376,6 +401,19 @@ footer { margin-top:1.2rem; color:var(--muted); font-size:.85em; }
 .bar > i { display:block; height:100%; background:var(--accent); }
 td.barcell { width:170px; }
 .lens-yes { color:var(--ok); } .lens-no { color:var(--bad); } .lens-unknown { color:var(--muted); }
+/* --- the inversion layer (docs/INVERSION-DESIGN.md) — BESIDE the points, never in them */
+.inversion { border:1px solid var(--line); border-left:4px solid var(--warn);
+             border-radius:0 8px 8px 0; padding:.55rem .8rem .7rem; margin:.5rem 0 .8rem; }
+.iv-head { display:flex; flex-wrap:wrap; align-items:baseline; gap:.5rem; }
+.iv-verdict { border-radius:10px; padding:.1rem .6rem; font-weight:600; font-size:.9em;
+              background:var(--chip); }
+.iv-verdict.sev { background:var(--bad); color:#fff; }
+.iv-verdict.mid { background:var(--warn); color:#1a1e22; }
+.iv-verdict.calm { background:var(--ok); color:#fff; }
+.sev-severe { color:var(--bad); font-weight:600; }
+.sev-caution { color:var(--warn); }
+.sev-none { color:var(--ok); }
+.sev-unknown { color:var(--muted); }
 """
 
 # The independent client-side recompute (msg 13): composite re-derived from the
@@ -650,6 +688,215 @@ def _scorecard_block(row: dict) -> str:
             + (f"<details class='sec'><summary>Run-notities</summary><ul>{notes}</ul>"
                f"</details>" if notes else "")
             + "</div>" + _sc_metrics_table(card))
+
+
+# ------------------------------------------- the inversion layer (INVERSION-DESIGN §5)
+
+def _inversion_of(row: dict) -> dict | None:
+    """The verdict attached to one §3.3 row. The scorecard's normalized projection is read
+    first (its "verdict" key is guaranteed, §5), the raw row key second — a grades JSON
+    written before this layer existed has neither and renders nothing at all."""
+    card = (row.get("scorecard") or {}).get("inversion")
+    for source in (card, row.get("inversion")):
+        if isinstance(source, dict) and source:
+            return source
+    return None
+
+
+def _iv_verdict(inv: dict) -> str:
+    """The verdict as the layer worded it; a result that names none is Unknown, never
+    blank (§4: "said out loud, never read as safe")."""
+    return str(inv.get("verdict") or "Unknown")
+
+
+def _iv_sentence(mode) -> str:
+    """One failure mode as plain language (§4), whether the layer hands over the sentence
+    or a probe record carrying one. Never a repr."""
+    if isinstance(mode, dict):
+        for key in ("sentence", "detail", "note", "reason", "label"):
+            if mode.get(key):
+                return str(mode[key])
+        return ""
+    return str(mode or "")
+
+
+def _iv_probe_rows(probes) -> list[tuple[str, dict]]:
+    """The probes as (id, record) pairs from either shape the layer may hand over: a
+    {probe_id: record} map or a list of records carrying their own id."""
+    if isinstance(probes, dict):
+        return [(str(pid), p if isinstance(p, dict) else {"value": p})
+                for pid, p in probes.items()]
+    if isinstance(probes, (list, tuple)):
+        out = []
+        for i, p in enumerate(probes):
+            p = p if isinstance(p, dict) else {"value": p}
+            out.append((str(p.get("probe") or p.get("id") or p.get("name") or i), p))
+        return out
+    return []
+
+
+def _iv_value(probe: dict) -> str:
+    """One probe's measured value. The layer's own rendering wins when it supplied one;
+    otherwise the raw number is shown at four significant digits — a drawdown of -0.716
+    is printed as -0.716, not rounded into looking harmless."""
+    for key in ("display", "text", "rendered"):
+        if probe.get(key):
+            return str(probe[key])
+    value = probe.get("value", probe.get("raw"))
+    if value is None:
+        return "—"
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return str(value)
+    return f"{float(value):.4g}"
+
+
+def _iv_severity(probe: dict) -> tuple[str, str]:
+    """(label, css class) for one probe's §3 severity. An absent severity is 'niet gemeten'
+    — the honest state — and never 'geen'.
+
+    The producer's own COVERAGE BIT decides that, not the severity string. inversion.py
+    returns severity "none" together with measured=False on purpose (a probe with no
+    evidence must not invent a finding), so reading the severity alone paints every
+    unmeasured probe green — and §3.7's concentration probe is unmeasured for ~89% of
+    filers. A `measured` of False therefore wins over whatever severity rides with it."""
+    if probe.get("measured") is False:
+        return SEVERITY_LABELS["unmeasured"], "sev-unknown"
+    raw = str(probe.get("severity") or "unknown").strip().lower()
+    if raw in UNMEASURED_SEVERITIES:
+        return SEVERITY_LABELS.get(raw, "niet gemeten"), "sev-unknown"
+    return SEVERITY_LABELS.get(raw, raw), f"sev-{raw}"
+
+
+def _iv_unmeasured(inv: dict) -> list[str]:
+    """Which probes were NOT measured, by label AND by reason. Taken from whatever the
+    layer named in its coverage block, else derived from the probes that report themselves
+    unmeasured. §3.7 is the reason this exists at all: where the evidence is absent the
+    page says so, because silence there is not safety.
+
+    A coverage entry is a record, so the PROBE is named first and its reason follows. The
+    layer keys those entries on "id" (and carries "label"/"section" of its own); listing
+    the bare English reason — two near-identical "only 0 weekly return(s)" lines the reader
+    cannot attribute to §3.1 or §3.2 — names the gap without naming what has the gap."""
+    coverage = inv.get("coverage") or {}
+    named = []
+    for key in ("missing", "unmeasured", "not_scored", "absent"):
+        for item in coverage.get(key) or []:
+            if not isinstance(item, dict):
+                named.append(PROBE_LABELS.get(str(item), str(item)))
+                continue
+            probe_id = item.get("id", item.get("probe", item.get("metric")))
+            label = PROBE_LABELS.get(str(probe_id)) or item.get("label") or str(probe_id)
+            if item.get("section") and not PROBE_LABELS.get(str(probe_id)):
+                label = f"{label} (§{item['section']})"
+            reason = _iv_sentence(item)
+            named.append(f"{label} — {reason}" if reason and reason != label else label)
+    if named:
+        return named
+    return [PROBE_LABELS.get(pid, pid) for pid, probe in _iv_probe_rows(inv.get("probes"))
+            if probe.get("measured") is False
+            or str(probe.get("severity") or "unknown").strip().lower()
+            in UNMEASURED_SEVERITIES]
+
+
+def _iv_coverage(inv: dict) -> str:
+    """The coverage line: how many of the §3 COUNTING probes could be measured, and the
+    NAME of every one that could not. A coverage block that counts without naming says so
+    instead of implying the gap is unimportant.
+
+    The keys read are the ones inversion.py writes — `measured_counting` of
+    `counting_total`, plus `thin`/`required_missing`, which are what actually decide the
+    collapse to Unknown. The older `scored`/`of`/`total` spellings stay as fallbacks for a
+    result written by anything else; reading only those printed "dekking niet vastgelegd
+    door de laag" over a layer that had recorded it, and blamed the layer for the gap."""
+    coverage = inv.get("coverage") or {}
+    scored = coverage.get("measured_counting", coverage.get("scored"))
+    of = coverage.get("counting_total",
+                      coverage.get("of", coverage.get("total")))
+    unmeasured = _iv_unmeasured(inv)
+    if isinstance(scored, (list, tuple)):
+        scored = len(scored)
+    counted = (f"<b>{_e(scored)} van {_e(of)}</b> tellende probes gemeten"
+               if scored is not None and of is not None
+               else "dekking niet vastgelegd door de laag")
+    missing = [PROBE_LABELS.get(str(pid), str(pid))
+               for pid in coverage.get("required_missing") or []]
+    if missing:
+        thin = (f"<p class='muted'>Zonder {_e(', '.join(missing))} kan dit oordeel niet "
+                f"bevestigd worden — het verdict valt terug op Unknown (§4).</p>")
+    elif coverage.get("thin"):
+        thin = ("<p class='muted'>Te weinig gemeten probes om veiligheid te bevestigen — "
+                "het verdict valt terug op Unknown (§4).</p>")
+    else:
+        thin = ""
+    if unmeasured:
+        items = "".join(f"<li>{_e(u)}</li>" for u in unmeasured)
+        return (f"<p>Dekking: {counted} — niet gemeten, en daarom niet als veilig te "
+                f"lezen (§3.7/§7):</p><ul>{items}</ul>{thin}")
+    if scored is not None and of is not None and scored < of:
+        return (f"<p>Dekking: {counted} — welke probes ontbreken is niet vastgelegd; "
+                f"onbekend is niet hetzelfde als veilig (§7).</p>{thin}")
+    return f"<p class='muted'>Dekking: {counted}.</p>{thin}"
+
+
+def _iv_probe_table(inv: dict) -> str:
+    """Every probe with its measured value and its §3 severity — the evidence under the
+    verdict, so a fragility judgement is auditable the way a point already is."""
+    rows = _iv_probe_rows(inv.get("probes"))
+    if not rows:
+        return ("<p class='muted'>Deze laag leverde geen probes bij dit verdict — alleen "
+                "het verdict zelf.</p>")
+    cells = []
+    for pid, probe in rows:
+        label, cls = _iv_severity(probe)
+        note = _iv_sentence(probe)
+        cells.append(
+            f"<tr><td>{_e(PROBE_LABELS.get(pid, pid))} "
+            f"<span class='muted'>{_e(pid)}</span></td>"
+            f"<td>{_e(_iv_value(probe))}</td>"
+            f"<td class='{cls}'>{_e(label)}</td>"
+            f"<td class='txt muted'>{_e(note)}</td></tr>")
+    return ("<div class='scroll'><table><thead><tr><th>Probe</th><th>Waarde</th>"
+            "<th>Ernst</th><th>Notitie</th></tr></thead><tbody>"
+            + "".join(cells) + "</tbody></table></div>")
+
+
+def _inversion_block(row: dict) -> str:
+    """Munger's lens for one name (INVERSION-DESIGN §5): the verdict, the failure modes in
+    plain language, every probe with its value and severity, and the coverage line naming
+    what was not measured.
+
+    It sits directly under the Owner's Scorecard and it moves not one point (§2): the two
+    answer different questions — how good is this business, and how does it break — and a
+    card that reconciled them would let a high score paper over fragility. A name with no
+    verdict renders nothing: for the ~470 price-less names that is the norm, not a gap."""
+    inv = _inversion_of(row)
+    if not inv:
+        return ""
+    verdict = _iv_verdict(inv)
+    cls = VERDICT_CLASS.get(verdict.strip().lower(), "")
+    modes = [s for s in (_iv_sentence(m) for m in inv.get("failure_modes") or []) if s]
+    if modes:
+        modes_html = ("<p><b>Hoe dit je geld kost:</b></p><ul>"
+                      + "".join(f"<li>{_e(m)}</li>" for m in modes) + "</ul>")
+    elif verdict.strip().lower() == "unknown":
+        modes_html = ("<p class='muted'>Te weinig bewijs om te zeggen hoe dit breekt. Dat "
+                      "staat hier hardop en wordt niet als veilig gelezen (§4/§7).</p>")
+    else:
+        modes_html = "<p class='muted'>Geen faalmodus benoemd bij dit verdict.</p>"
+    notes = "".join(f"<li>{_e(n)}</li>" for n in inv.get("notes") or [])
+    return ("<h3>Inversie — hoe zou dit mijn geld verliezen?</h3>"
+            "<div class='inversion'>"
+            f"<div class='iv-head'><span class='iv-verdict {cls}'>{_e(verdict)}</span>"
+            "<span class='muted'>staat NAAST de score en verschuift geen enkel punt "
+            "(INVERSION-DESIGN §2)</span></div>"
+            + modes_html + _iv_probe_table(inv) + _iv_coverage(inv)
+            + (f"<details class='sec'><summary>Notities van de laag</summary>"
+               f"<ul>{notes}</ul></details>" if notes else "")
+            + "<p class='muted'>Deze laag onderdrukt niets en rangschikt niets: hij "
+              "benoemt de faalmodus, de mens beslist. Wat hij niet ziet — rechtszaken, "
+              "regelgeving, fraude die nog niet in de cijfers zit — blijft onzichtbaar "
+              "(§7).</p>"
+            "</div>")
 
 
 def _anchor_reference() -> str:
@@ -955,8 +1202,15 @@ def _card(rank: int, row: dict, entry: dict | None, stage2: dict | None,
     cons = card.get("consensus") or {}
     cons_chip = (f"<span class='chip'>consensus {_e(cons.get('green'))}/"
                  f"{_e(cons.get('of'))}</span>" if cons else "")
+    inv = _inversion_of(row)
+    # The §5 pairing, visible before anything is expanded: a name can be Exceptional AND
+    # Fragile, and the summary line must show both rather than only the flattering one.
+    iv_chip = ("" if not inv else
+               f"<span class='chip iv-verdict "
+               f"{VERDICT_CLASS.get(_iv_verdict(inv).strip().lower(), '')}'>"
+               f"fragiliteit: {_e(_iv_verdict(inv))}</span>")
     summary = (
-        f"<b>{rank}. {sym}</b> — {_e(row.get('name', ''))} {sc_chip}{cons_chip}"
+        f"<b>{rank}. {sym}</b> — {_e(row.get('name', ''))} {sc_chip}{cons_chip}{iv_chip}"
         f"<span class='chip muted'>rang in sector: {_e(row.get('grade', ''))} "
         f"{_num(row.get('composite'))}</span>"
         f"<span class='chip'>{_e(row.get('tier', ''))}</span>"
@@ -967,6 +1221,7 @@ def _card(rank: int, row: dict, entry: dict | None, stage2: dict | None,
     body = (
         meta
         + _scorecard_block(row)
+        + _inversion_block(row)
         + _stage2_block(stage2)
         + _legs_table(row.get("legs") or {})
         + _pillar_table(row)
@@ -1009,13 +1264,21 @@ def _header(grades: dict, stage2_path: Path | None) -> str:
     band_chips = "".join(f"<span class='chip'>{_e(b)} × {c}</span>"
                          for b, c in bands.most_common())
     band_line = (f"<p>Banden (Owner's Scorecard): {band_chips}</p>" if band_chips else "")
+    # Fragility occupancy, only when this run produced verdicts at all — a run without
+    # price grids must render the header it has always rendered.
+    verdicts = Counter(_iv_verdict(inv) for inv in
+                       (_inversion_of(n) for n in names) if inv)
+    iv_chips = "".join(f"<span class='chip'>{_e(v)} × {c}</span>"
+                       for v, c in verdicts.most_common())
+    iv_line = (f"<p>Fragiliteit (inversielaag, naast de score): {iv_chips}</p>"
+               if iv_chips else "")
     return (
         "<header><h1>Stock Scout · audit-datasheet</h1>"
         f"<p class='muted'>Run {_e(grades.get('run_date', '?'))} · versie "
         f"{_e(grades.get('version', '?'))} · universum {_e(grades.get('universe', '?'))} · "
         f"gegradeerd {_e(grades.get('graded', '?'))} · veto {_e(grades.get('vetoed', '?'))} · "
         f"onvoldoende data {_e(grades.get('insufficient', '?'))}{s2}</p>"
-        f"{band_line}<p class='muted'>Rang in sector (context) — {chips}</p>"
+        f"{band_line}{iv_line}<p class='muted'>Rang in sector (context) — {chips}</p>"
         f"{veto_line}{fline}"
         + _anchor_reference()
         + "<button id='expand-all' type='button'>Alles uitklappen</button></header>")

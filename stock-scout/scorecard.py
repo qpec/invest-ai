@@ -23,6 +23,16 @@ the metric's own coverage reason): a gross-margin series too thin to have a coef
 variation is unavailable rather than scoring the full 5 points on scoring's "no evidence of
 drift" 0.0 default, and a share-count trend the §4.5 SHARE_CLASS flag has already declared
 untrustworthy is unavailable rather than scored.
+
+The inversion layer (docs/INVERSION-DESIGN.md) rides BESIDE this card, never inside it.
+Buffett's scorecard says how good a business is; Munger's lens says how it breaks, and
+INVERSION-DESIGN §2 forbids folding the second into the first — a fragility score inside
+the 100 points would let a high total paper over fragility, the exact trade §1.6 already
+forbids. So an `inversion_result` is attached under "inversion" and joins the §5 consensus
+as a fourth lens, and it moves no point, no block, no band. It is optional in both
+directions: `inversion.py` is imported lazily and only where it is needed, and a card
+without a result keeps exactly the three-lens consensus it had (the SEC-export path has no
+prices for ~470 names, so the fourth lens genuinely cannot be computed there).
 """
 from __future__ import annotations
 
@@ -153,10 +163,29 @@ BANDS = (
 )
 _BAND = {entry["band"]: entry for entry in BANDS}
 
-# §5 consensus thresholds — three independent lenses, each with its own definition of good.
+# §5 consensus thresholds — independent lenses, each with its own definition of good; these
+# three are on every card, the fourth below joins when the inversion layer has an answer.
 CONSENSUS_SCORECARD_PCT = 60.0
 CONSENSUS_BUFFETT_SCORE = 9
 CONSENSUS_LENSES = ("scorecard", "margin_of_safety", "buffett")
+
+# The fourth lens (INVERSION-DESIGN §5). The three above all answer "is this good?"; this
+# one answers "will it survive?", which is the question they share a blind spot on. It is
+# NOT a fourth always-present lens: it joins only when an inversion result is supplied, so
+# a card built without prices still reports an honest three-of-three rather than a
+# permanently unknown quarter. CONSENSUS_LENSES therefore stays the three lenses every card
+# carries, and `of` is the number of lenses actually consulted.
+CONSENSUS_SURVIVAL_LENS = "survival"
+CONSENSUS_LENSES_ALL = CONSENSUS_LENSES + (CONSENSUS_SURVIVAL_LENS,)
+
+# Verdict -> "does it survive?". inversion.consensus_lens owns this judgement; the table is
+# the fallback for the case where that module is not importable at all (the two layers ship
+# separately), so the lens degrades to the published §4 verdict table rather than to a
+# comforting default. Unknown maps to None — said out loud, never read as safe (§4, §7).
+INVERSION_UNKNOWN = "Unknown"
+INVERSION_SURVIVES = {"robust": True, "ordinary": True,
+                      "fragile": False, "ruinous": False, INVERSION_UNKNOWN.lower(): None}
+_LENS_COUNT_WORD = {3: "three", 4: "four"}
 
 # Capital returned to owners, newest annual cash-flow period; first present per chain wins,
 # an absent sibling row means that channel returned nothing. pit.py maps both chains from
@@ -354,6 +383,84 @@ def _values(bundle: dict, scored_row: dict | None, evaluated: dict,
     return values, reasons, notes
 
 
+# --- The inversion layer, beside the points (INVERSION-DESIGN §2, §5) --------------------
+
+def _inversion_module():
+    """`inversion.py`, imported lazily and here only. The inversion layer is optional to
+    this module — a checkout without it must still import, score and render a card — so the
+    dependency lives inside the one function that needs it rather than at module scope."""
+    try:
+        import inversion
+    except ImportError:
+        return None
+    return inversion
+
+
+def _failure_sentence(mode) -> str:
+    """One failure mode as a sentence. INVERSION-DESIGN §4 wants plain language; whether the
+    layer hands over the sentence itself or a probe record carrying one, the card shows the
+    sentence and never a repr."""
+    if isinstance(mode, dict):
+        for key in ("sentence", "detail", "note", "reason", "label"):
+            if mode.get(key):
+                return str(mode[key])
+        return ""
+    return str(mode or "")
+
+
+def _inversion_card(inversion_result: dict) -> dict:
+    """The §5 card projection. The verdict and its failure modes are guaranteed keys — a
+    result naming neither is Unknown rather than blank — and everything else the layer
+    produced (probes, coverage, notes) rides along untouched, so a renderer never has to
+    reach back past the card. A copy: the caller's dict cannot mutate a built card."""
+    attached = dict(inversion_result)
+    attached["verdict"] = inversion_result.get("verdict") or INVERSION_UNKNOWN
+    attached["failure_modes"] = list(inversion_result.get("failure_modes") or [])
+    return attached
+
+
+def survival_lens(inversion_result: dict | None) -> bool | None:
+    """The §5 fourth lens for one inversion result: True it has survived, False it has a
+    named way of breaking you, None not known.
+
+    `inversion.consensus_lens` owns this judgement and is asked first — with the normalized
+    result, then with the bare verdict, since which of the two that function takes is the
+    other module's to decide. INVERSION_SURVIVES answers only when the module is absent or
+    refuses both call shapes, never in place of a verdict that module did make. No result at
+    all is None: the lens is absent, which is neither green nor a silent red.
+
+    The guard is `Exception`, not `TypeError`. The layer ships separately, so this seam is
+    defensive by design — and this is the SECOND entry point into it (grade.run calls
+    scorecard() bare, unlike inversion_for, which wraps its own call). A lens that raises
+    anything at all must cost this card its fourth lens, never the whole grading run."""
+    if not inversion_result:
+        return None
+    asked = _inversion_card(inversion_result)
+    lens = getattr(_inversion_module(), "consensus_lens", None)
+    if lens is not None:
+        for argument in (asked, asked["verdict"]):
+            try:
+                return lens(argument)
+            except Exception:
+                continue
+    return INVERSION_SURVIVES.get(str(asked["verdict"]).strip().lower())
+
+
+def _survival_note(inversion_result: dict) -> str:
+    """The §5 consensus evidence line for the survival lens: the verdict and, where the
+    layer named one, the failure mode that decided it. An Unknown verdict says so in words
+    — §4/§7: too little evidence is stated, never read as safety."""
+    attached = _inversion_card(inversion_result)
+    verdict = attached["verdict"]
+    modes = [s for s in (_failure_sentence(m) for m in attached["failure_modes"]) if s]
+    if modes:
+        return f"inversion {verdict} — {modes[0]}"
+    if str(verdict).strip().lower() == INVERSION_UNKNOWN.lower():
+        return (f"inversion {verdict} — too little evidence to say how this breaks; "
+                f"not read as safe")
+    return f"inversion {verdict}"
+
+
 def _why_entry(metric_id: str, metric: dict, verb: str) -> dict:
     """§5 "why, in words" — one metric named with its raw value, its unit and its points."""
     anchor = ANCHORS[metric_id]
@@ -363,7 +470,8 @@ def _why_entry(metric_id: str, metric: dict, verb: str) -> dict:
                         f"({metric['points']:.1f}/{anchor['points']:g})"}
 
 
-def scorecard(bundle: dict, *, scored_row: dict | None = None) -> dict:
+def scorecard(bundle: dict, *, scored_row: dict | None = None,
+              inversion_result: dict | None = None) -> dict:
     """The whole §2-§5 scorecard for one name: points, blocks, band, why, consensus,
     coverage, veto and notes.
 
@@ -371,6 +479,13 @@ def scorecard(bundle: dict, *, scored_row: dict | None = None) -> dict:
     metric values are reused so the live and backtest paths never disagree. Without one the
     values come from scoring's own assembly of the Bundle and the §4.4 veto layer is run
     here (scoring.veto_check) rather than read off the row.
+
+    `inversion_result` is what `inversion.inversion()` returned for this same Bundle. It is
+    attached under "inversion" and adds the §5 survival lens to the consensus — and that is
+    all it does: INVERSION-DESIGN §2 keeps Munger's lens out of Buffett's points, so `score`,
+    `available_max`, `pct`, `band` and every block are bit-for-bit what they are without it.
+    Omitting it is a first-class case, not a degraded one: the card is then exactly the
+    three-lens card it has always been, with no "inversion" key at all.
 
     Honesty (§4): a vetoed name keeps its evidence but loses its score — VETOED, reason
     printed, `score` and `pct` None, so nothing can rank it. An empty Price block yields
@@ -468,18 +583,35 @@ def scorecard(bundle: dict, *, scored_row: dict | None = None) -> dict:
             "veto": {"vetoed": bool(veto.get("vetoed")), "reason": veto.get("reason", ""),
                      "penalty": veto.get("penalty", 0)},
             "notes": notes}
-    card["consensus"] = consensus(card, mos, buffett)
+    if inversion_result is not None:
+        card["inversion"] = _inversion_card(inversion_result)
+        # Before the noise-floor line, which stays last, and stating the separation §2
+        # insists on: the verdict sits beside the score and buys or costs no points.
+        notes.insert(-1, f"Inversion verdict: {card['inversion']['verdict']} — Munger's "
+                         f"lens sits BESIDE the score and moves none of its points "
+                         f"(INVERSION-DESIGN §2).")
+    card["consensus"] = consensus(card, mos, buffett, inversion_result=inversion_result)
     return card
 
 
-def consensus(card: dict, mos: dict | None, buffett: dict | None) -> dict:
-    """§5 consensus — how many of three INDEPENDENT lenses call the name good: the
-    scorecard (>= 60% of its available points), the DCF margin of safety (> 0) and the
-    13-point Buffett checklist (>= 9). Three-of-three is the real signal.
+def consensus(card: dict, mos: dict | None, buffett: dict | None, *,
+              inversion_result: dict | None = None) -> dict:
+    """§5 consensus — how many INDEPENDENT lenses call the name good: the scorecard (>= 60%
+    of its available points), the DCF margin of safety (> 0), the 13-point Buffett checklist
+    (>= 9) and, when an inversion result is supplied, survival (INVERSION-DESIGN §5). All of
+    them agreeing is the real signal.
 
-    A lens with no data is None: it never counts as green and never shrinks the
-    denominator, and the label says how many are unknown. A NO PRICE card has no scorecard
-    lens at all (§4.1); a VETOED card's scorecard lens is a definite no, not an unknown."""
+    The first three all ask "is this good?"; the fourth asks "will it survive?" — the
+    question the other three share a blind spot on — and it is present only when the
+    inversion layer had the data to answer. `of` is therefore the number of lenses actually
+    consulted, three or four, and both are honest numbers rather than one being a truncated
+    version of the other.
+
+    A lens with no data is None: it never counts as green, never counts as a silent red and
+    never shrinks the denominator, and the label says how many are unknown. That holds for
+    the survival lens too — an Unknown verdict is a consulted-but-unknown fourth lens, which
+    is not the same thing as no fourth lens. A NO PRICE card has no scorecard lens at all
+    (§4.1); a VETOED card's scorecard lens is a definite no, not an unknown."""
     band, pct = card.get("band"), card.get("pct")
     if band == VETOED_BAND:
         scorecard_lens, scorecard_note = False, card.get("band_meaning", "vetoed")
@@ -502,13 +634,18 @@ def consensus(card: dict, mos: dict | None, buffett: dict | None) -> dict:
 
     lenses = {"scorecard": scorecard_lens, "margin_of_safety": mos_lens,
               "buffett": buffett_lens}
+    evidence = {"scorecard": scorecard_note, "margin_of_safety": mos_note,
+                "buffett": buffett_note}
+    if inversion_result is not None:
+        lenses[CONSENSUS_SURVIVAL_LENS] = survival_lens(inversion_result)
+        evidence[CONSENSUS_SURVIVAL_LENS] = _survival_note(inversion_result)
+
     green = sum(1 for lens in lenses.values() if lens is True)
     unknown = sum(1 for lens in lenses.values() if lens is None)
-    of = len(CONSENSUS_LENSES)
+    of = len(lenses)
     if green == of:
-        label = f"{green} of {of} — all three lenses agree"
+        label = f"{green} of {of} — all {_LENS_COUNT_WORD.get(of, of)} lenses agree"
     else:
         label = f"{green} of {of}" + (f" ({unknown} unknown)" if unknown else "")
     return {"green": green, "of": of, "lenses": lenses, "label": label,
-            "evidence": {"scorecard": scorecard_note, "margin_of_safety": mos_note,
-                         "buffett": buffett_note}}
+            "evidence": evidence}

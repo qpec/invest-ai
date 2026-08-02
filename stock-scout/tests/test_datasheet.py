@@ -3,7 +3,12 @@
 Stage-2 files; assert the HTML leads with the scorecard block, renders every ramp from
 scorecard.ANCHORS, carries the whole pre-existing evidence chain, embeds BOTH JSON-island
 recomputes, references no external asset, and that the Stage-2 date-fallback picks the
-newest file ≤ run date. No network, no real caches."""
+newest file ≤ run date. No network, no real caches.
+
+The last section covers the inversion layer in the audit (docs/INVERSION-DESIGN.md §5):
+the verdict, the failure modes, every probe with its value and severity, and the coverage
+line NAMING the probes that were not measured — plus the case that is normal rather than
+degraded, a grades JSON with no verdicts at all."""
 from __future__ import annotations
 
 import json
@@ -577,3 +582,216 @@ def test_build_degrades_gracefully_without_cache(workdir):
     assert "v_yield" in doc                        # score build-up still complete
     assert "Geen cache-gegevens" in doc            # per-name evidence degrades, build survives
     assert "recomputeComposite" in doc
+
+
+# ===================== the inversion layer in the audit (docs/INVERSION-DESIGN.md) =======
+#
+# datasheet.py renders what the layer produced; it computes no verdict and judges none.
+# The fixtures below are the §5 shape grade.py stores on the row, written out here so the
+# page is pinned against the contract rather than against another module's behaviour.
+
+def _inversion(verdict="Fragile"):
+    """The §5 shape as inversion.py actually emits it: probe ids from inversion.PROBES,
+    a `measured` bit beside every severity (an unmeasured probe reports severity "none" —
+    the coverage bit is the only thing that says it found nothing), and the coverage keys
+    the layer really writes. A fixture that invents its own spelling validates the page
+    against a contract no producer implements."""
+    return {
+        "verdict": verdict,
+        "failure_modes": ["de kasmotor viel 89% terug vanaf zijn piek in 2010",
+                          "de koers stond 52% onder zijn top"],
+        "probes": {
+            "price_drawdown": {"id": "price_drawdown", "severity": "severe",
+                               "measured": True, "value": -0.523,
+                               "sentence": "diepste piek-tot-dal −52.3%, niet hersteld",
+                               "evidence": {}},
+            "cash_engine": {"id": "cash_engine", "severity": "severe", "measured": True,
+                            "value": -0.89, "evidence": {}},
+            "predictability": {"id": "predictability", "severity": "caution",
+                               "measured": True, "value": 0.42, "evidence": {}},
+            "stress": {"id": "stress", "severity": "none", "measured": True, "value": 0.0,
+                       "evidence": {}},
+            "concentration": {"id": "concentration", "severity": "none", "measured": False,
+                              "value": None, "evidence": {}},
+        },
+        "coverage": {"measured_counting": 6, "counting_total": 7, "thin": False,
+                     "required_missing": [],
+                     "unmeasured": [{"id": "concentration",
+                                     "label": "customer concentration", "section": "3.7",
+                                     "counts": False,
+                                     "reason": "deze filer tagt geen klantconcentratie"}]},
+        "notes": ["ConcentrationRiskPercentage1 niet getagd door deze filer — stilte is "
+                  "geen veiligheid"],
+    }
+
+
+def _judged_grades(verdict="Fragile", **overrides):
+    """The §3.3 doc with an inversion result on the row AND on the card, the way grade.py
+    writes it."""
+    grades = _grades()
+    result = _inversion(verdict) | overrides
+    row = grades["names"][0]
+    row["inversion"] = result
+    row["scorecard"]["inversion"] = result
+    row["scorecard"]["consensus"] = {
+        "green": 3, "of": 4,
+        "lenses": {"scorecard": True, "margin_of_safety": True, "buffett": True,
+                   "survival": False},
+        "label": "3 of 4",
+        "evidence": {"scorecard": "scorecard 82% (>= 60%)",
+                     "margin_of_safety": "margin of safety +21% (> 0%)",
+                     "buffett": "Buffett 11/13 (>= 9)",
+                     "survival": "inversion Fragile — de kasmotor viel 89% terug"}}
+    return grades
+
+
+@pytest.fixture()
+def judged_html(workdir):
+    def build(verdict="Fragile", **overrides):
+        workdir["grades"].write_text(json.dumps(_judged_grades(verdict, **overrides)),
+                                     encoding="utf-8")
+        out = datasheet.build(workdir["grades"], cache_dir=workdir["cache"],
+                              stage2_dir=workdir["data"], top=10,
+                              out=workdir["tmp"] / "judged.html")
+        return out.read_text(encoding="utf-8")
+    return build
+
+
+def test_the_audit_renders_the_verdict_and_its_failure_modes(judged_html):
+    doc = judged_html("Fragile")
+    assert "Inversie — hoe zou dit mijn geld verliezen?" in doc
+    assert "iv-verdict sev'>Fragile<" in doc
+    assert "Hoe dit je geld kost" in doc
+    assert "de kasmotor viel 89% terug vanaf zijn piek in 2010" in doc
+    assert "de koers stond 52% onder zijn top" in doc
+    assert "verschuift geen enkel punt" in doc          # §2, said on the page itself
+    assert "fragiliteit: Fragile" in doc                # the chip on the closed card
+
+
+def test_every_probe_shows_its_value_and_its_severity(judged_html):
+    doc = judged_html()
+    assert "Ruïne al aangetoond — koersdrawdown (§3.1)" in doc
+    assert "-0.523" in doc and "-0.89" in doc           # measured values, not rounded away
+    assert "diepste piek-tot-dal −52.3%, niet hersteld" in doc
+    assert doc.count("sev-severe'>ernstig<") == 2
+    assert "sev-caution'>let op<" in doc
+    assert "sev-none'>geen<" in doc
+    assert "sev-unknown'>niet gemeten<" in doc          # never rendered as "geen"
+    assert "De kasmotor breekt — owner-FCF-drawdown (§3.3)" in doc
+
+
+def test_the_coverage_line_names_the_probes_that_were_not_measured(judged_html):
+    doc = judged_html()
+    assert "<b>6 van 7</b> tellende probes gemeten" in doc
+    assert "niet gemeten, en daarom niet als veilig te lezen" in doc
+    assert "Concentratie — alleen een vlag (§3.7)" in doc
+    assert "stilte is geen veiligheid" in doc           # the layer's own note rides along
+
+
+def test_coverage_that_counts_without_naming_says_so(judged_html):
+    doc = judged_html(coverage={"scored": 4, "of": 7}, probes={})
+    assert "welke probes ontbreken is niet vastgelegd" in doc
+    assert "onbekend is niet hetzelfde als veilig" in doc
+
+
+def test_an_unknown_verdict_is_said_out_loud_and_never_read_as_safe(judged_html):
+    doc = judged_html("Unknown", failure_modes=[])
+    assert "iv-verdict '>Unknown<" in doc               # neutral chip, not the calm one
+    assert "Te weinig bewijs om te zeggen hoe dit breekt" in doc
+    assert "niet als veilig gelezen" in doc
+
+
+def test_exceptional_and_fragile_are_shown_together_never_reconciled(judged_html):
+    """§5: the pairing is the point. The score keeps its headline, the verdict keeps its
+    chip, and the consensus shows the fourth lens voting no."""
+    doc = judged_html("Fragile")
+    card = _judged_grades()["names"][0]["scorecard"]
+    assert (card["pct"], card["band"]) == (91, "Exceptional")
+    assert "sc-score'>91</span><span class='sc-max'>/100" in doc      # the score is intact
+    assert "sc-band'>Exceptional<" in doc
+    assert "iv-verdict sev'>Fragile<" in doc                          # ...and so is the verdict
+    assert "Overleving (inversielaag)" in doc                         # the 4th lens, named
+    assert "Consensus 3/4" in doc
+    assert "inversion Fragile — de kasmotor viel 89% terug" in doc
+
+
+def test_the_header_reports_the_fragility_occupancy(judged_html):
+    doc = judged_html("Ruinous")
+    assert "Fragiliteit (inversielaag, naast de score)" in doc
+    assert "Ruinous × 1" in doc
+
+
+def test_a_grades_json_without_verdicts_renders_the_page_it_always_did(built_html):
+    """The ~470 price-less names, and every grades JSON written before this layer: no
+    inversion block at all, and nothing else disturbed."""
+    assert "Inversie — hoe zou dit mijn geld verliezen?" not in built_html
+    assert "fragiliteit:" not in built_html
+    assert "Fragiliteit (inversielaag" not in built_html
+
+
+def test_the_whole_evidence_chain_survives_the_new_block(judged_html):
+    """Nothing was traded away for the new section: both recompute checks, Stage-2, the
+    ramps, the anchor ledger, MoS, Buffett, the statements, and self-containment."""
+    doc = judged_html()
+    for marker in ("recomputeComposite", "recomputeScorecard", "sc-recheck-TEST",
+                   "recheck-TEST", "NIEUWSTE-LAAG-MARKER", "Punten per metriek",
+                   "0 bij 5.00% · vol bij 25.00%", "De ankers en hun herkomst",
+                   "Veiligheidsmarge (schaduw-DCF", "Buffett-checklist", "v_yield",
+                   "Owner's Scorecard — absolute punten", "Alles uitklappen"):
+        assert marker in doc, marker
+    assert "http://" not in doc and "https://" not in doc      # no external asset
+    assert "prefers-color-scheme: dark" in doc                 # both themes intact
+    assert doc.count("<script") == 2                           # island + inline JS only
+
+
+def test_the_probes_may_arrive_as_a_list_too(judged_html):
+    """The probe container's shape is the other module's to choose; both are rendered."""
+    doc = judged_html(probes=[{"probe": "price_drawdown", "severity": "severe",
+                               "value": -0.716},
+                              {"id": "return_asymmetry", "severity": "caution",
+                               "value": -0.47}])
+    assert "-0.716" in doc and "-0.47" in doc
+    assert "Ruïne al aangetoond — koersdrawdown (§3.1)" in doc
+    assert "Rendementsasymmetrie — scheefheid &amp; staartverhouding (§3.2)" in doc
+
+
+def test_a_probe_id_the_label_table_does_not_know_is_shown_not_dropped(judged_html):
+    doc = judged_html(probes={"brand_new_probe": {"severity": "severe", "value": 1.5}})
+    assert "brand_new_probe" in doc and "1.5" in doc
+
+
+def test_a_real_inversion_result_never_paints_an_unmeasured_probe_green(judged_html):
+    """Built by the LAYER, not by this file. inversion.py deliberately returns severity
+    "none" with measured=False for a probe that found no evidence, so a page that reads the
+    severity alone shows every gap as a clean green "geen" — the §7 inversion, on the one
+    surface whose whole job is auditing the verdict."""
+    import inversion
+
+    bundle = {
+        "symbol": "TEST", "name": "Test Corp", "sector": "Information Technology",
+        "industry": "Software", "market_cap": 6.0e9, "price": 60.0,
+        "shares_series": [["2016-01-01", 100e6]], "splits": {},
+        "annual": {"income": {}, "balance": {}, "cashflow": {}}, "quarterly": {},
+    }
+    result = inversion.inversion(bundle)               # every probe unmeasured
+    assert result["verdict"] == "Unknown"
+    assert all(p["severity"] == "none" for p in result["probes"].values())
+    assert all(p["measured"] is False for p in result["probes"].values())
+
+    doc = judged_html("Unknown", **{k: result[k] for k in
+                                    ("failure_modes", "probes", "coverage", "notes")})
+    assert "sev-none'>geen<" not in doc                # not one gap rendered as clean
+    assert doc.count("sev-unknown'>niet gemeten<") == len(inversion.PROBES)
+    assert "<b>0 van 6</b> tellende probes gemeten" in doc
+    assert "De kasmotor breekt — owner-FCF-drawdown (§3.3)" in doc   # §3.3 is labelled
+    assert "cash_engine</span></td>" in doc                          # ...and keyed right
+    # the two probes §4 cannot certify without, named as the reason for Unknown
+    assert "het verdict valt terug op Unknown (§4)" in doc
+    assert "Ruïne al aangetoond — koersdrawdown (§3.1), De kasmotor breekt" in doc
+
+
+def test_a_verdict_without_probes_still_renders_the_verdict(judged_html):
+    doc = judged_html(probes={}, coverage={})
+    assert "iv-verdict sev'>Fragile<" in doc
+    assert "leverde geen probes bij dit verdict" in doc
+    assert "dekking niet vastgelegd door de laag" in doc

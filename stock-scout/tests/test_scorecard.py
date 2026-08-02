@@ -5,8 +5,16 @@ clamped, inverted metrics, the ratified 15% ROIC line at the midpoint), the §5 
 consensus, and every §4 honesty rule: no price no verdict, missing inputs shrinking the
 denominator, vetoes suppressing the score — plus the core claim of the redesign, that a
 name's scorecard does not move when the universe around it does.
+
+The last section covers the inversion layer's seam (docs/INVERSION-DESIGN.md §2, §5): the
+fourth consensus lens, and the guarantee that Munger's verdict moves none of Buffett's
+points. `inversion.py` is stubbed in sys.modules throughout, never imported: this module
+must behave identically whether the layer is installed beside it or not, and a test that
+silently changed answer depending on that would be worth nothing.
 """
 import copy
+import sys
+import types
 
 import pytest
 
@@ -422,6 +430,250 @@ def test_consensus_with_nothing_known_is_zero_of_three():
     result = scorecard.consensus({"band": "NO PRICE", "pct": 90}, None, None)
     assert result["green"] == 0 and result["of"] == 3
     assert result["label"] == "0 of 3 (3 unknown)"
+
+
+# --- INVERSION-DESIGN §5: the fourth lens, and §2: it moves no points ---------------------
+
+# What the other module judges. Stated here in full rather than imported, so this suite
+# fails if scorecard.py ever stops asking inversion.py and starts deciding for it.
+STUB_SURVIVES = {"Robust": True, "Ordinary": True, "Fragile": False, "Ruinous": False,
+                 "Unknown": None}
+
+# Every key that carries or frames a point. §2 forbids the inversion layer touching any of
+# them — this tuple is the contract, and the parametrized test below walks it.
+POINT_KEYS = ("score", "available_max", "pct", "band", "band_meaning", "blocks", "metrics",
+              "why", "coverage", "evidence", "veto")
+
+
+@pytest.fixture
+def inversion_layer(monkeypatch):
+    """A stand-in for inversion.py — the layer is written and shipped separately, and this
+    suite pins scorecard.py's side of the seam, not the other module's verdicts."""
+    module = types.ModuleType("inversion")
+    module.consensus_lens = lambda result: STUB_SURVIVES[result["verdict"]]
+    monkeypatch.setitem(sys.modules, "inversion", module)
+    return module
+
+
+@pytest.fixture
+def no_inversion_layer(monkeypatch):
+    """inversion.py not installed at all: None in sys.modules makes `import inversion`
+    raise ImportError, which is exactly what an older checkout does."""
+    monkeypatch.setitem(sys.modules, "inversion", None)
+
+
+def inverted(verdict="Fragile", modes=("the cash engine fell 89% from its peak in 2010",)):
+    """What inversion.inversion() hands over (§3-§4): a verdict, the failure modes in plain
+    language, the probes behind them, coverage and notes."""
+    return {"verdict": verdict, "failure_modes": list(modes),
+            "probes": {"price_drawdown": {"id": "price_drawdown", "severity": "severe",
+                                         "measured": True, "value": -0.716},
+                       "cash_engine": {"id": "cash_engine", "severity": "severe",
+                                       "measured": True, "value": -0.89}},
+            "coverage": {"measured_counting": 5, "counting_total": 6, "thin": False,
+                         "required_missing": [], "flagged": []},
+            "notes": ["concentration not tagged by this filer — silence is not safety"]}
+
+
+def both_cards(bundle, result):
+    """The same bundle and the same §3.3 row, scored without and with an inversion result."""
+    row = scoring.score_universe([bundle])[0]
+    return (scorecard.scorecard(bundle, scored_row=row),
+            scorecard.scorecard(bundle, scored_row=row, inversion_result=result))
+
+
+@pytest.mark.parametrize("verdict", ["Ruinous", "Fragile", "Ordinary", "Robust", "Unknown"])
+def test_an_inversion_verdict_moves_none_of_the_points(verdict, inversion_layer):
+    """§2, the whole reason this layer sits in its own column: a fragility verdict inside
+    the 100 points would let a high total paper over fragility. No verdict — not even
+    Ruinous — may move a point, a block, a band or the evidence tier."""
+    plain, judged = both_cards(wonderful(), inverted(verdict))
+    for key in POINT_KEYS:
+        assert judged[key] == plain[key], key
+    assert set(judged) == set(plain) | {"inversion"}
+    # The one visible trace outside the consensus is a note saying it bought no points,
+    # and the noise-floor line still ends the notes.
+    extra = [n for n in judged["notes"] if n not in plain["notes"]]
+    assert len(extra) == 1 and verdict in extra[0] and "moves none of its points" in extra[0]
+    assert [n for n in judged["notes"] if n != extra[0]] == plain["notes"]
+    assert judged["notes"][-1].startswith("Differences under 5 points")
+
+
+def test_a_card_without_an_inversion_result_is_the_three_lens_card_it_always_was():
+    """The SEC-export path has no prices for ~470 names, so no fourth lens is the normal
+    case, not a degraded one — and it must be byte-identical to the pre-inversion card."""
+    card = card_of(wonderful())
+    assert "inversion" not in card
+    consensus = card["consensus"]
+    assert consensus["of"] == 3 == len(scorecard.CONSENSUS_LENSES)
+    assert set(consensus["lenses"]) == set(scorecard.CONSENSUS_LENSES)
+    assert set(consensus["evidence"]) == set(scorecard.CONSENSUS_LENSES)
+    assert consensus["green"] == 3 and consensus["label"] == "3 of 3 — all three lenses agree"
+    assert scorecard.CONSENSUS_SURVIVAL_LENS not in consensus["lenses"]
+
+
+def test_the_fourth_lens_is_survival_and_makes_the_denominator_four(inversion_layer):
+    _, judged = both_cards(wonderful(), inverted("Robust"))
+    consensus = judged["consensus"]
+    assert consensus["lenses"] == {"scorecard": True, "margin_of_safety": True,
+                                   "buffett": True, "survival": True}
+    assert consensus["green"] == 4 and consensus["of"] == 4
+    assert consensus["label"] == "4 of 4 — all four lenses agree"
+    assert consensus["evidence"]["survival"].startswith("inversion Robust")
+
+
+def test_a_red_fourth_lens_costs_a_green_but_not_a_point(inversion_layer):
+    plain, judged = both_cards(wonderful(), inverted("Ruinous"))
+    assert plain["consensus"]["green"] == 3 and plain["consensus"]["of"] == 3
+    assert judged["consensus"]["lenses"]["survival"] is False
+    assert judged["consensus"]["green"] == 3 and judged["consensus"]["of"] == 4
+    assert judged["consensus"]["label"] == "3 of 4"          # no "(unknown)" — a known no
+    assert judged["pct"] == plain["pct"] and judged["band"] == plain["band"]
+
+
+def test_an_unknown_fourth_lens_is_consulted_but_never_green_and_never_a_silent_red(
+        inversion_layer):
+    """§4/§7: too little evidence is said out loud. An Unknown verdict is a fourth lens that
+    WAS consulted and could not answer — which is not the same as having no fourth lens."""
+    _, judged = both_cards(wonderful(), inverted("Unknown", modes=()))
+    consensus = judged["consensus"]
+    assert consensus["lenses"]["survival"] is None
+    assert consensus["green"] == 3 and consensus["of"] == 4
+    assert consensus["label"] == "3 of 4 (1 unknown)"
+    assert "not read as safe" in consensus["evidence"]["survival"]
+
+
+def test_all_four_lenses_unknown_is_zero_of_four(inversion_layer):
+    result = scorecard.consensus({"band": "NO PRICE", "pct": 90}, None, None,
+                                 inversion_result=inverted("Unknown", modes=()))
+    assert result["lenses"] == {"scorecard": None, "margin_of_safety": None,
+                                "buffett": None, "survival": None}
+    assert result["green"] == 0 and result["of"] == 4
+    assert result["label"] == "0 of 4 (4 unknown)"
+
+
+def test_exceptional_and_fragile_are_both_rendered_never_reconciled(inversion_layer):
+    """§5: 'A name can be Exceptional and Fragile at once — that pairing is the most useful
+    thing this layer produces, and it must be visible rather than reconciled away.'"""
+    plain, judged = both_cards(wonderful(), inverted("Fragile"))
+    assert plain["band"] == "Exceptional" and plain["pct"] >= 80
+    assert judged["band"] == "Exceptional"                   # the score is not talked down
+    assert judged["pct"] == plain["pct"] and judged["score"] == plain["score"]
+    assert judged["inversion"]["verdict"] == "Fragile"       # ... nor is the verdict hidden
+    assert judged["inversion"]["failure_modes"] == [
+        "the cash engine fell 89% from its peak in 2010"]
+    assert judged["consensus"]["lenses"]["survival"] is False
+    assert judged["consensus"]["evidence"]["survival"] == (
+        "inversion Fragile — the cash engine fell 89% from its peak in 2010")
+    assert any("Fragile" in note for note in judged["notes"])
+
+
+def test_the_attached_card_keeps_the_probes_and_cannot_be_mutated_from_outside(
+        inversion_layer):
+    result = inverted("Ruinous")
+    _, judged = both_cards(wonderful(), result)
+    assert judged["inversion"]["probes"] == result["probes"]     # the evidence rides along
+    assert judged["inversion"]["coverage"] == result["coverage"]
+    result["verdict"] = "Robust"
+    result["failure_modes"].append("invented later")
+    assert judged["inversion"]["verdict"] == "Ruinous"
+    assert judged["inversion"]["failure_modes"] == [
+        "the cash engine fell 89% from its peak in 2010"]
+
+
+def test_a_result_naming_no_verdict_is_unknown_not_blank(inversion_layer):
+    _, judged = both_cards(wonderful(), {"probes": {}, "coverage": {}})
+    assert judged["inversion"]["verdict"] == scorecard.INVERSION_UNKNOWN == "Unknown"
+    assert judged["inversion"]["failure_modes"] == []
+    assert judged["consensus"]["lenses"]["survival"] is None
+
+
+def test_the_inversion_layer_owns_the_verdict_to_lens_judgement(monkeypatch):
+    """scorecard.py asks; it does not decide. A layer calling a Ruinous name a survivor is
+    the layer's business — this module reports what it was told."""
+    module = types.ModuleType("inversion")
+    module.consensus_lens = lambda result: True
+    monkeypatch.setitem(sys.modules, "inversion", module)
+    assert scorecard.survival_lens(inverted("Ruinous")) is True
+
+
+def test_a_verdict_only_consensus_lens_is_also_accepted(monkeypatch):
+    """The call shape is the other module's to define; both are handled at the seam."""
+    module = types.ModuleType("inversion")
+
+    def consensus_lens(verdict):
+        if not isinstance(verdict, str):
+            raise TypeError("consensus_lens takes a verdict")
+        return verdict == "Robust"
+
+    module.consensus_lens = consensus_lens
+    monkeypatch.setitem(sys.modules, "inversion", module)
+    assert scorecard.survival_lens(inverted("Robust")) is True
+    assert scorecard.survival_lens(inverted("Ruinous")) is False
+
+
+def test_a_consensus_lens_that_raises_costs_the_lens_not_the_run(monkeypatch):
+    """The layer ships separately, and grade.run calls scorecard() BARE — unlike
+    inversion_for, which wraps its own call. So an exception out of consensus_lens here
+    would take the whole grading run down mid-loop, before anything is written. It must
+    cost this card its fourth lens and nothing more."""
+    module = types.ModuleType("inversion")
+
+    def consensus_lens(_):
+        raise ValueError("a probe blew up in the lens")
+
+    module.consensus_lens = consensus_lens
+    monkeypatch.setitem(sys.modules, "inversion", module)
+    assert scorecard.survival_lens(inverted("Robust")) is True      # the §4 table answers
+    assert scorecard.survival_lens(inverted("Ruinous")) is False
+    card = scorecard.scorecard(wonderful(), inversion_result=inverted("Ruinous"))
+    assert card["consensus"]["lenses"]["survival"] is False
+
+
+def test_without_the_inversion_module_the_lens_falls_back_to_the_published_verdicts(
+        no_inversion_layer):
+    """scorecard.py must import and score with no inversion.py on the path at all; where a
+    verdict was supplied anyway, the §4 verdict table answers — and an unrecognised verdict
+    is None, never a comforting True."""
+    assert scorecard.survival_lens(inverted("Robust")) is True
+    assert scorecard.survival_lens(inverted("Ordinary")) is True
+    assert scorecard.survival_lens(inverted("Fragile")) is False
+    assert scorecard.survival_lens(inverted("Ruinous")) is False
+    assert scorecard.survival_lens(inverted("Unknown")) is None
+    assert scorecard.survival_lens(inverted("something else entirely")) is None
+    assert scorecard.survival_lens(None) is None and scorecard.survival_lens({}) is None
+    plain, judged = both_cards(wonderful(), inverted("Ruinous"))
+    assert judged["consensus"]["lenses"]["survival"] is False
+    assert judged["score"] == plain["score"]
+
+
+def test_the_consensus_constants_say_which_lenses_are_always_there(inversion_layer):
+    assert scorecard.CONSENSUS_SURVIVAL_LENS == "survival"
+    assert scorecard.CONSENSUS_SURVIVAL_LENS not in scorecard.CONSENSUS_LENSES
+    assert scorecard.CONSENSUS_LENSES_ALL == (
+        scorecard.CONSENSUS_LENSES + (scorecard.CONSENSUS_SURVIVAL_LENS,))
+    # The §4 verdict table, whole, with Unknown mapping to unknown rather than to safe.
+    assert set(scorecard.INVERSION_SURVIVES) == {
+        "robust", "ordinary", "fragile", "ruinous", "unknown"}
+    assert scorecard.INVERSION_SURVIVES["unknown"] is None
+    _, judged = both_cards(wonderful(), inverted("Robust"))
+    assert tuple(judged["consensus"]["lenses"]) == scorecard.CONSENSUS_LENSES_ALL
+
+
+def test_rank_key_and_the_evidence_tier_ignore_the_verdict(inversion_layer):
+    """§2 again, on the ordering side: the layer names the failure mode and leaves the
+    decision to the human — it does not suppress, and it does not quietly re-rank either."""
+    bundle = wonderful()
+    row = scoring.score_universe([bundle])[0]
+    plain = scorecard.scorecard(bundle, scored_row=row)
+    ruinous = scorecard.scorecard(bundle, scored_row=row,
+                                  inversion_result=inverted("Ruinous"))
+    robust = scorecard.scorecard(bundle, scored_row=row,
+                                 inversion_result=inverted("Robust"))
+    assert scorecard.rank_key(ruinous) == scorecard.rank_key(robust) == \
+        scorecard.rank_key(plain)
+    assert ruinous["evidence"] == robust["evidence"] == plain["evidence"] == "full"
+    assert scorecard.evidence_tier(ruinous["available_max"]) == "full"
 
 
 # --- §2/§6 stability: the core claim of the redesign -------------------------------------

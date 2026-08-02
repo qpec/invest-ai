@@ -655,6 +655,42 @@ pre-registered criterion: beat the equal-weight pool on the blind half with lowe
 report both halves, v3 vs v2 vs pool vs SPY, turnover, max drawdown. `--cohorts` (msg 55):
 fresh-ranked quality cohorts 1-15 / 16-50 / 51-100 / 101+ per period, no gates.
 
+### 5.12 The inversion layer (`inversion.py`, **`docs/INVERSION-DESIGN.md`**)
+Munger's pillar as a lens of its own: seven deterministic probes over the §3.6 weekly
+price grid and the annual filings answering *"how would this lose my money?"* — the
+question the scorecard's three lenses share a blind spot on. That document is the spec
+(§3 probes, §4 verdicts, §5 where it appears, §6 the optional gate, §7 limits); this is
+only the map of what it touches here.
+
+- **New §3.3 row key `inversion`** — the verdict (`Ruinous` / `Fragile` / `Ordinary` /
+  `Robust` / `Unknown`) with its failure modes, probes, coverage and notes, or `null`.
+  `scorecard.scorecard(..., inversion_result=…)` attaches the same projection under
+  `scorecard.inversion` and adds the **survival** lens, so consensus reads `n/4` where the
+  layer had an answer and `n/3` where it did not — both honest numbers.
+- **It moves no points** (design §2): `score`, `available_max`, `pct`, `band`, every block
+  and the evidence tier are bit-for-bit what they are without a verdict. Fragility sits
+  beside the score, never inside it.
+- **`grade.py --prices <dir>`** (default `bt_cache/prices`) supplies the weekly grids;
+  `inversion.py` is imported lazily. No prices, no module, a probe that raises, or a
+  verdict that will not serialize → no verdict, the reason counted and named in the
+  report. Price-less names are the norm (~470 of the export), not a failure.
+- **Report** — a `fragiliteit` column beside the score, present only when the run produced
+  verdicts, plus `## Sterk maar fragiel`: the names that are Exceptional or Strong **yet**
+  Fragile or Ruinous, with their failure modes. Design §5 calls that pairing the most
+  useful thing the layer produces, so it gets a heading rather than a cell. An empty
+  section is printed as an outcome, not omitted.
+- **Datasheet** — per name the verdict, the failure modes, every probe with its value and
+  severity, and a coverage line **naming** the probes that were not measured (§3.7: silence
+  is not safety).
+- **The optional gate `--fragility-gate`** (design §6, `formation.update(...,
+  fragility_gate=True)`) — a `Ruinous` verdict blocks **entry**: the name leaves the entry
+  pool, so it can neither bootstrap-seat nor be promoted, stays on the bench carrying the
+  verdict that blocked it, and is never sold on account of it. **Off by default**, because
+  the v3 entry rules earned their place through the blind walk-forward of msgs 49-50 and
+  this layer has no such evidence; with the gate off `update()` does not read the verdicts
+  at all and its output is unchanged. Validating it is the same exercise as before: re-run
+  the walk-forward with the gate on against the pre-registered criterion.
+
 ---
 
 ## 6. Reconstruction decisions the history does not fully pin (documented deviations)
@@ -762,6 +798,32 @@ quality profile and explicitly **not** a verdict, i.e. the entire scorecard with
     silently wrong number. Files from different sources coexist, each declaring its own basis,
     and an absent declaration means `"raw"`, so every pre-existing cache keeps its original
     meaning exactly.
+
+**The inversion layer, and what running it revealed (2026-08-02).** `docs/INVERSION-DESIGN.md`
+covers the layer itself; two of its findings are data-layer deviations and belong here.
+
+18. **Point disclosures reach the Bundle by their own path** (§5.9) — the layer's §3.6
+    refinancing wall and §3.7 concentration flag read EDGAR tags
+    (`LongTermDebtMaturitiesRepaymentsOfPrincipalInNextTwelveMonths`,
+    `ConcentrationRiskPercentage1`) that 66% and 11% of these filers do tag — but which the
+    observations export carries no series for, being outside its 19 curated tags. Both probes
+    therefore measured **zero** names while their provenance claimed 66% and 11% coverage. They
+    are now folded from the tag index into a new `disclosures` block on the Bundle
+    (`pit._DISCLOSURE_CONCEPTS`, `secsv.DISCLOSURE_TAGS`), deliberately **not** into
+    `_BALANCE_CONCEPTS`: `_section` unions every label onto one set of period ends and
+    `scoring._latest_balance` reads `bal[max(bal)]`, so a disclosure whose `end` post-dated the
+    newest real balance date would silently become the entire latest-balance payload — cash,
+    debt, current ratio and ROIC all replaced by one tag. In their own block they reach exactly
+    their own consumer and the balance section is bit-for-bit unchanged. The wall now runs for
+    1,146 of 1,904 names. Each disclosure keeps its `end` and `filed`, which is what lets §3.7
+    say a flag was last tagged in 2017 instead of presenting it as current.
+19. **A tagged concentration of exactly 100% is refused** (§3.7) — `ConcentrationRiskPercentage1`
+    carries no axis member in this export, so a single-customer disclosure and the *total* row
+    of a disaggregation table are indistinguishable, and 51 of the 212 filers that tag it at all
+    tag exactly 1.0. Scored naively that is "one customer is 100% of revenue" for AMKR, AXON,
+    BMI, DDS and 47 others — the loudest false finding available on the one probe whose entire
+    job is to be believed when it speaks. Refused and named, in the same discipline as the
+    dilution leg's `max_share_change`.
 
 ---
 

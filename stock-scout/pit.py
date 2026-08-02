@@ -91,6 +91,22 @@ _BALANCE_CONCEPTS = {
 }
 _SHARES_TAG = "EntityCommonStockSharesOutstanding"
 
+# Point DISCLOSURES — single facts the inversion layer reads (§3.6's refinancing wall and
+# §3.7's concentration flag) and nothing else does. They are deliberately NOT in
+# _BALANCE_CONCEPTS: `_section` unions every label onto one set of period ends and
+# `scoring._latest_balance` reads `bal[max(bal)]`, so a disclosure whose `end` post-dates
+# the newest real balance date would silently become the entire latest-balance payload —
+# cash, debt, current ratio and ROIC all replaced by one tag. In their own dict they reach
+# exactly their own consumer, and the balance section is bit-for-bit what it was.
+_DISCLOSURE_CONCEPTS = {
+    # "Long-Term Debt, Maturity, Year One" — tagged by ~66% of the filers in the 2026 SEC
+    # export, median end 2025-12-31. This is §3.6's "debt due within twelve months".
+    "debt_due_12m": ("LongTermDebtMaturitiesRepaymentsOfPrincipalInNextTwelveMonths",),
+    # "Concentration Risk, Percentage" — ~11% of filers and MEDIAN END 2017-12-30. Carried
+    # with its date attached precisely because it is that stale (§3.7 flags, never scores).
+    "concentration_risk": ("ConcentrationRiskPercentage1",),
+}
+
 
 def _iso(d) -> str:
     """ISO-string normalization for date-or-str inputs (all §5.9 comparisons are ISO)."""
@@ -125,6 +141,44 @@ def _latest_filed(entries: list, as_of: str, *, instant: bool) -> dict:
         if key not in best or filed >= best[key][0]:
             best[key] = (filed, float(val))
     return {key: val for key, (_, val) in best.items()}
+
+
+def _point_disclosure(facts: dict, tags: tuple, as_of: str) -> dict | None:
+    """The newest point in a disclosure chain as it was knowable on as_of: entries filed
+    <= as_of only, newest `end` wins, and a later `filed` on the same `end` (a restatement)
+    breaks the tie — the same §5.9 discipline as `_latest_filed`, applied across every unit
+    the tag was reported in rather than only the USD/shares one (`ConcentrationRiskPercent-
+    age1` is reported in `pure`).
+
+    Unlike `_latest_filed` this KEEPS the provenance. A disclosure whose `end` is nine
+    years old has to be readable as nine years old — the concentration tag's median end in
+    the 2026 export is 2017-12-30 — so the consumer can say how stale it is instead of
+    presenting a 2017 fact as a description of the business today."""
+    best = None
+    for tag in tags:
+        units = (((facts.get("facts") or {}).get("us-gaap") or {}).get(tag)
+                 or {}).get("units") or {}
+        for unit, entries in units.items():
+            for entry in entries or []:
+                filed, end, val = entry.get("filed"), entry.get("end"), entry.get("val")
+                if filed is None or end is None or val is None or filed > as_of:
+                    continue
+                if best is None or (end, filed) > (best["end"], best["filed"]):
+                    best = {"value": float(val), "end": end, "filed": filed,
+                            "form": entry.get("form"), "tag": tag, "unit": unit}
+    return best
+
+
+def disclosures(facts: dict, as_of: str) -> dict:
+    """The §4.1 Bundle's `disclosures` block: one dated point per _DISCLOSURE_CONCEPTS
+    label, absent entirely when the filer never tagged it. Absence is the honest shape —
+    a missing key reads as "not disclosed", never as a zero."""
+    out = {}
+    for label, tags in _DISCLOSURE_CONCEPTS.items():
+        point = _point_disclosure(facts, tags, _iso(as_of))
+        if point is not None:
+            out[label] = point
+    return out
 
 
 def _merge_chain(facts: dict, tags: tuple, as_of: str, *, instant: bool) -> dict:
@@ -643,6 +697,7 @@ def as_of_bundle(facts: dict, symbol: str, meta: dict, as_of, prices: dict,
         "yahoo_ev": None, "price": px,
         "shares_series": series, "shares_basis": shares_basis,
         "splits": splits_as_of((splits or {}).get(symbol) or {}, as_of),
+        "disclosures": disclosures(facts, as_of),
         "annual": {"income": annual_income,
                    "balance": {end: payload for end, payload in balance.items()
                                if end in annual_income},

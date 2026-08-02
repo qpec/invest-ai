@@ -3,7 +3,13 @@
 grades JSON schema (incl. the Owner's Scorecard per graded name), report md sections
 (the banded scorecard tables that now lead the report, "hoe je dit leest", the
 segregation of NO PRICE/VETOED names, De Formatie, veto breakdown, NL call-out),
-formation-state.json creation and same-date idempotence. No network, no real caches."""
+formation-state.json creation and same-date idempotence. No network, no real caches.
+
+The last section covers the inversion layer's seam (docs/INVERSION-DESIGN.md §5, §6): the
+§3.6 price grids, the lazily-imported and separately-shipped `inversion.py` (stubbed in
+sys.modules throughout — this suite pins grade.py's side of the seam, never the other
+module's verdicts), the fragility column, the "Sterk maar fragiel" section, every way the
+layer can be absent or fail, and the optional --fragility-gate."""
 from __future__ import annotations
 
 import argparse
@@ -32,7 +38,7 @@ LEG_IDS = ("v_yield", "q_roic", "q_gm", "q_ofcf_margin", "g_revenue", "g_ps_ofcf
            "d_net_debt", "d_self_funding", "d_sbc", "m_shares", "m_accruals")
 NAME_KEYS = {"symbol", "name", "sector", "industry", "tier", "grade", "composite",
              "quality_score", "pillars", "legs", "veto", "flags", "ev", "ttm",
-             "mos", "buffett", "scorecard"}
+             "mos", "buffett", "scorecard", "inversion"}
 SCORECARD_KEYS = {"score", "available_max", "pct", "band", "band_meaning", "blocks",
                   "metrics", "why", "consensus", "coverage", "evidence", "veto", "notes"}
 
@@ -558,3 +564,369 @@ def test_newest_datasheet_picked_by_date(tmp_path):
     (tmp_path / "datasheet-2026-07-30.html").write_text("b", encoding="utf-8")
     (tmp_path / "datasheet-junk.html").write_text("c", encoding="utf-8")
     assert grade.newest_datasheet(tmp_path).name == "datasheet-2026-07-30.html"
+
+
+# ============================ the inversion layer (docs/INVERSION-DESIGN.md) =============
+#
+# grade.py's side of the seam only: it asks inversion.py how a name breaks, stores the
+# answer on the §3.3 row, hands it to the scorecard and RENDERS it. What a verdict should
+# be is the other module's business — it is written and shipped separately, so every test
+# below stubs it in sys.modules and pins this module's behaviour, never its verdicts.
+
+import sys
+import types
+
+import pit
+
+STUB_SURVIVES = {"Robust": True, "Ordinary": True, "Fragile": False, "Ruinous": False,
+                 "Unknown": None}
+
+
+def price_bars(n: int = 60) -> dict:
+    """A §3.6 weekly grid: {"YYYY-MM-DD": {"close": …, "adj_close": …}}."""
+    return {f"2025-{1 + i // 4:02d}-{1 + 7 * (i % 4):02d}":
+            {"close": 100.0 + i, "adj_close": 99.0 + i} for i in range(n)}
+
+
+def inversion_result(verdict="Fragile", modes=("de kasmotor viel 89% terug vanaf 2010",)):
+    """What inversion.inversion() hands back (§3-§4): verdict, failure modes in plain
+    language, the probes behind them, coverage and notes."""
+    return {"verdict": verdict, "failure_modes": list(modes),
+            "probes": {"price_drawdown": {"id": "price_drawdown", "severity": "severe",
+                                         "measured": True, "value": -0.716},
+                       "cash_engine": {"id": "cash_engine", "severity": "severe",
+                                       "measured": True, "value": -0.89},
+                       "concentration": {"id": "concentration", "severity": "none",
+                                         "measured": False, "value": None}},
+            "coverage": {"measured_counting": 5, "counting_total": 6, "thin": False,
+                         "required_missing": [], "flagged": []},
+            "notes": ["concentratie niet getagd door deze filer — stilte is geen "
+                      "veiligheid"]}
+
+
+@pytest.fixture()
+def inversion_layer(monkeypatch):
+    """A stand-in for inversion.py. `verdicts` maps symbol -> verdict; a symbol that is not
+    in it gets the module's default. `calls` records what the seam actually passed."""
+    module = types.ModuleType("inversion")
+    module.verdicts = {}
+    module.default = "Robust"
+    module.calls = []
+
+    def inversion(bundle, bars):
+        module.calls.append((bundle["symbol"], len(bars)))
+        return inversion_result(module.verdicts.get(bundle["symbol"], module.default))
+
+    module.inversion = inversion
+    module.consensus_lens = lambda result: STUB_SURVIVES[result["verdict"]]
+    monkeypatch.setitem(sys.modules, "inversion", module)
+    return module
+
+
+@pytest.fixture()
+def priced(rundir):
+    """The same run directory, plus §3.6 weekly grids for three of the six names — so one
+    run exercises both halves: names with price history and names without."""
+    prices = rundir / "prices"
+    prices.mkdir()
+    for symbol in ("AAA", "BBB", "CCC"):
+        (prices / f"{symbol}.json").write_text(
+            json.dumps(pit.price_file(symbol, price_bars())), encoding="utf-8")
+    return rundir
+
+
+def graded_rows(doc):
+    return {r["symbol"]: r for r in doc["names"] if r["grade"] in grade.GRADE_LETTERS}
+
+
+def run_priced(rundir, *extra):
+    assert grade.main(["--date", RUN_DATE, "--prices", "prices", *extra]) == 0
+    doc = json.loads((rundir / "reports" / f"scout-grades-{RUN_DATE}.json")
+                     .read_text(encoding="utf-8"))
+    md = (rundir / "reports" / f"scout-run-{RUN_DATE}.md").read_text(encoding="utf-8")
+    return doc, md
+
+
+# ------------------------------------------------------------------- the price seam
+
+def test_load_price_bars_reads_the_36_grids_and_names_the_torn_ones(priced):
+    bars, unreadable = grade.load_price_bars(priced / "prices",
+                                             ["AAA", "BBB", "CCC", "PHIA.AS"])
+    assert set(bars) == {"AAA", "BBB", "CCC"}          # PHIA.AS has no file: not an error
+    assert unreadable == []
+    assert len(bars["AAA"]) == 60
+    assert bars["AAA"]["2025-01-01"] == {"close": 100.0, "adj_close": 99.0}
+    (priced / "prices" / "BBB.json").write_text('{"bars": {"2025-01-0', encoding="utf-8")
+    bars, unreadable = grade.load_price_bars(priced / "prices", ["AAA", "BBB"])
+    assert set(bars) == {"AAA"}
+    assert [u["symbol"] for u in unreadable] == ["BBB"]
+    assert "corrupte JSON" in unreadable[0]["reason"]
+
+
+def test_load_price_bars_without_a_directory_is_silent_not_an_error(tmp_path):
+    assert grade.load_price_bars(None, ["AAA"]) == ({}, [])
+    assert grade.load_price_bars(tmp_path / "nope", ["AAA"]) == ({}, [])
+
+
+@pytest.mark.parametrize("signature, expected", [
+    (lambda bundle, bars: None, True),                     # second positional slot
+    (lambda bundle, *, prices=None: None, "prices"),       # keyword-only, known name
+    (lambda bundle, *, weekly=None: None, "weekly"),
+    (lambda bundle: None, None),                           # bundle-only: ask for nothing
+])
+def test_the_price_argument_is_read_off_the_other_modules_signature(signature, expected):
+    """inversion.py owns its own signature; this seam reads it rather than assuming it."""
+    assert grade._price_parameter(signature) == expected
+
+
+def test_a_bundle_only_inversion_is_called_with_the_bundle_alone(monkeypatch):
+    module = types.ModuleType("inversion")
+    seen = []
+    module.inversion = lambda bundle: seen.append(bundle["symbol"]) or {"verdict": "Robust"}
+    monkeypatch.setitem(sys.modules, "inversion", module)
+    result, skip = grade.inversion_for({"symbol": "AAA"}, price_bars())
+    assert (result, skip) == ({"verdict": "Robust"}, None) and seen == ["AAA"]
+
+
+@pytest.mark.parametrize("signature, expected", [
+    (lambda bundle, *, prices=None, scored_row=None: None, "scored_row"),
+    (lambda bundle, *, prices=None, row=None: None, "row"),
+    (lambda bundle, *, prices=None: None, None),           # does not ask: not offered
+    (lambda bundle, bars: None, None),
+])
+def test_the_scored_row_is_offered_only_when_the_layer_asks_for_it(signature, expected):
+    assert grade._row_parameter(signature) == expected
+
+
+def test_the_row_this_runner_scored_is_handed_to_a_layer_that_wants_it(monkeypatch):
+    """inversion.inversion() documents `scored_row` as how the two layers agree about a
+    SHARE_CLASS name instead of deciding separately. Never passing it made the agreement a
+    coincidence of re-running scoring.evaluate() per priced name."""
+    module = types.ModuleType("inversion")
+    seen = {}
+
+    def inversion(bundle, *, prices=None, scored_row=None):
+        seen["row"] = scored_row
+        return {"verdict": "Robust"}
+
+    module.inversion = inversion
+    monkeypatch.setitem(sys.modules, "inversion", module)
+    row = {"symbol": "AAA", "flags": [{"code": "SHARE_CLASS", "message": "x"}]}
+    result, skip = grade.inversion_for({"symbol": "AAA"}, price_bars(), row)
+    assert (result, skip) == ({"verdict": "Robust"}, None)
+    assert seen["row"] is row
+
+
+def test_the_real_layer_reuses_the_row_instead_of_rescoring(monkeypatch, inversion_layer):
+    """End to end on the real module: scoring.evaluate must not be asked the same question
+    a second time for a name that already has a scored row."""
+    import inversion as real_inversion
+    import scoring
+    monkeypatch.setitem(sys.modules, "inversion", real_inversion)
+    calls = []
+    real_evaluate = scoring.evaluate
+    monkeypatch.setattr(scoring, "evaluate",
+                        lambda b: calls.append(b.get("symbol")) or real_evaluate(b))
+    row = {"symbol": "AAA", "flags": []}
+    result, skip = grade.inversion_for({"symbol": "AAA"}, price_bars(), row)
+    assert skip is None and result["verdict"]
+    assert calls == []
+
+
+# ------------------------------------------------- the verdict on the row and the card
+
+def test_a_graded_name_with_prices_carries_a_verdict_on_the_row_and_on_the_card(
+        priced, inversion_layer):
+    inversion_layer.verdicts = {"AAA": "Fragile"}
+    doc, _ = run_priced(priced)
+    rows = graded_rows(doc)
+    assert rows["AAA"]["inversion"]["verdict"] == "Fragile"
+    assert rows["AAA"]["scorecard"]["inversion"]["verdict"] == "Fragile"
+    assert rows["AAA"]["scorecard"]["inversion"]["failure_modes"] == [
+        "de kasmotor viel 89% terug vanaf 2010"]
+    assert rows["AAA"]["scorecard"]["inversion"]["probes"]["price_drawdown"]["value"] \
+        == -0.716
+    assert {c[0] for c in inversion_layer.calls} == {"AAA", "BBB", "CCC"}
+    assert rows["PHIA.AS"]["inversion"] is None        # no grid -> no verdict, no noise
+    assert "inversion" not in rows["PHIA.AS"]["scorecard"]
+
+
+def test_a_vetoed_name_is_never_asked_for_a_verdict(priced, inversion_layer):
+    doc, _ = run_priced(priced)
+    vetx = next(r for r in doc["names"] if r["symbol"] == "VETX")
+    assert vetx["inversion"] is None and vetx["scorecard"] is None
+    assert "VETX" not in {c[0] for c in inversion_layer.calls}
+
+
+def test_a_verdict_adds_the_fourth_lens_and_moves_not_one_point(priced, inversion_layer):
+    """INVERSION-DESIGN §2: Munger's lens sits BESIDE the score. The same run scored with
+    and without it must produce the identical points, blocks, band and evidence tier."""
+    plain, _ = run_priced(priced, "--prices", "geen-prijzen")
+    inversion_layer.verdicts = {"AAA": "Ruinous"}
+    judged, _ = run_priced(priced)
+    before, after = graded_rows(plain)["AAA"], graded_rows(judged)["AAA"]
+    for key in ("score", "available_max", "pct", "band", "blocks", "metrics", "why",
+                "coverage", "evidence"):
+        assert after["scorecard"][key] == before["scorecard"][key], key
+    assert before["scorecard"]["consensus"]["of"] == 3          # three lenses without...
+    assert after["scorecard"]["consensus"]["of"] == 4           # ...four with
+    assert after["scorecard"]["consensus"]["lenses"]["survival"] is False
+
+
+def test_the_grades_json_survives_a_verdict(priced, inversion_layer):
+    """§3.3 is written with allow_nan=False; the verdict must round-trip through it."""
+    doc, _ = run_priced(priced)
+    text = (priced / "reports" / f"scout-grades-{RUN_DATE}.json").read_text(
+        encoding="utf-8")
+    assert json.loads(text)["names"] == doc["names"]
+
+
+# ------------------------------------------------------------------ degrading gracefully
+
+def test_without_price_grids_the_report_is_the_one_it_has_always_been(rundir,
+                                                                      inversion_layer):
+    """The ~470 price-less names are the norm, not a degraded case: no verdict, no fourth
+    lens, no fragility column, and not one extra em dash in the table."""
+    assert grade.main(["--date", RUN_DATE]) == 0
+    md = (rundir / "reports" / f"scout-run-{RUN_DATE}.md").read_text(encoding="utf-8")
+    doc = json.loads((rundir / "reports" / f"scout-grades-{RUN_DATE}.json")
+                     .read_text(encoding="utf-8"))
+    assert all(r["inversion"] is None for r in doc["names"])
+    assert inversion_layer.calls == []
+    section = _section(md, "Scorecard — absolute punten")
+    header = next(ln for ln in section.splitlines() if ln.startswith("| symbool"))
+    assert "fragiliteit" not in header
+    assert "## Sterk maar fragiel" not in md
+    assert "Inversielaag" not in md
+    for row in doc["names"]:
+        if row["scorecard"]:
+            assert "inversion" not in row["scorecard"]
+
+
+def test_an_absent_inversion_module_is_named_never_fatal(priced, monkeypatch):
+    """`None` in sys.modules makes `import inversion` raise ImportError — exactly what an
+    older checkout does. The run completes and the report says why there are no verdicts."""
+    monkeypatch.setitem(sys.modules, "inversion", None)
+    doc, md = run_priced(priced)
+    assert all(r["inversion"] is None for r in doc["names"])
+    assert "inversion.py niet geïnstalleerd" in md
+    assert "namen met prijsdata maar zonder verdict: 3" in md
+    assert "AAA, BBB, CCC" in md
+
+
+def test_a_probe_that_raises_is_named_and_the_run_still_completes(priced, monkeypatch):
+    module = types.ModuleType("inversion")
+
+    def boom(bundle, bars):
+        raise ZeroDivisionError("flat series")
+
+    module.inversion = boom
+    monkeypatch.setitem(sys.modules, "inversion", module)
+    doc, md = run_priced(priced)
+    assert doc["graded"] == 5                                   # the run is untouched
+    assert all(r["inversion"] is None for r in doc["names"])
+    assert "ZeroDivisionError: flat series" in md
+
+
+def test_a_verdict_that_cannot_be_serialized_is_dropped_and_named(priced, monkeypatch):
+    """A NaN out of a probe would otherwise kill the §3.3 write at the very last step —
+    after the whole run. It is dropped and NAMED, never repaired into a comforting number."""
+    module = types.ModuleType("inversion")
+    module.inversion = lambda bundle, bars: {"verdict": "Robust",
+                                             "probes": {"skew": float("nan")}}
+    monkeypatch.setitem(sys.modules, "inversion", module)
+    doc, md = run_priced(priced)
+    assert all(r["inversion"] is None for r in doc["names"])
+    assert "niet serialiseerbaar" in md
+
+
+def test_a_layer_returning_something_other_than_a_dict_is_refused(priced, monkeypatch):
+    module = types.ModuleType("inversion")
+    module.inversion = lambda bundle, bars: "Ruinous"
+    monkeypatch.setitem(sys.modules, "inversion", module)
+    doc, md = run_priced(priced)
+    assert all(r["inversion"] is None for r in doc["names"])
+    assert "gaf str terug, geen dict" in md
+
+
+# ------------------------------------------------------------------ the report surface
+
+def test_the_report_gains_a_fragility_column_beside_the_score(priced, inversion_layer):
+    inversion_layer.verdicts = {"AAA": "Fragile", "BBB": "Unknown"}
+    inversion_layer.default = "Robust"
+    _, md = run_priced(priced)
+    section = _section(md, "Scorecard — absolute punten")
+    header = next(ln for ln in section.splitlines() if ln.startswith("| symbool"))
+    cols = [c.strip() for c in header.strip("|").split("|")]
+    assert cols == ["symbool", "naam", "score", "band", "fragiliteit", "consensus",
+                    "Q", "P", "S", "St", "flags", "rang in sector (context)"]
+    cells = {ln.split("|")[1].strip(): [c.strip() for c in ln.strip("|").split("|")]
+             for ln in section.splitlines() if ln.startswith("| ") and "symbool" not in ln}
+    assert cells["AAA"][2].startswith("68/100")        # the score still leads...
+    assert cells["AAA"][4] == "Fragile"                # ...with the verdict beside it
+    assert cells["BBB"][4] == "Unknown"                # said out loud, never blank
+    assert cells["CCC"][4] == "Robust"
+    assert cells["PHIA.AS"][4] == "—"                  # no grid: an absent lens
+    assert cells["AAA"][5] == "2/4"                    # the fourth lens joined the count...
+    assert cells["PHIA.AS"][5] == "2/3"                # ...only where it was consulted
+
+
+def test_exceptional_or_strong_yet_fragile_gets_its_own_heading(priced, inversion_layer):
+    """§5: the pairing is 'the most useful thing this layer produces' — so it is a section,
+    not a cell somewhere in a wide table."""
+    inversion_layer.verdicts = {"AAA": "Ruinous", "BBB": "Fragile", "CCC": "Robust"}
+    _, md = run_priced(priced)
+    section = _section(md, "Sterk maar fragiel (2)")
+    assert "**AAA**" in section and "Ruinous" in section
+    assert "**BBB**" in section and "Fragile" in section
+    assert "CCC" not in section                        # Robust is not fragile
+    assert "PHIA.AS" not in section                    # no verdict is not a verdict
+    assert "- de kasmotor viel 89% terug vanaf 2010" in section
+    assert "Strong" in section and "68/100" in section  # score and band, not reconciled
+    assert md.index("## Sterk maar fragiel") > md.index("## Scorecard — absolute punten")
+    assert md.index("## Sterk maar fragiel") < md.index("## Zonder band")
+
+
+def test_no_fragile_top_name_is_an_outcome_not_a_blank(priced, inversion_layer):
+    inversion_layer.default = "Robust"
+    _, md = run_priced(priced)
+    section = _section(md, "Sterk maar fragiel (0)")
+    assert "dat is een uitkomst, geen leegte" in section
+
+
+def test_the_how_to_read_block_explains_fragility_only_when_it_is_there(priced,
+                                                                       inversion_layer):
+    _, md = run_priced(priced)
+    head = grade.summary_head(md)
+    assert "Fragiliteit staat NAAST de score" in head          # rides to Telegram too
+    assert "Unknown" in head
+    assert "Inversielaag (INVERSION-DESIGN): 3 van 5" in md
+    assert "Robust 3" in md
+
+
+def test_the_counting_line_never_counts_a_price_less_name_as_a_failure(priced,
+                                                                      inversion_layer):
+    _, md = run_priced(priced)
+    assert "maar zonder verdict" not in md          # PHIA.AS/FLGX had no grid
+
+
+# ------------------------------------------- the OPTIONAL formation gate (§6) from grade.py
+
+def test_the_fragility_gate_is_off_by_default_and_reachable_by_flag(priced,
+                                                                   inversion_layer):
+    """grade.py exposes §6's gate; the default run must seat exactly what it always did."""
+    inversion_layer.verdicts = {"AAA": "Ruinous"}
+    doc, md = run_priced(priced)
+    state = doc["formation"]
+    assert "AAA" in {m["symbol"] for m in state["squad"]}      # default: v3 rules untouched
+    assert "fragility_gate" not in state
+    assert "Fragiliteitspoort" not in md
+
+    (priced / "formation-state.json").unlink()
+    doc, md = run_priced(priced, "--fragility-gate")
+    state = doc["formation"]
+    assert "AAA" not in {m["symbol"] for m in state["squad"]}  # blocked at the door
+    assert {b["symbol"]: b.get("blocked") for b in state["bench"]} == {"AAA": "Ruinous"}
+    assert state["fragility_gate"] == "Ruinous"
+    assert "geblokkeerd door de fragiliteitspoort (Ruinous)" in md
+    assert "Fragiliteitspoort AAN" in md

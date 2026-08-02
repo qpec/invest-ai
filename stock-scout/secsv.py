@@ -101,6 +101,15 @@ INSTANT_TAGS = frozenset(
     tag for chain in pit._BALANCE_CONCEPTS.values() for tag in chain
 ).union(_PIT_EXTRA_INSTANT_TAGS, {pit._SHARES_TAG})
 
+# pit's point-disclosure chains (§3.6's refinancing wall, §3.7's concentration flag). The
+# observations file carries only 19 curated tags and neither of these is among them, so
+# without this fold both probes are unmeasurable for every name in the export — which is
+# exactly what they were. Folded they reach `pit.disclosures` and NOTHING else: a
+# disclosure tag is not in _BALANCE_CONCEPTS, so it cannot enter the balance section.
+DISCLOSURE_TAGS = frozenset(
+    tag for chain in pit._DISCLOSURE_CONCEPTS.values() for tag in chain)
+FOLDED_TAGS = INSTANT_TAGS | DISCLOSURE_TAGS
+
 # --prices column inference: normalized (lowercased, non-alphanumerics dropped) names.
 _SYMBOL_ALIASES = ("symbol", "ticker", "sym")
 _DATE_ALIASES = ("date", "day", "week", "weekend", "weekending", "weekended",
@@ -228,7 +237,7 @@ def load_facts(data_dir: str | Path, symbols=None,
 
 def merge_tag_index(facts: dict[str, dict], data_dir: str | Path, symbols=None,
                     chunksize: int = DEFAULT_CHUNKSIZE,
-                    tags: frozenset | set | None = INSTANT_TAGS) -> dict[str, dict]:
+                    tags: frozenset | set | None = FOLDED_TAGS) -> dict[str, dict]:
     """Fold the tag-index's latest-observation rows into `facts` for tags the observation
     file carries no series for. Mutates and returns `facts`.
 
@@ -236,16 +245,20 @@ def merge_tag_index(facts: dict[str, dict], data_dir: str | Path, symbols=None,
     `{"end": latest_end, "filed": latest_filed, "form": latest_form, "val": latest_value}`
     — which is a legitimate companyfacts shape and is read by pit like any other.
 
-    **This is deliberately only enough for latest-balance metrics and nothing more.** A
-    single point has no `start`, so pit's flow path (`_latest_filed(..., instant=False)`,
-    which skips any entry without one) cannot see it: no quarterly series, no annual series,
-    no growth, no trend, no TTM contribution can ever be derived from a folded tag. What it
-    does buy is real and was otherwise missing: `AssetsCurrent`/`LiabilitiesCurrent` (~97% of
-    tickers, and the inputs to Working Capital and therefore to ROIC — a §4.6 REQUIRED
-    metric, so without this fold nearly every name suspends), `ShortTermBorrowings` for the
-    §5.9 debt composition, and the incl-NCI equity tag Minority Interest is derived from.
+    **This is deliberately only enough for latest-balance metrics and point disclosures,
+    and nothing more.** A single point has no `start`, so pit's flow path
+    (`_latest_filed(..., instant=False)`, which skips any entry without one) cannot see it:
+    no quarterly series, no annual series, no growth, no trend, no TTM contribution can ever
+    be derived from a folded tag. What it does buy is real and was otherwise missing:
+    `AssetsCurrent`/`LiabilitiesCurrent` (~97% of tickers, and the inputs to Working Capital
+    and therefore to ROIC — a §4.6 REQUIRED metric, so without this fold nearly every name
+    suspends), `ShortTermBorrowings` for the §5.9 debt composition, the incl-NCI equity tag
+    Minority Interest is derived from, and pit's two `_DISCLOSURE_CONCEPTS` chains — the
+    twelve-month debt maturity (~66% of these filers) and the concentration percentage
+    (~11%), neither of which the observations file carries a series for, and both of which
+    the inversion layer could therefore measure for exactly ZERO names before this.
 
-    `tags` is that reachable set (`INSTANT_TAGS`, read out of pit's own concept table).
+    `tags` is that reachable set (`FOLDED_TAGS`, read out of pit's own concept tables).
     Folding a FLOW tag (`CostOfRevenue`, `ProfitLoss`, `DepreciationDepletionAnd-
     Amortization`, ...) is not wrong, just provably inert — and the export carries ~880k of
     them, half a gigabyte of concepts nothing can ever read. Pass `tags=None` to fold every

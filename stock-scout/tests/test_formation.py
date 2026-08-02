@@ -1,6 +1,11 @@
 """Offline tests for formation.py — the frozen v3 owner-mode rules (spec §4.7, §5.6,
 §3.4; msgs 57-58, 62). Synthetic scored lists across simulated quarters; update() is
-pure, so no files except one save/load round-trip. Constants come from scoring.py."""
+pure, so no files except one save/load round-trip. Constants come from scoring.py.
+
+The last section covers the OPTIONAL fragility gate (docs/INVERSION-DESIGN.md §6): that it
+is off by default and the default path is the pre-inversion function bit for bit, that it
+blocks entry (bootstrap and promotion) only when explicitly enabled, and that it never
+forces an exit."""
 from __future__ import annotations
 
 import json
@@ -327,3 +332,142 @@ def test_render_and_cli_show(tmp_path, capsys):
     assert "De Formatie 2026Q3" in out
     assert "AAA" in out
     assert "Open plekken: 14" in out
+
+
+# --------------------------- the OPTIONAL fragility gate (INVERSION-DESIGN §6, off by default)
+
+def ruinous(row, verdict="Ruinous"):
+    """The §3.3 row grade.py writes when the inversion layer answered: the raw result under
+    "inversion", the same normalized projection on the card (§5)."""
+    result = {"verdict": verdict,
+              "failure_modes": ["the cash engine fell 89% from its peak in 2010"],
+              "probes": {"cash_engine": {"id": "cash_engine", "severity": "severe",
+                                         "measured": True, "value": -0.89}},
+              "coverage": {"measured_counting": 5, "counting_total": 6, "thin": False,
+                           "required_missing": [], "flagged": []}}
+    return row | {"inversion": result,
+                  "scorecard": {"pct": 84, "band": "Exceptional", "inversion": result}}
+
+
+def without_verdicts(scored):
+    """The same rows as they looked before the inversion layer existed."""
+    return [{k: v for k, v in row.items() if k not in ("inversion", "scorecard")}
+            for row in scored]
+
+
+def test_verdict_of_reads_the_card_first_then_the_row_and_neither_is_required():
+    row = ruinous(graded("AAA", 90, v=80))
+    assert formation.verdict_of(row) == "Ruinous"
+    assert formation.verdict_of({k: v for k, v in row.items() if k != "scorecard"}) \
+        == "Ruinous"                                    # the raw row key still answers
+    assert formation.verdict_of(graded("AAA", 90, v=80)) is None      # older rows: silent
+    assert formation.verdict_of({"symbol": "X", "inversion": None}) is None
+
+
+def test_default_behaviour_is_identical_with_and_without_verdicts_on_the_rows():
+    """The gate is OFF by default and that default must be the pre-inversion function,
+    bit for bit: same squad, same bench, same transfers, same state keys — a Ruinous
+    verdict sitting on the row changes NOTHING unless the owner asks for it."""
+    scored = [ruinous(graded("RUIN", 95, v=80)), graded("AAA", 90, v=80),
+              graded("BBB", 80, v=30)]
+    with_verdicts, t1 = formation.update(None, scored, Q3_A)
+    pre_inversion, t2 = formation.update(None, without_verdicts(scored), Q3_A)
+    assert with_verdicts == pre_inversion               # byte-identical state...
+    assert t1 == t2                                     # ...and the same transfers
+    assert "RUIN" in squad_syms(with_verdicts)          # the Ruinous name is seated
+    assert set(with_verdicts) == {"as_of", "quarter", "slots", "squad", "bench",
+                                  "transfers"}          # no new key on the default path
+
+    # A second tick over an existing state behaves the same way.
+    nxt, t3 = formation.update(with_verdicts, scored, Q4)
+    nxt_pre, t4 = formation.update(pre_inversion, without_verdicts(scored), Q4)
+    assert nxt == nxt_pre and t3 == t4
+
+
+def test_the_gate_blocks_entry_only_when_it_is_explicitly_enabled():
+    """§6: `--fragility-gate` makes a Ruinous verdict block ENTRY. Off, the same run seats
+    the name; on, it does not — and the block is visible on the bench, never silent."""
+    scored = [ruinous(graded("RUIN", 95, v=80)), graded("AAA", 90, v=80),
+              graded("BBB", 80, v=30)]
+    off, _ = formation.update(None, scored, Q3_A)
+    assert "RUIN" in squad_syms(off)                    # default: v3 rules, untouched
+
+    on, transfers = formation.update(None, scored, Q3_A, fragility_gate=True)
+    assert "RUIN" not in squad_syms(on)                 # blocked at the door
+    assert squad_syms(on) == {"AAA", "BBB"}
+    assert "RUIN" not in {t["symbol"] for t in transfers}
+    blocked = bench_by_sym(on)["RUIN"]                  # ...and still visibly waiting
+    assert blocked["blocked"] == "Ruinous" == formation.GATE_VERDICT
+    assert blocked["streak"] == 1
+    assert on["fragility_gate"] == "Ruinous"            # the run records that it was on
+
+
+def test_the_gate_blocks_a_promotion_too_not_just_a_bootstrap():
+    fifteen = [graded(f"S{i:02d}", 90.0 - i, v=50) for i in range(15)]
+    state, _ = formation.update(None, fifteen, Q3_A, fragility_gate=True)
+    crowded = [ruinous(graded("NEW", 95, v=50))] + fifteen[:14] + [vetoed("S14")]
+    state, _ = formation.update(state, crowded, Q4, fragility_gate=True)
+    assert bench_by_sym(state)["NEW"]["streak"] == 1
+    state, transfers = formation.update(state, crowded, Q1_27, fragility_gate=True)
+    assert bench_by_sym(state)["NEW"]["streak"] == 2    # evidence AND an open slot...
+    assert "NEW" not in squad_syms(state)               # ...but the gate still holds
+    assert [t["action"] for t in transfers] == []
+    # The same three ticks without the gate DO seat it — the gate is the only difference.
+    ungated, _ = formation.update(None, fifteen, Q3_A)
+    ungated, _ = formation.update(ungated, crowded, Q4)
+    ungated, _ = formation.update(ungated, crowded, Q1_27)
+    assert "NEW" in squad_syms(ungated)
+
+
+def test_the_gate_never_forces_an_exit():
+    """§6 blocks entry. Selling is a different decision (§4.7) and this layer, unvalidated,
+    has no say in it: a seated name that turns Ruinous keeps its seat."""
+    state, _ = formation.update(None, [graded("AAA", 90, v=80)], Q3_A)
+    scored = [ruinous(graded("AAA", 90, v=80))]
+    state, transfers = formation.update(state, scored, Q4, fragility_gate=True)
+    assert squad_syms(state) == {"AAA"}
+    assert transfers == []
+
+
+def test_a_fragile_verdict_is_reported_but_not_gated():
+    """Only Ruinous blocks — one named way of breaking is a judgement for the owner."""
+    scored = [ruinous(graded("FRAG", 95, v=80), verdict="Fragile"),
+              graded("AAA", 90, v=80)]
+    state, _ = formation.update(None, scored, Q3_A, fragility_gate=True)
+    assert "FRAG" in squad_syms(state)
+
+
+def test_the_gate_records_how_much_of_the_field_it_could_judge():
+    """"Gate ON" says nothing about coverage on its own, and in the normal deployment only
+    the names with a §3.6 weekly grid ever carry a verdict. A run where the gate judged
+    NOBODY must not announce itself as blocking without saying so."""
+    scored = [ruinous(graded("RUIN", 95, v=80)), graded("AAA", 90, v=80),
+              graded("BBB", 80, v=30)]
+    state, _ = formation.update(None, scored, Q3_A, fragility_gate=True)
+    assert state["fragility_gate_coverage"] == {"judged": 1, "unjudged": 2,
+                                                "blocked": ["RUIN"]}
+    assert "1 van 3 kandidaten beoordeeld, 2 zonder verdict" \
+        in formation.gate_coverage_line(state)
+
+    blind, _ = formation.update(None, without_verdicts(scored), Q3_A, fragility_gate=True)
+    assert blind["fragility_gate_coverage"] == {"judged": 0, "unjudged": 3, "blocked": []}
+    assert "0 van 3 kandidaten beoordeeld" in formation.gate_coverage_line(blind)
+    assert "niemand geblokkeerd" in formation.gate_coverage_line(blind)
+
+
+def test_a_default_run_records_no_gate_coverage_at_all():
+    scored = [ruinous(graded("RUIN", 95, v=80)), graded("AAA", 90, v=80)]
+    state, _ = formation.update(None, scored, Q3_A)
+    assert "fragility_gate_coverage" not in state
+
+
+def test_render_names_the_gate_and_the_blocked_bench_member():
+    scored = [ruinous(graded("RUIN", 95, v=80)), graded("AAA", 90, v=80)]
+    state, _ = formation.update(None, scored, Q3_A, fragility_gate=True)
+    text = formation.render(state)
+    assert "geblokkeerd door de fragiliteitspoort (Ruinous)" in text
+    assert "Fragiliteitspoort AAN" in text
+    assert "standaard uit" in text
+    assert "1 van 2 kandidaten beoordeeld, 1 zonder verdict" in text
+    plain, _ = formation.update(None, scored, Q3_A)
+    assert "fragiliteitspoort" not in formation.render(plain)
