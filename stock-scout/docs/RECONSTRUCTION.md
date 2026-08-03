@@ -114,6 +114,7 @@ needs an identity column the vendor does not reliably supply.
   "meta": {"name": "...", "sector": "...", "industry": "...", "country": "..."},   // from universe row
   "currency": "USD",
   "price": {"close": 123.4, "date": "2026-07-30"},
+  "price_basis": "raw",                                // share terms of that close (§3.6); always written
   "fast_info": { "last_price": ..., "market_cap": ..., "shares": ..., "currency": "USD", ... },  // plain floats/strings
   "shares": {"2025-07-01": 430000000.0, ...},          // get_shares_full, deduped last-per-date
   "splits": {"2025-01-15": 2.0, ...},                  // split events from the SAME bar call (ratio per effective date)
@@ -123,6 +124,15 @@ needs an identity column the vendor does not reliably supply.
 ```
 Statement payloads keep **every row Yahoo returns** (the datasheet shows the exact matched
 labels). Period ends are ISO dates. NaN → null.
+
+`price_basis` (deviation 17): the share terms of `price.close`, in the §3.6 vocabulary —
+`"raw"` (as traded that day; Yahoo's bars, and what every entry written before the key
+holds) or `"split_adjusted_today"` (restated into today's share terms; what the keyless
+vendors serve). It is **declared by the fetcher, never sniffed**, and always written out.
+For a live entry the two coincide — "adjusted to today" *is* today's as-traded price — so
+a market cap off a `split_adjusted_today` close is exact here; the distinction only bites
+on historical bars (§3.6). A fallback vendor with no split feed leaves `splits` empty, so
+deviation 8's restatement is inert for that entry and populate reports how many.
 
 `splits` (deviation 8): `get_shares_full` counts are point-in-time and split-**unadjusted**,
 so the raw series reads a 2-for-1 as +100% dilution. The events ride the existing
@@ -149,7 +159,18 @@ plus `failures.log` (one `symbol<TAB>reason` per line; 404/dead tickers land her
     "ev": {"own": ..., "yahoo": ..., "gap_pct": ..., "yahoo_source": "field|derived|null"},
     "ttm": {"quarters": 4, "through": "YYYY-MM-DD", "basis": "quarterly|annual"},
     "mos": {"intrinsic_value": ..., "market_cap": ..., "mos_pct": ..., "wacc": ..., "growth": ..., "base_fcf": ...} | null,
-    "buffett": {"score": 6, "max": 13, "items": [{"name": "...", "points": 2, "max": 2, "pass": true, "detail": "..."}]} | null
+    "buffett": {"score": 6, "max": 13, "items": [{"name": "...", "points": 2, "max": 2, "pass": true, "detail": "..."}]} | null,
+    "scorecard": {                                    // the Owner's Scorecard, docs/SCORECARD-DESIGN.md
+      "score": 78.5, "available_max": 97, "pct": 81,  // score/available_max; pct = whole % OF THE AVAILABLE max
+      "band": "Exceptional|Strong|Mixed|Weak|Pass|VETOED|NO PRICE", "band_meaning": "...",
+      "blocks": {"quality": {"points": 29.0, "max": 35, "metrics": ["roic", ...]}, "price": {...}, "safety": {...}, "stewardship": {...}},
+      "metrics": {"<anchor_id>": {"value": ..., "points": 9.6, "max": 12, "pct": 80, "detail": "..."}},   // points/pct null = not computable
+      "why": {"strongest": {"metric": ..., "label": ..., "value": ..., "points": ..., "max": ..., "pct": ..., "sentence": "..."}, "weakest": {...} },
+      "consensus": {"green": 3, "of": 3, "lenses": {"scorecard": true, "margin_of_safety": true, "buffett": true}, "label": "...", "evidence": {"<lens>": "..."}},
+      "coverage": {"available_max": 97, "full_max": 100, "scored": [...], "missing": [{"metric": ..., "label": ..., "block": ..., "points": 3, "reason": "..."}], "missing_points": 3},
+      "veto": {"vetoed": false, "reason": "", "penalty": 0},
+      "notes": ["..."]
+    } | null                                          // null for VETOED/INSUFFICIENT names
   } ],
   "portfolio": {"positions": [{"symbol": ..., "weight": ..., "conviction": ...}], "cash": ..., "clamps": [...]},
   "formation": { ...contents of formation-state.json after this run... }
@@ -163,6 +184,27 @@ Units are NOT uniform and must be passed explicitly to any formatter: `ev.gap_pc
 the unit from magnitude renders a sub-1.5% EV gap 100× too large and a margin of safety
 above +150% 100× too small.) `ev.yahoo_source` is `"field"` when a Yahoo enterprise value
 was supplied and `"derived"` when the listed-class reference EV was reconstructed (§6.13).
+
+`scorecard` is written by `grade.py` for **every graded name** (A–F) as
+`scorecard.scorecard(bundle, scored_row=row)` — the card is built from the row that was
+just scored, so the absolute card and the percentile legs read one computation and cannot
+disagree. It is `null` for VETOED and INSUFFICIENT names, exactly like `mos`/`buffett`.
+Its `metrics` keys are the ids of `scorecard.ANCHORS` (`roic`, `gross_margin`,
+`gross_margin_cv`, `owner_fcf_margin`, `revenue_growth`, `owner_fcf_yield`,
+`margin_of_safety`, `net_debt_ebitda`, `self_funding`, `sbc`, `current_ratio`,
+`share_count_trend`, `accruals`, `capital_returned`), and the anchor table itself (label,
+floor, target, points, unit, provenance) is **not** duplicated into the JSON — consumers
+read it from `scorecard.ANCHORS`, which is the source of truth for the design's §3
+provenance table.
+
+Three units-and-honesty rules bind every consumer of this field, and they are the reason
+the block/coverage detail is stored rather than recomputed downstream: `pct` is a
+percentage of `available_max`, **not** of 100 (a name scoring 48 of an available 75
+reports `48/75 (64%)`, never `48/100`); a `points`/`pct` of `null` means "not computable",
+which shrinks `available_max` and is named in `coverage.missing` — never a silent zero;
+and the two special bands carry no verdict at all — `VETOED` has `score`/`pct` `null` and
+must never be ranked, `NO PRICE` is a quality profile that must never be rendered as an
+x/100 verdict (design §4.1, the single most important rule in that document).
 
 ### 3.4 `formation-state.json` (v3, msgs 57-58, 62)
 ```jsonc
@@ -195,7 +237,8 @@ row (no sector → wrong tier and wrong sector cohort). The price file:
 ```jsonc
 { "symbol": "BRK/B",
   "bars":   {"YYYY-MM-DD": {"close": <raw>, "adj_close": <adjusted>}, ...},
-  "splits": {"YYYY-MM-DD": <ratio>, ...} }      // e.g. 2.0 on a 2-for-1 effective date
+  "splits": {"YYYY-MM-DD": <ratio>, ...},       // e.g. 2.0 on a 2-for-1 effective date
+  "price_basis": "raw" | "split_adjusted_today" }   // share terms of every close in `bars`
 ```
 
 Both prices are stored because they do different jobs: **anything multiplied by a share
@@ -206,6 +249,22 @@ every historical tick; total-return math (NAV, forward returns, the benchmark tr
 both fields — degraded, detectable, and disclosed in the report. Splits ride the same
 `actions=True` fetch (no extra Yahoo call) and let the backtest tell a 2:1 split from
 100%/yr dilution; `--keep-legacy-prices` opts out of refetching old grids.
+
+`price_basis` (deviation 17) closes the second, invisible ambiguity: "raw close" pins down
+dividends but **not splits**, and vendors disagree. `"raw"` means the price as it traded on
+the bar's own day (Yahoo's Close, and the meaning of every file written before the key).
+`"split_adjusted_today"` means that same price divided by every split since (what the
+keyless vendors serve: NVDA's 2024-05-28 bar reads ≈109.6 there, ≈1096 is what traded).
+The writer **declares** it; a reader never infers it, because nothing in a price series
+reveals it and reading a today-basis close as raw understates a historical market cap by
+the whole split factor. `pit.as_of_bundle` takes the declaration (one basis, or a
+`{symbol: basis}` map for a cache written by several sources) and puts **both sides** of
+`shares × price` into the same terms — for a today-basis close the as-reported dei count is
+restated into today's share terms via `scoring.adjusted_shares_series`, after which the
+future-split factor cancels exactly and the product is the true historical market cap in
+dollars. Grids from different sources may therefore sit side by side; each file answers for
+itself. Without split history the restatement cannot run: the bundle carries
+`market_cap_split_unadjusted` and the fetcher counts those grids at the end of the run.
 
 ---
 
@@ -356,7 +415,7 @@ first**; None never reaches `percentileofscore`. Vetoed names are suppressed, ne
 universe size + NL names kept. Downloads to `data/equities.bz2` once, reuses thereafter.
 
 ### 5.2 `populate.py`
-`python populate.py [--universe universe.csv] [--limit N] [--only SYM,SYM] [--fresh] [--annual-only]`
+`python populate.py [--universe universe.csv] [--limit N] [--only SYM,SYM] [--fresh] [--annual-only] [--price-source {auto,yahoo,stockanalysis}]`
 - Per symbol (default: annual **and** quarterly in one pass — msg 62 "nu mét kwartaaldata in
   één pass"; `--annual-only` reproduces the v1 behavior): fast_info, daily bars (close,
   currency **and split events** — one `history(actions=True)` call widened to `period="5y"`,
@@ -368,6 +427,19 @@ universe size + NL names kept. Downloads to `data/equities.bz2` once, reuses the
   dead tickers are logged and skipped).
 - `--fresh` (msg 62): move existing `cache/` to `cache-<YYYY-MM-DD>/` first.
 - Writes `progress.json` after every symbol; marks `finished` at the end.
+- `--price-source` (default `auto`, deviation 17) picks the vendor behind the §3.2 `price`
+  block only — fast_info, shares and statements are always Yahoo's. `auto` runs Yahoo's
+  daily bars first and steps down to `pricesrc`'s keyless source once Yahoo throttles (a
+  rate limit retires the Yahoo price leg for the rest of the run instead of ending it);
+  `yahoo` keeps the old behavior including stopping the run on a rate limit. Every entry
+  records `price_basis` (§3.2).
+- **The live path is where the alternative source is a full substitute, not a compromise.**
+  A `split_adjusted_today` close is the as-traded price *divided by every split since*, and
+  no split can lie after today, so for a run priced today the two bases are the same number
+  and `shares × close` is exact to the cent. Only historical bars need the restatement of
+  §3.6. What is lost is the split *feed*: the keyless vendor has none, so such entries carry
+  no `splits`, deviation 8's restatement is inert for them, and a name that split recently
+  reads as dilution until Yahoo is reachable again. populate says how many at the end.
 
 ### 5.3 `augment.py`
 `python augment.py [--universe universe.csv]` — add `quarterly` to cache entries that lack
@@ -386,7 +458,7 @@ it (v2.2 path for an annual-only cache). Same pacing/progress/failure contracts.
 `python grade.py [--universe universe.csv] [--cache cache] [--date YYYY-MM-DD] [--no-formation] [--telegram]`
 1. Load universe + cache → bundles (skip uncached; count them).
 2. `scoring.score_universe` → scored names (+flags, veto, legs, EV, TTM basis).
-3. MoS + Buffett for every graded name (cheap; datasheet shows top-10).
+3. MoS + Buffett + the Owner's Scorecard for every graded name (cheap; datasheet shows top-10).
 4. Portfolio proposal (§4.8).
 5. Formation update via `formation.py` (v3 live mode, msg 58) unless `--no-formation`.
 6. Write `reports/scout-run-<date>.md` + `reports/scout-grades-<date>.json`.
@@ -399,11 +471,39 @@ and "EBITDA ≤ 0 with net debt". The header reports uncached AND unreadable cac
 separately, with a named block listing each unreadable symbol and its reason — one corrupt
 file must never abort a run.
 
-Report md sections (msgs 10, 28, 32, 57): header with counts by grade + veto breakdown by
-reason; tier-sectioned A-F table (symbol, name, grade, composite, V/Q/G/D/M, MoS%, flags);
-NL names call-out; **De Formatie** section (squad with since/streak/rank, transfers with
-reasons, bench with needed-quarters, open slots as cash) replacing the old top-15 ranking;
-honest-evidence footer (a grade is a research shortlist, not a buy list).
+Report md sections (msgs 10, 28, 32, 57; re-ordered for the Owner's Scorecard, 2026-08-01
+— nothing was deleted, the scorecard was put in front and the percentile view relabelled):
+
+1. **Header** — counts (universe/graded/veto/insufficient/uncached/unreadable), band
+   occupancy from the scorecard, then the grade counts explicitly labelled *"rang in
+   sector (context)"*.
+2. **"Hoe je dit leest"** — five lines rendered from `scorecard`'s own constants: the score
+   is absolute; read bands, not ranks (`scorecard.NOISE_FLOOR`, ±5 points); what consensus
+   n/3 counts and at which thresholds; that NO PRICE is a quality profile and not a verdict
+   (§4.1) and that a veto suppresses rather than ranks (§4.3); and that grade+composite is
+   context. It sits above the first `## ` heading, so `summary_head` carries it to Telegram.
+3. **Veto breakdown** by distinct sub-reason, and the named unreadable-cache block.
+4. **`## Scorecard — absolute punten`** — the main table, sorted by `pct` descending but
+   printed as `### <band> <range> (n) — <meaning>` groups so the output cannot invite
+   reading rank 9 against rank 11 (design §1.2). Columns, in this order: symbol · name ·
+   score · band · consensus · Q · P · S · St · flags · *rang in sector (context)*. There is
+   deliberately **no rank column**. The score cell reads `81/100`, or
+   `81/100 · 78.5/97 pt` when a metric was not computable (§4.2). Empty bands are skipped;
+   the header line already reports the occupancy of all of them.
+5. **`## Zonder band (geen oordeel)`** — everything that carries no verdict, kept out of the
+   ordering on purpose: `### NO PRICE` (its own table, points out of what was available,
+   never x/100, with the §4.1 disclaimer printed verbatim), `### VETOED` (name + reason,
+   capped at `grade.VETOED_LIST_MAX` with the tail counted) and any graded name whose card
+   is missing.
+6. **`## Sectorrelatieve context (rang binnen sector)`** — the unchanged tier-sectioned A-F
+   tables (`### Core|Adjacent|Outside`; symbol, name, grade, composite, V/Q/G/D/M, MoS%,
+   flags), now under a heading that says what they are: where a name stands among its
+   sector peers, still the engine under De Formatie and the only walk-forward-validated
+   ranking the system owns (SCORECARD-DESIGN §6).
+7. **NL names call-out** — now scorecard-first per line, with the sector rank in brackets.
+8. **De Formatie** (squad with since/streak/rank, transfers with reasons, bench with
+   needed-quarters, open slots as cash) replacing the old top-15 ranking.
+9. **Honest-evidence footer** (a grade is a research shortlist, not a buy list).
 
 ### 5.6 `formation.py`
 Library + CLI (`python formation.py --show`). `update(state, scored, run_date) -> (state', transfers)`
@@ -424,23 +524,72 @@ kandidaat zonder bewijs").
 
 ### 5.7 `datasheet.py`
 `python datasheet.py [--grades reports/scout-grades-<date>.json] [--top 10] [--out reports/datasheet-<date>.html]`
-Self-contained HTML (inline CSS/JS, no external requests), theme-aware, ~top-10 cards:
-- Header: run date, version, counts, veto breakdown, formation one-liner.
-- Per card (msg 13): Stage-2 analysis block on top when available (msg 39); score build-up
-  table — every leg: raw value → sector percentile (with cohort size) → leg score; pillar ×
-  weight → composite; the veto/penalty checks with their actual values; flags with
+Self-contained HTML (inline CSS/JS, no external requests), theme-aware, ~top-10 cards
+(selected, as before, by the percentile composite — the datasheet audits the run the
+formation was built from):
+- Header: run date, version, counts, band occupancy, grade chips labelled as sector-rank
+  context, veto breakdown, formation one-liner, and one collapsible **anchor-provenance
+  table** rendered from `scorecard.ANCHORS` (metric, block, floor, target, points, where
+  the line comes from) — the design's §3 ledger, once per page rather than per card.
+- Per card, the **Owner's Scorecard first** (design §5): headline `pct/100` + band + the
+  band's plain-language meaning; the four block bars (points out of the block's *available*
+  maximum, with the full maximum named when a metric dropped out); the "why" sentences
+  (strongest and weakest metric, named with their values); the consensus badge with its
+  per-lens evidence; a coverage line naming every metric that was not computable, worth how
+  many points, and why (§4.2); the run notes; and a table of all 14 metrics — label, raw
+  value **in its own unit**, the floor→target ramp it was scored on, and the points earned
+  — rendered from `scorecard.ANCHORS`, never hardcoded, so a point can be audited exactly
+  the way a percentile already could. A `VETOED` card shows no score and a `NO PRICE` card
+  shows its points out of what was available with the §4.1 disclaimer — neither is ever
+  rendered as an x/100 verdict.
+- Then, unchanged, the whole pre-existing evidence chain (msg 13): Stage-2 analysis block
+  when available (msg 39); score build-up table — every leg: raw value → sector percentile
+  (with cohort size) → leg score; pillar × weight → composite (both now labelled as
+  sector-relative context); the veto/penalty checks with their actual values; flags with
   explanations (msg 18); own-EV vs Yahoo-EV line; owner-FCF per period table; the exact
   statement rows used (which label matched, per period); fast_info snapshot; MoS block
   (inputs + intrinsic vs market cap); Buffett checklist items with pass/fail.
-- Independent recompute: composite re-derived in the page's JS from the stored legs/weights
-  and compared to the run's value → "✓ komt overeen" / "✗ afwijking" per card (msg 13).
+- Independent recompute, **twice** — a scorecard the reader cannot verify is no better than
+  the number it replaces: the composite re-derived in the page's JS from the stored
+  legs/weights/penalty (msg 13), and the scorecard re-derived from the embedded per-metric
+  points (block sums, available maximum, total) plus each metric's own §2 ramp from its
+  embedded value and anchors. Both render "✓ komt overeen" / "✗ afwijking" per card, and
+  the scorecard check names what disagreed.
 - "Alles uitklappen" button; first card pre-opened.
 
+`datasheet.py` is stdlib-only except for `from scorecard import ANCHORS, …`. That import is
+the anchor **table** — labels, floors, targets, points, units, provenance — not the
+computation under audit: every number on the page still comes from the grades JSON, and the
+re-derivation still happens in the page's own JS. A metric id the table does not know
+degrades to its stored `detail` string, and a grades JSON without a `scorecard` key (an
+older run) renders the rest of the card with a named note rather than failing the build.
+
 ### 5.8 `bt_fetch.py`
-`python bt_fetch.py [--universe universe.csv] [--start 2020-01-01] [--limit N]`
+`python bt_fetch.py [--universe universe.csv] [--start 2020-01-01] [--limit N] [--price-source {auto,yahoo,stockanalysis}]`
 SEC `company_tickers.json` → CIK map (cached); `companyfacts` per symbol → `bt_cache/facts/`;
-weekly adj-close via yfinance (`SPY` + universe) → `bt_cache/prices/`. Paced, resumable,
+weekly raw+adj close (`SPY` + universe) → `bt_cache/prices/`. Paced, resumable,
 progress.json contract so `reporter.py` works for it too.
+
+`--price-source` (default `auto`, deviation 17) selects the weekly price vendor; EDGAR is
+untouched by it.
+- `yahoo` is the unchanged raw+adjusted path: the vendored `fetch_weekly_bars` supplies
+  `adj_close`, a supplementary paced `actions=True` call supplies the raw Close **and** the
+  split events, the grid declares `price_basis: "raw"`, and a rate limit still stops the run.
+- `stockanalysis` is `pricesrc`'s keyless source:
+  `GET https://stockanalysis.com/api/symbol/s/<SYM>/history?range=<span>&period=Weekly`,
+  no key, ~0.3 s/request, a browser `User-Agent` **required** (urllib's default is answered
+  403). `c` → `close`, `a` → `adj_close`, and the grid declares
+  `price_basis: "split_adjusted_today"`. **Range caveat:** only the spans the API honors may
+  be used (`6M`, `YTD`, `5Y`, `10Y`) — `MAX`, `ALL`, `20Y` and the like are not errors there,
+  they silently return 52 weekly bars, which would grade a ten-year backtest on one year of
+  prices. `10Y` is the default and reaches 2016 (521 weekly bars for ADBE/NVDA, verified).
+  The source has **no split feed**, so its grids carry no `splits`.
+- `auto` runs the Yahoo path first and steps down to the keyless source when it refuses; a
+  rate limit retires the Yahoo leg for the rest of the run rather than ending the run, which
+  is the point on a 429'd box. Files from different sources coexist — each declares its own
+  basis (§3.6) — and the run ends by reporting how many grids are today-basis and how many
+  of those have no split history (those market caps come back
+  `market_cap_split_unadjusted`).
 
 ### 5.9 `pit.py`
 `as_of_bundle(facts, symbol, meta, as_of, prices) -> Bundle|None` — EDGAR→Bundle with
@@ -505,6 +654,42 @@ gate percentile {10,20,30} × persistence {1,2,3} × exit rank {30,40} (18 optio
 pre-registered criterion: beat the equal-weight pool on the blind half with lower turnover;
 report both halves, v3 vs v2 vs pool vs SPY, turnover, max drawdown. `--cohorts` (msg 55):
 fresh-ranked quality cohorts 1-15 / 16-50 / 51-100 / 101+ per period, no gates.
+
+### 5.12 The inversion layer (`inversion.py`, **`docs/INVERSION-DESIGN.md`**)
+Munger's pillar as a lens of its own: seven deterministic probes over the §3.6 weekly
+price grid and the annual filings answering *"how would this lose my money?"* — the
+question the scorecard's three lenses share a blind spot on. That document is the spec
+(§3 probes, §4 verdicts, §5 where it appears, §6 the optional gate, §7 limits); this is
+only the map of what it touches here.
+
+- **New §3.3 row key `inversion`** — the verdict (`Ruinous` / `Fragile` / `Ordinary` /
+  `Robust` / `Unknown`) with its failure modes, probes, coverage and notes, or `null`.
+  `scorecard.scorecard(..., inversion_result=…)` attaches the same projection under
+  `scorecard.inversion` and adds the **survival** lens, so consensus reads `n/4` where the
+  layer had an answer and `n/3` where it did not — both honest numbers.
+- **It moves no points** (design §2): `score`, `available_max`, `pct`, `band`, every block
+  and the evidence tier are bit-for-bit what they are without a verdict. Fragility sits
+  beside the score, never inside it.
+- **`grade.py --prices <dir>`** (default `bt_cache/prices`) supplies the weekly grids;
+  `inversion.py` is imported lazily. No prices, no module, a probe that raises, or a
+  verdict that will not serialize → no verdict, the reason counted and named in the
+  report. Price-less names are the norm (~470 of the export), not a failure.
+- **Report** — a `fragiliteit` column beside the score, present only when the run produced
+  verdicts, plus `## Sterk maar fragiel`: the names that are Exceptional or Strong **yet**
+  Fragile or Ruinous, with their failure modes. Design §5 calls that pairing the most
+  useful thing the layer produces, so it gets a heading rather than a cell. An empty
+  section is printed as an outcome, not omitted.
+- **Datasheet** — per name the verdict, the failure modes, every probe with its value and
+  severity, and a coverage line **naming** the probes that were not measured (§3.7: silence
+  is not safety).
+- **The optional gate `--fragility-gate`** (design §6, `formation.update(...,
+  fragility_gate=True)`) — a `Ruinous` verdict blocks **entry**: the name leaves the entry
+  pool, so it can neither bootstrap-seat nor be promoted, stays on the bench carrying the
+  verdict that blocked it, and is never sold on account of it. **Off by default**, because
+  the v3 entry rules earned their place through the blind walk-forward of msgs 49-50 and
+  this layer has no such evidence; with the gate off `update()` does not read the verdicts
+  at all and its output is unchanged. Validating it is the same exercise as before: re-run
+  the walk-forward with the gate on against the pre-registered criterion.
 
 ---
 
@@ -585,6 +770,60 @@ implementation contradicted them.
     untagged line suspended the whole name. Gross profit is now derived from revenue minus
     cost of revenue when not tagged directly. A filer that tags neither (Medpace, a CRO
     reporting direct costs under a custom tag) still suspends — honestly, not silently.
+
+**Second price source (2026-08-01).** Yahoo answers HTTP 429 to this box, so the pipeline
+could obtain no prices at all — and per `docs/SCORECARD-DESIGN.md` §4.1 a price-less run is a
+quality profile and explicitly **not** a verdict, i.e. the entire scorecard withheld.
+
+17. **Declared price basis** (§3.2, §3.6, §5.2, §5.8) — the fetchers gained
+    `--price-source {auto,yahoo,stockanalysis}` over a small `pricesrc` layer in which every
+    vendor DECLARES what its closes are. stockanalysis.com serves keyless weekly history (10
+    years, ~0.3 s/request, browser `User-Agent` required, and only the spans it honors —
+    anything else silently returns 52 bars), but its `c` is **split-adjusted to today**, not
+    as traded: NVDA's 2024-05-28 bar reads ≈109.6 where ≈1096 traded. Multiplying an
+    as-reported dei share count (≈2.46bn pre-split) by such a close understates the market cap
+    by the whole split factor — ≈$270bn where the market said ≈$2.7tn — and nothing in the
+    numbers says so, which is why the basis is written into every price file and cache entry
+    and is **never inferred**. Against a today-basis close the share count is restated into
+    today's split terms as well (`scoring.adjusted_shares_series`, already built for deviation
+    8); the future-split factor then cancels exactly between the two sides, so the product is
+    the true historical market cap **in dollars**. That is an identity, not lookahead: only the
+    units the two sides are quoted in change, and they change identically — and ratio metrics
+    were indifferent all along, since a factor common to two share observations cancels in the
+    trend. Live runs are the easy case: "adjusted to today" *is* today's as-traded price, so
+    there the alternative source is a full substitute rather than a compromise. What the
+    keyless vendor lacks is a split feed, so its files carry no `splits`: the restatement
+    cannot run, `pit.market_cap_at` returns `market_cap_split_unadjusted` for those bundles,
+    and both fetchers count them in their closing report — an honest "unverified" instead of a
+    silently wrong number. Files from different sources coexist, each declaring its own basis,
+    and an absent declaration means `"raw"`, so every pre-existing cache keeps its original
+    meaning exactly.
+
+**The inversion layer, and what running it revealed (2026-08-02).** `docs/INVERSION-DESIGN.md`
+covers the layer itself; two of its findings are data-layer deviations and belong here.
+
+18. **Point disclosures reach the Bundle by their own path** (§5.9) — the layer's §3.6
+    refinancing wall and §3.7 concentration flag read EDGAR tags
+    (`LongTermDebtMaturitiesRepaymentsOfPrincipalInNextTwelveMonths`,
+    `ConcentrationRiskPercentage1`) that 66% and 11% of these filers do tag — but which the
+    observations export carries no series for, being outside its 19 curated tags. Both probes
+    therefore measured **zero** names while their provenance claimed 66% and 11% coverage. They
+    are now folded from the tag index into a new `disclosures` block on the Bundle
+    (`pit._DISCLOSURE_CONCEPTS`, `secsv.DISCLOSURE_TAGS`), deliberately **not** into
+    `_BALANCE_CONCEPTS`: `_section` unions every label onto one set of period ends and
+    `scoring._latest_balance` reads `bal[max(bal)]`, so a disclosure whose `end` post-dated the
+    newest real balance date would silently become the entire latest-balance payload — cash,
+    debt, current ratio and ROIC all replaced by one tag. In their own block they reach exactly
+    their own consumer and the balance section is bit-for-bit unchanged. The wall now runs for
+    1,146 of 1,904 names. Each disclosure keeps its `end` and `filed`, which is what lets §3.7
+    say a flag was last tagged in 2017 instead of presenting it as current.
+19. **A tagged concentration of exactly 100% is refused** (§3.7) — `ConcentrationRiskPercentage1`
+    carries no axis member in this export, so a single-customer disclosure and the *total* row
+    of a disaggregation table are indistinguishable, and 51 of the 212 filers that tag it at all
+    tag exactly 1.0. Scored naively that is "one customer is 100% of revenue" for AMKR, AXON,
+    BMI, DDS and 47 others — the loudest false finding available on the one probe whose entire
+    job is to be believed when it speaks. Refused and named, in the same discipline as the
+    dilution leg's `max_share_change`.
 
 ---
 

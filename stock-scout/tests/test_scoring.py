@@ -727,3 +727,28 @@ def test_score_universe_does_not_mutate_bundles():
     snapshot = copy.deepcopy(b)
     scoring.score_universe([b])
     assert b == snapshot
+
+
+def test_buffett_checklist_judges_a_decade_not_two():
+    # EDGAR serves ~19 annual periods. Over that span "net income non-decreasing every
+    # year" and "ROE > 15% in >=80% of years" are all but unreachable, so two of the three
+    # legs quietly died and the consensus lens they feed could never turn green. The window
+    # is capped at BUFFETT_WINDOW_YEARS (the reference implementation's limit=8).
+    def year(n, ni, equity):
+        return f"20{n:02d}-12-31", ni, equity
+    inc, bal = {}, {}
+    for i in range(19):                       # oldest years are weak, recent 8 are strong
+        pe = f"{2007 + i}-12-31"
+        strong = i >= 11
+        inc[pe] = {"Net Income": 100.0 + i, "Operating Income": 40.0 if strong else 5.0,
+                   "Total Revenue": 100.0}
+        bal[pe] = {"Stockholders Equity": 100.0 if strong else 1000.0,
+                   "Total Debt": 10.0, "Current Assets": 300.0, "Current Liabilities": 100.0}
+    card = scoring.buffett_checklist({"annual": {"income": inc, "balance": bal}})
+    items = {i["name"]: i for i in card["items"]}
+    moat = items["Moat: ROE consistency"]
+    assert moat["points"] == 2, moat["detail"]        # 100% of the recent 8, not 42% of 19
+    assert "of 8 periods" in moat["detail"]
+    # and the consistency leg reads only that window too
+    assert "8 annual NI periods" in items["Earnings consistency (NI non-decreasing)"]["detail"]
+    assert scoring.BUFFETT_WINDOW_YEARS == 8

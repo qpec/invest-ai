@@ -22,11 +22,23 @@ close — adjusted closes are retroactively rescaled by every later split and di
 building a historical market cap out of them silently imports the future. Total-return
 math (NAV, forward returns, the benchmark track) uses adj_close. A legacy grid of plain
 floats loads DEGRADED: the one value stands for both fields (grid_is_degraded() flags it).
-No I/O, no network, no clock.
+
+Price BASIS: "the raw close" only pins down dividends. Vendors differ on SPLITS, so the
+§3.6 envelope carries a `price_basis` declaration per price file — "raw" (as-traded
+closes, Yahoo's raw column, and the meaning of every cache written before the field) or
+"split_adjusted_today" (every close restated into TODAY's share terms, what the keyless
+vendors serve). The basis is DECLARED by whoever wrote the file and passed explicitly into
+as_of_bundle; it is never inferred, because nothing in a price series reveals it and
+reading a today-basis close as raw understates a historical market cap by the whole split
+factor (an NVDA tick before the 10:1 would read ~$270bn instead of ~$2.7tn). market_cap_at
+puts both sides of shares x price into the same share terms and the bundle records which
+(`market_cap_basis`, `market_cap_split_unadjusted`). No I/O, no network, no clock.
 """
 from __future__ import annotations
 
 from datetime import date
+
+import scoring
 
 QUARTER_MAX_DAYS = 100         # §5.9: a duration this short IS a quarter (53-week-year safe)
 YTD_START_WINDOW_DAYS = 365    # §5.9: prior-YTD start-match tolerance (broken fiscal years)
@@ -38,6 +50,11 @@ PRICE_FIELDS = ("close", "adj_close")   # raw (share-count math) / adjusted (tot
 DEFAULT_PRICE_FIELD = "close"
 BARS_KEY, SYMBOL_KEY = "bars", "symbol"  # §3.6 price-file envelope (true symbol inside)
 SPLITS_KEY = "splits"                    # §3.6 split events, captured on the same bar fetch
+BASIS_KEY = "price_basis"                # §3.6 declared share terms of this file's closes
+BASIS_RAW = "raw"                        # as-traded closes (Yahoo raw column)
+BASIS_SPLIT_ADJUSTED_TODAY = "split_adjusted_today"   # closes restated into today's terms
+PRICE_BASES = (BASIS_RAW, BASIS_SPLIT_ADJUSTED_TODAY)
+DEFAULT_PRICE_BASIS = BASIS_RAW          # what an undeclared (pre-field) cache means
 
 # §5.9 tag fallback chains (msg 44 adversarial fixes pinned; first present wins per period).
 _INCOME_CONCEPTS = {
@@ -57,6 +74,13 @@ _CASHFLOW_CONCEPTS = {
     "Stock Based Compensation": ("ShareBasedCompensation",),
     "Depreciation And Amortization": ("DepreciationDepletionAndAmortization",
                                       "DepreciationAndAmortization"),
+    # Capital returned to owners — the scorecard's stewardship leg (SCORECARD-DESIGN.md §2
+    # block 4). Without these the metric was computable live but never in the backtest, so
+    # the two paths' headline percentages were not comparable. EDGAR reports payments as
+    # positive outflows; the consumer is sign-agnostic, so no flip is needed here.
+    "Cash Dividends Paid": ("PaymentsOfDividendsCommonStock", "PaymentsOfDividends",
+                            "PaymentsOfDistributionsToAffiliates"),
+    "Repurchase Of Capital Stock": ("PaymentsForRepurchaseOfCommonStock",),
 }
 _BALANCE_CONCEPTS = {
     "Cash And Cash Equivalents": ("CashAndCashEquivalentsAtCarryingValue",),
@@ -66,6 +90,22 @@ _BALANCE_CONCEPTS = {
     "Current Liabilities": ("LiabilitiesCurrent",),
 }
 _SHARES_TAG = "EntityCommonStockSharesOutstanding"
+
+# Point DISCLOSURES — single facts the inversion layer reads (§3.6's refinancing wall and
+# §3.7's concentration flag) and nothing else does. They are deliberately NOT in
+# _BALANCE_CONCEPTS: `_section` unions every label onto one set of period ends and
+# `scoring._latest_balance` reads `bal[max(bal)]`, so a disclosure whose `end` post-dates
+# the newest real balance date would silently become the entire latest-balance payload —
+# cash, debt, current ratio and ROIC all replaced by one tag. In their own dict they reach
+# exactly their own consumer, and the balance section is bit-for-bit what it was.
+_DISCLOSURE_CONCEPTS = {
+    # "Long-Term Debt, Maturity, Year One" — tagged by ~66% of the filers in the 2026 SEC
+    # export, median end 2025-12-31. This is §3.6's "debt due within twelve months".
+    "debt_due_12m": ("LongTermDebtMaturitiesRepaymentsOfPrincipalInNextTwelveMonths",),
+    # "Concentration Risk, Percentage" — ~11% of filers and MEDIAN END 2017-12-30. Carried
+    # with its date attached precisely because it is that stale (§3.7 flags, never scores).
+    "concentration_risk": ("ConcentrationRiskPercentage1",),
+}
 
 
 def _iso(d) -> str:
@@ -101,6 +141,44 @@ def _latest_filed(entries: list, as_of: str, *, instant: bool) -> dict:
         if key not in best or filed >= best[key][0]:
             best[key] = (filed, float(val))
     return {key: val for key, (_, val) in best.items()}
+
+
+def _point_disclosure(facts: dict, tags: tuple, as_of: str) -> dict | None:
+    """The newest point in a disclosure chain as it was knowable on as_of: entries filed
+    <= as_of only, newest `end` wins, and a later `filed` on the same `end` (a restatement)
+    breaks the tie — the same §5.9 discipline as `_latest_filed`, applied across every unit
+    the tag was reported in rather than only the USD/shares one (`ConcentrationRiskPercent-
+    age1` is reported in `pure`).
+
+    Unlike `_latest_filed` this KEEPS the provenance. A disclosure whose `end` is nine
+    years old has to be readable as nine years old — the concentration tag's median end in
+    the 2026 export is 2017-12-30 — so the consumer can say how stale it is instead of
+    presenting a 2017 fact as a description of the business today."""
+    best = None
+    for tag in tags:
+        units = (((facts.get("facts") or {}).get("us-gaap") or {}).get(tag)
+                 or {}).get("units") or {}
+        for unit, entries in units.items():
+            for entry in entries or []:
+                filed, end, val = entry.get("filed"), entry.get("end"), entry.get("val")
+                if filed is None or end is None or val is None or filed > as_of:
+                    continue
+                if best is None or (end, filed) > (best["end"], best["filed"]):
+                    best = {"value": float(val), "end": end, "filed": filed,
+                            "form": entry.get("form"), "tag": tag, "unit": unit}
+    return best
+
+
+def disclosures(facts: dict, as_of: str) -> dict:
+    """The §4.1 Bundle's `disclosures` block: one dated point per _DISCLOSURE_CONCEPTS
+    label, absent entirely when the filer never tagged it. Absence is the honest shape —
+    a missing key reads as "not disclosed", never as a zero."""
+    out = {}
+    for label, tags in _DISCLOSURE_CONCEPTS.items():
+        point = _point_disclosure(facts, tags, _iso(as_of))
+        if point is not None:
+            out[label] = point
+    return out
 
 
 def _merge_chain(facts: dict, tags: tuple, as_of: str, *, instant: bool) -> dict:
@@ -289,6 +367,22 @@ def shares_series(facts: dict, as_of) -> list:
     return [[end, series[end]] for end in sorted(series)]
 
 
+def _fallback_point(facts: dict, as_of) -> tuple[str | None, float | None, str | None]:
+    """shares_fallback's (measurement date, count, basis). The date is what the today-basis
+    market cap needs: a count can only be restated into today's share terms by the splits
+    after the date it was MEASURED on. The summed cover page is dated by its latest class
+    row (the count stands as of that page), the largest-class path by that class's own row."""
+    by_filed = _shares_by_filed(facts, _iso(as_of))
+    if not by_filed:
+        return None, None, None
+    observations = by_filed[max(by_filed)]
+    ends = [end for end, _ in observations]
+    if _days(min(ends), max(ends)) <= MULTICLASS_SPREAD_DAYS:
+        return max(ends), sum(val for _, val in observations), "fallback-sum"
+    end, val = max(observations, key=lambda observation: observation[1])
+    return end, val, "fallback-largest"
+
+
 def shares_fallback(facts: dict, as_of) -> tuple[float | None, str | None]:
     """§5.9 multi-class fallback (the reachable half of msg 44's "multi-class-shares-
     fallback met neutrale M-leg"): the best share count knowable at as_of when
@@ -299,24 +393,25 @@ def shares_fallback(facts: dict, as_of) -> tuple[float | None, str | None]:
     ("fallback-largest"). Returns (count, basis), (None, None) when nothing is knowable.
     The SERIES stays empty either way — the M share-trend leg stays neutral — but the name
     keeps a market cap and therefore GRADES instead of silently suspending."""
-    by_filed = _shares_by_filed(facts, _iso(as_of))
-    if not by_filed:
-        return None, None
-    observations = by_filed[max(by_filed)]
-    ends = [end for end, _ in observations]
-    if _days(min(ends), max(ends)) <= MULTICLASS_SPREAD_DAYS:
-        return sum(val for _, val in observations), "fallback-sum"
-    return max(val for _, val in observations), "fallback-largest"
+    _, count, basis = _fallback_point(facts, as_of)
+    return count, basis
+
+
+def shares_point_at(series: list, as_of) -> tuple[str | None, float | None]:
+    """Last (measurement date, count) observation at or before as_of from an ascending
+    §5.9 series; (None, None) when the series starts later. The date travels with the count
+    because restating it into today's share terms depends on it (market_cap_at)."""
+    as_of = _iso(as_of)
+    best = (None, None)
+    for day, val in series:
+        if day <= as_of:
+            best = (day, val)
+    return best
 
 
 def shares_at(series: list, as_of) -> float | None:
     """Last share observation dated at or before as_of from an ascending §5.9 series."""
-    as_of = _iso(as_of)
-    best = None
-    for day, val in series:
-        if day <= as_of:
-            best = val
-    return best
+    return shares_point_at(series, as_of)[1]
 
 
 def bar_value(bar, field: str = DEFAULT_PRICE_FIELD) -> float | None:
@@ -357,27 +452,85 @@ def price_at(prices: dict, symbol: str, day, field: str = DEFAULT_PRICE_FIELD) -
 
 # ----------------------------------------------- §3.6 cache-file shapes (writer + reader)
 
-def price_file(symbol: str, bars: dict, splits: dict | None = None) -> dict:
+def checked_basis(value) -> str:
+    """One declared price basis -> a known §3.6 basis. Absent (None) reads as "raw": every
+    cache written before the field held as-traded closes, so absence keeps its original
+    meaning and no existing file changes value. An UNKNOWN declaration RAISES — falling
+    back to a default there would reintroduce exactly the silent assumption this layer
+    exists to remove (a today-basis close read as raw understates a historical market cap
+    by the entire split factor)."""
+    if value is None:
+        return DEFAULT_PRICE_BASIS
+    basis = str(value)
+    if basis not in PRICE_BASES:
+        raise ValueError(f"unknown price basis {basis!r} (known: {', '.join(PRICE_BASES)})")
+    return basis
+
+
+def basis_for(price_basis, symbol: str | None = None) -> str:
+    """The basis to use for `symbol` from a caller's declaration: a {symbol: basis} map
+    (mixed-provider caches), one basis string for every symbol, or None for the "raw"
+    default. A symbol missing from the map is undeclared, hence "raw" — same rule as an
+    envelope without the field."""
+    value = price_basis.get(symbol) if isinstance(price_basis, dict) else price_basis
+    return checked_basis(value)
+
+
+def price_file(symbol: str, bars: dict, splits: dict | None = None,
+               price_basis: str = DEFAULT_PRICE_BASIS) -> dict:
     """The §3.6 prices/<SYM>.json payload: the TRUE symbol next to the date-keyed bars, so
     a sanitized filename ("BRK/B" -> BRK-B.json) round-trips back to its universe symbol,
-    plus the split events Yahoo returned on the same actions=True bar fetch (§3.6 splits)."""
-    return {SYMBOL_KEY: symbol, BARS_KEY: bars, SPLITS_KEY: dict(splits or {})}
+    plus the split events Yahoo returned on the same actions=True bar fetch (§3.6 splits)
+    and the share terms the closes are stated in (§3.6 `price_basis`). The basis is always
+    written out, even when it is the default: a reader must never have to guess which
+    provider produced a file to know what its closes mean."""
+    return {SYMBOL_KEY: symbol, BARS_KEY: bars, SPLITS_KEY: dict(splits or {}),
+            BASIS_KEY: checked_basis(price_basis)}
 
 
-def load_price_file(payload: dict) -> tuple[str | None, dict, dict]:
-    """A prices/<SYM>.json payload -> (symbol or None, {date: bar}, {date: split ratio}).
-    Accepts the current envelope and both legacy shapes (a bare date-keyed map of floats or
-    of bars), where the symbol is unknown (the caller falls back to the filename stem) and
-    no splits were recorded."""
+class LoadedPriceFile(tuple):
+    """load_price_file's result: still exactly the (symbol, bars, splits) triple every
+    existing call site unpacks, carrying the envelope's declared basis as `.price_basis`.
+    A fourth tuple slot would break three-way unpacking wherever prices are loaded; an
+    attribute extends the result without touching a single caller."""
+
+    price_basis: str
+
+    def __new__(cls, symbol, bars: dict, splits: dict, price_basis: str):
+        loaded = super().__new__(cls, (symbol, bars, splits))
+        loaded.price_basis = price_basis
+        return loaded
+
+
+def load_price_file(payload: dict) -> LoadedPriceFile:
+    """A prices/<SYM>.json payload -> (symbol or None, {date: bar}, {date: split ratio})
+    plus `.price_basis`. Accepts the current envelope and both legacy shapes (a bare
+    date-keyed map of floats or of bars), where the symbol is unknown (the caller falls
+    back to the filename stem) and no splits were recorded. A file without the basis field
+    predates it and therefore declares "raw" (checked_basis)."""
     if not isinstance(payload, dict):
-        return None, {}, {}
+        return LoadedPriceFile(None, {}, {}, DEFAULT_PRICE_BASIS)
+    basis = checked_basis(payload.get(BASIS_KEY))
     if BARS_KEY in payload:
-        return (payload.get(SYMBOL_KEY), payload.get(BARS_KEY) or {},
-                payload.get(SPLITS_KEY) or {})
-    return (payload.get(SYMBOL_KEY),
-            {key: val for key, val in payload.items()
-             if key not in (SYMBOL_KEY, SPLITS_KEY)},
-            payload.get(SPLITS_KEY) or {})
+        return LoadedPriceFile(payload.get(SYMBOL_KEY), payload.get(BARS_KEY) or {},
+                               payload.get(SPLITS_KEY) or {}, basis)
+    return LoadedPriceFile(payload.get(SYMBOL_KEY),
+                           {key: val for key, val in payload.items()
+                            if key not in (SYMBOL_KEY, SPLITS_KEY, BASIS_KEY)},
+                           payload.get(SPLITS_KEY) or {}, basis)
+
+
+def split_ratio(value) -> float | None:
+    """One vendor split cell -> a §3.6 event ratio, or None when it is not one. Yahoo
+    writes 0.0 on every ordinary week, and 1.0 is arithmetically inert (a "1:1 split" is
+    not an event), so both are dropped. Every writer of a §3.6 split map goes through this
+    one rule — three writers with three filters is how the same map starts meaning three
+    different things."""
+    try:
+        ratio = float(value)
+    except (TypeError, ValueError):
+        return None
+    return ratio if ratio > 0 and ratio != 1.0 else None
 
 
 def splits_as_of(splits: dict, as_of) -> dict:
@@ -388,11 +541,8 @@ def splits_as_of(splits: dict, as_of) -> dict:
     day = _iso(as_of)
     out = {}
     for event, raw in (splits or {}).items():
-        try:
-            ratio = float(raw)
-        except (TypeError, ValueError):
-            continue
-        if ratio > 0 and str(event) <= day:
+        ratio = split_ratio(raw)
+        if ratio is not None and str(event) <= day:
             out[str(event)] = ratio
     return out
 
@@ -425,23 +575,92 @@ def quarter_ends(spy_prices: dict, start, end) -> list:
     return [by_quarter[key] for key in sorted(by_quarter)]
 
 
+def _restated_count(shares_day: str | None, shares: float, splits: dict | None
+                    ) -> tuple[float, bool]:
+    """(share count restated by `splits`, did the restatement run?). One observation
+    through scoring.adjusted_shares_series, which scales it by the cumulative ratio of the
+    events STRICTLY AFTER its own measurement date — so which window of the split history
+    is handed in decides which share terms the count comes back in."""
+    if not shares_day or not splits:
+        return shares, False
+    series = scoring.adjusted_shares_series({"shares_series": [[shares_day, shares]],
+                                             "splits": splits})
+    return (series[0][1], True) if series else (shares, False)
+
+
+def market_cap_at(shares_day: str | None, shares: float | None, price: float | None,
+                  basis: str, splits: dict | None, as_of=None) -> tuple[float | None, bool]:
+    """(market cap in dollars, split-unadjusted flag) from one share observation and one
+    close, with BOTH sides put into the same share terms (§3.6 `price_basis`). The two
+    bases differ only in WHICH END of the split history each side has to be dragged to.
+
+    "raw": the close is as traded on as_of, but the dei count is as reported on its own
+    cover page, and a split BETWEEN the two leaves them in different share terms until the
+    next cover page lands ~3 months later (NVDA: 2.46bn reported 2024-05-24, 10:1 on
+    2024-06-10, next filing 2024-08-28 — every tick in between reads ~$0.3tn instead of
+    ~$3tn). So the count is restated by the events in (shares_day, as_of], which is
+    PIT-clean by construction: only splits knowable at the tick are used. `as_of` None
+    means the caller states no tick — the count then stands as reported, which is right for
+    a LIVE close (the observation and the price are both current) and nothing else.
+
+    "split_adjusted_today": the close is stated in TODAY's share terms, so the count must
+    be too — restated by the FULL split history, including events AFTER as_of that
+    splits_as_of deliberately hides from the share-trend leg. That is not lookahead: a
+    future split multiplies the count and divides the close by the same factor, so it
+    cancels exactly and the product is the true historical DOLLAR market cap (an NVDA tick
+    before the 10:1 reads ~$2.7tn — the figure the market actually put on the company that
+    day — not the ~$270bn a raw reading of the same close produces). No future information
+    survives into the result; only the units the two sides are quoted in change, and they
+    change identically.
+
+    The flag rides the today-basis path, where the missing correction spans everything
+    between the tick and today: with no split history the restatement cannot run, the
+    figure is wrong by the split factor for any name that split since, and the caller must
+    disclose it. An empty split map cannot be told apart from a name that never split, so
+    both raise the flag — an honest "unverified" beats a silently wrong market cap. The raw
+    path does not raise it: its correction window is the two dates in hand, and the events
+    inside it are exactly the ones a §3.6 grid records on the same fetch as its bars."""
+    if shares is None or price is None:
+        return None, False
+    if basis == BASIS_RAW:
+        window = splits_as_of(splits, as_of) if as_of is not None else {}
+        return _restated_count(shares_day, shares, window)[0] * price, False
+    count, restated = _restated_count(shares_day, shares, splits)
+    return count * price, not restated
+
+
 def as_of_bundle(facts: dict, symbol: str, meta: dict, as_of, prices: dict,
-                 splits: dict | None = None) -> dict | None:
+                 splits: dict | None = None, price_basis=None) -> dict | None:
     """§5.9: EDGAR companyfacts -> the §4.1 Bundle as it was knowable on as_of, or None
     when no annual income period is visible yet (a pre-first-10-K name is not scoreable).
-    market_cap = share count at as_of x the RAW weekly close at as_of — as-reported dei
-    shares against an as-traded price, never the adjusted close (that one is rewritten by
-    every later split/dividend and would import the future into every historical tick).
+    market_cap = share count at as_of x the weekly close at as_of, both sides in the same
+    share terms (market_cap_at) — never the adjusted close, which is rewritten by every
+    later split AND dividend and would import the future into every historical tick.
     The share count comes from the trend series, else from shares_fallback; `shares_basis`
     ("series" | "fallback-sum" | "fallback-largest" | None) records which, so the multi-
     class path is auditable. yahoo_ev is None by construction (no Yahoo in the PIT world —
     the EV_GAP flag never fires).
 
-    `splits` ({symbol: {date: ratio}}, §3.6) carries the split events Yahoo returned on the
-    same bar fetch; only those ON OR BEFORE as_of reach the bundle, so scoring restates the
-    as-reported dei share counts into as_of's share terms. Without it a 2:1 split reads as
-    +100%/yr dilution at every tick and trips the §4.4 hard dilution veto (§6.14)."""
+    `price_basis` DECLARES the share terms of the grid's closes (§3.6): one basis for every
+    symbol, a {symbol: basis} map for a mixed-provider cache, or None for the "raw" default
+    of every pre-field cache. It is a caller's declaration, never sniffed from the data.
+    The bundle records `market_cap_basis` (the basis actually used) and
+    `market_cap_split_unadjusted` (True when the today-basis path found no split history
+    and the figure is therefore unadjusted for splits — see market_cap_at).
+
+    `splits` ({symbol: {date: ratio}}, §3.6) carries the split events captured on the same
+    bar fetch. THREE different windows of it are used ON PURPOSE, and they are not a bug to
+    be "fixed" — each one drags a count to whatever share terms its counterpart is quoted
+    in. bundle["splits"] keeps only events ON OR BEFORE as_of, because the M share-trend leg
+    compares two share observations as they were knowable at the tick and a later split was
+    unknowable then (§6.14, and a common factor cancels in that ratio anyway). A raw-basis
+    market cap uses the events between the share observation and as_of, because its close is
+    as traded at as_of while its count is as reported earlier. A today-basis market cap uses
+    the FULL history, because its price side is quoted in today's split terms. Without the
+    events at all, a 2:1 split reads as +100%/yr dilution at every tick and trips the §4.4
+    hard dilution veto."""
     as_of = _iso(as_of)
+    basis = basis_for(price_basis, symbol)   # refuse an unknown declaration before any work
     if not facts or not (facts.get("facts") or {}):
         return None
     income_a, income_q = _flow_maps(facts, _INCOME_CONCEPTS, as_of)
@@ -461,19 +680,24 @@ def as_of_bundle(facts: dict, symbol: str, meta: dict, as_of, prices: dict,
         return None
     balance = _section(_balance_maps(facts, as_of))
     series = shares_series(facts, as_of)
-    px = price_at(prices, symbol, as_of, DEFAULT_PRICE_FIELD)   # RAW close, never adjusted
-    shares, shares_basis = shares_at(series, as_of), "series"
+    px = price_at(prices, symbol, as_of, DEFAULT_PRICE_FIELD)   # the close field, never adj
+    shares_day, shares = shares_point_at(series, as_of)
+    shares_basis = "series"
     if shares is None:                    # empty/inconsistent series -> best count at as_of
-        shares, shares_basis = shares_fallback(facts, as_of)
+        shares_day, shares, shares_basis = _fallback_point(facts, as_of)
+    market_cap, split_unadjusted = market_cap_at(
+        shares_day, shares, px, basis, (splits or {}).get(symbol) or {}, as_of)
     meta = meta or {}
     return {
         "symbol": symbol,
         "name": meta.get("name"), "sector": meta.get("sector"),
         "industry": meta.get("industry"),
-        "market_cap": shares * px if shares is not None and px is not None else None,
+        "market_cap": market_cap, "market_cap_basis": basis,
+        "market_cap_split_unadjusted": split_unadjusted,
         "yahoo_ev": None, "price": px,
         "shares_series": series, "shares_basis": shares_basis,
         "splits": splits_as_of((splits or {}).get(symbol) or {}, as_of),
+        "disclosures": disclosures(facts, as_of),
         "annual": {"income": annual_income,
                    "balance": {end: payload for end, payload in balance.items()
                                if end in annual_income},

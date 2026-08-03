@@ -2,8 +2,11 @@
 filed-date discipline, tag fallback chains, YTD->quarter derivation (incl. a broken
 fiscal year exercising the +/-365d prior-YTD window, the refusal of a discrete-quarter
 subtrahend, and Q4 = FY minus the 9-month YTD), multi-class shares (empty trend series +
-market-cap fallback), raw-vs-adjusted price selection, the reversible filename
-sanitization, and one end-to-end synthetic-facts -> as_of_bundle ->
+market-cap fallback), raw-vs-adjusted price selection, the declared price BASIS (the
+envelope round trip, both legacy shapes, the refusal of an unknown declaration, and a
+synthetic 10:1 split between the tick and today proving the today-basis market cap lands
+on the true historical dollar figure while the share-trend leg is untouched), the
+reversible filename sanitization, and one end-to-end synthetic-facts -> as_of_bundle ->
 scoring.score_universe integration. Synthetic companyfacts JSON only — no network, no
 real caches."""
 from __future__ import annotations
@@ -273,6 +276,167 @@ def test_a_later_split_cannot_rewrite_the_historical_market_cap():
     assert pit.price_at(after, "SYN", "2025-02-23", "adj_close") == 55.0
 
 
+# ------------------------------------ price basis: basis-aware market cap (§3.6, §5.9)
+#
+# One synthetic 10:1 split on 2026-06-10, AFTER the 2026-02-23 tick (NVDA's actual shape).
+# The numbers are chosen so the true dollar market cap at the tick is unambiguous:
+#   as-reported dei count at the tick     2,000,000     x  as-traded close  $500  = $1.0bn
+#   the same count in today's terms      20,000,000     x  today-basis close $50  = $1.0bn
+# A today-basis close read as raw gives $0.1bn — wrong by exactly the split factor.
+TICK = "2026-02-23"
+SPLIT_DAY, SPLIT_RATIO = "2026-06-10", 10.0
+TRUE_MARKET_CAP = 1_000_000_000.0
+RAW_GRID = {"SYN": {"2026-02-13": {"close": 480.0, "adj_close": 480.0},
+                    "2026-02-20": {"close": 500.0, "adj_close": 500.0}}}
+TODAY_GRID = {"SYN": {"2026-02-13": {"close": 48.0, "adj_close": 48.0},
+                      "2026-02-20": {"close": 50.0, "adj_close": 50.0}}}
+
+
+def _splitter_facts():
+    """One annual period (so a bundle exists) plus two dei observations a year apart, both
+    as-reported in PRE-split terms — 1.98m -> 2.00m shares, ~+1%/yr."""
+    return facts_of(
+        gaap={"Revenues": [dfact("2025-01-01", "2025-12-31", 400.0, "2026-02-01")]},
+        shares=[ifact("2025-01-15", 1_980_000.0, "2025-01-20"),
+                ifact("2026-01-15", 2_000_000.0, "2026-01-20")])
+
+
+def test_price_file_declares_its_basis_and_the_loader_surfaces_it():
+    bars = {"2026-02-20": {"close": 50.0, "adj_close": 50.0}}
+    payload = pit.price_file("SYN", bars, {SPLIT_DAY: SPLIT_RATIO},
+                             pit.BASIS_SPLIT_ADJUSTED_TODAY)
+    assert payload[pit.BASIS_KEY] == "split_adjusted_today"
+    loaded = pit.load_price_file(payload)
+    assert loaded == ("SYN", bars, {SPLIT_DAY: SPLIT_RATIO})   # still exactly a 3-tuple ...
+    symbol, grid, events = loaded                              # ... and unpacks as one
+    assert (symbol, grid, events) == ("SYN", bars, {SPLIT_DAY: SPLIT_RATIO})
+    assert loaded.price_basis == pit.BASIS_SPLIT_ADJUSTED_TODAY
+    assert pit.price_file("SYN", bars)[pit.BASIS_KEY] == pit.BASIS_RAW   # written out always
+
+
+def test_both_legacy_price_file_shapes_still_load_and_mean_raw():
+    # Absence of the field is not "unknown": every cache written before it held as-traded
+    # closes, so it keeps its original meaning and no stored file changes value.
+    bars = {"2026-02-13": 48.0, "2026-02-20": 50.0}          # bare date-keyed floats
+    loaded = pit.load_price_file(dict(bars))
+    assert loaded == (None, bars, {}) and loaded.price_basis == pit.BASIS_RAW
+    older = pit.load_price_file({"symbol": "SYN", "bars": bars,
+                                 "splits": {SPLIT_DAY: SPLIT_RATIO}})   # pre-basis envelope
+    assert older == ("SYN", bars, {SPLIT_DAY: SPLIT_RATIO})
+    assert older.price_basis == pit.BASIS_RAW
+    annotated = pit.load_price_file(dict(bars, symbol="SYN", splits={}, price_basis="raw"))
+    assert annotated == ("SYN", bars, {})      # annotations never leak into the bars
+    assert pit.load_price_file("not a payload") == (None, {}, {})
+
+
+def test_an_unknown_basis_declaration_is_refused_rather_than_defaulted():
+    # Guessing what an unrecognized declaration means is precisely the silent assumption
+    # this layer removes — the cost of guessing wrong is a whole split factor.
+    with pytest.raises(ValueError):
+        pit.price_file("SYN", {}, {}, "adjusted")
+    with pytest.raises(ValueError):
+        pit.load_price_file({"symbol": "SYN", "bars": {}, "price_basis": "close"})
+    with pytest.raises(ValueError):
+        pit.as_of_bundle(_splitter_facts(), "SYN", META, TICK, RAW_GRID, None, "yahoo")
+    assert pit.basis_for(None) == pit.BASIS_RAW
+    assert pit.basis_for({"OTHER": pit.BASIS_SPLIT_ADJUSTED_TODAY}, "SYN") == pit.BASIS_RAW
+
+
+def test_raw_basis_market_cap_is_untouched_by_a_later_split():
+    # (i) The raw path is exactly what it always was: as-reported shares x as-traded close.
+    # The split history is irrelevant to it — supplied or not, the figure does not move.
+    facts = _splitter_facts()
+    for supplied in ({}, {"SYN": {SPLIT_DAY: SPLIT_RATIO}}):
+        bundle = pit.as_of_bundle(facts, "SYN", META, TICK, RAW_GRID, supplied)
+        assert bundle["market_cap"] == pytest.approx(TRUE_MARKET_CAP)
+        assert bundle["market_cap_basis"] == pit.BASIS_RAW
+        assert bundle["market_cap_split_unadjusted"] is False
+    explicit = pit.as_of_bundle(facts, "SYN", META, TICK, RAW_GRID, None, pit.BASIS_RAW)
+    assert explicit["market_cap"] == pytest.approx(TRUE_MARKET_CAP)   # declared == default
+
+
+def test_today_basis_market_cap_equals_the_true_historical_dollar_figure():
+    # (ii) 2,000,000 as-reported shares restated 10:1 = 20,000,000, times the $50 close the
+    # vendor states in today's share terms = the $1.0bn the market actually put on the
+    # company on 2026-02-20. The future split factor multiplies the count and divides the
+    # close, so it cancels: no future information survives, only the units agree.
+    facts = _splitter_facts()
+    splits = {"SYN": {SPLIT_DAY: SPLIT_RATIO}}
+    bundle = pit.as_of_bundle(facts, "SYN", META, TICK, TODAY_GRID, splits,
+                              pit.BASIS_SPLIT_ADJUSTED_TODAY)
+    assert bundle["market_cap"] == pytest.approx(TRUE_MARKET_CAP)
+    assert bundle["market_cap_basis"] == pit.BASIS_SPLIT_ADJUSTED_TODAY
+    assert bundle["market_cap_split_unadjusted"] is False
+    assert bundle["market_cap"] == pytest.approx(
+        pit.as_of_bundle(facts, "SYN", META, TICK, RAW_GRID, splits)["market_cap"])
+    # Reading that same grid as raw is the failure the declaration prevents: $0.1bn.
+    misread = pit.as_of_bundle(facts, "SYN", META, TICK, TODAY_GRID, splits)
+    assert misread["market_cap"] == pytest.approx(TRUE_MARKET_CAP / SPLIT_RATIO)
+    # A {symbol: basis} map declares it just as well (a mixed-provider cache).
+    per_symbol = pit.as_of_bundle(facts, "SYN", META, TICK, TODAY_GRID, splits,
+                                  {"SYN": pit.BASIS_SPLIT_ADJUSTED_TODAY})
+    assert per_symbol["market_cap"] == pytest.approx(TRUE_MARKET_CAP)
+
+
+def test_today_basis_without_split_history_is_flagged_not_silently_wrong():
+    # (iii) No events to restate by -> the count stays as-reported against a today-basis
+    # close, so the figure IS wrong by the split factor. It is published with the flag up
+    # rather than silently: an honest "unverified" beats a confident $0.1bn.
+    facts = _splitter_facts()
+    bundle = pit.as_of_bundle(facts, "SYN", META, TICK, TODAY_GRID, None,
+                              pit.BASIS_SPLIT_ADJUSTED_TODAY)
+    assert bundle["market_cap_split_unadjusted"] is True
+    assert bundle["market_cap_basis"] == pit.BASIS_SPLIT_ADJUSTED_TODAY
+    assert bundle["market_cap"] == pytest.approx(TRUE_MARKET_CAP / SPLIT_RATIO)
+    # An empty map for the name is the same situation: it cannot be told apart from a name
+    # that never split, so both raise the flag.
+    empty = pit.as_of_bundle(facts, "SYN", META, TICK, TODAY_GRID, {"SYN": {}},
+                             pit.BASIS_SPLIT_ADJUSTED_TODAY)
+    assert empty["market_cap_split_unadjusted"] is True
+    # A priced name is a precondition for the flag meaning anything: no market cap, no claim.
+    priceless = pit.as_of_bundle(facts, "SYN", META, TICK, {}, None,
+                                 pit.BASIS_SPLIT_ADJUSTED_TODAY)
+    assert priceless["market_cap"] is None
+    assert priceless["market_cap_split_unadjusted"] is False
+
+
+def test_the_multi_class_fallback_count_is_restated_into_todays_terms_too():
+    # The fallback count carries its own measurement date, so the today-basis restatement
+    # reaches the multi-class path as well — otherwise exactly the names that already lost
+    # their share-trend leg would also get a 10x-too-small market cap.
+    facts = facts_of(
+        gaap={"Revenues": [dfact("2025-01-01", "2025-12-31", 400.0, "2026-02-01")]},
+        shares=[ifact("2026-01-10", 1_400_000.0, "2026-01-20"),     # class A
+                ifact("2026-01-15", 600_000.0, "2026-01-20")])      # class B, 5 days apart
+    bundle = pit.as_of_bundle(facts, "SYN", META, TICK, TODAY_GRID,
+                              {"SYN": {SPLIT_DAY: SPLIT_RATIO}},
+                              pit.BASIS_SPLIT_ADJUSTED_TODAY)
+    assert bundle["shares_series"] == [] and bundle["shares_basis"] == "fallback-sum"
+    assert bundle["market_cap"] == pytest.approx(TRUE_MARKET_CAP)
+
+
+def test_the_share_trend_leg_is_identical_under_both_price_bases():
+    # (iv) The market cap and the M share-trend leg use DIFFERENT split windows on purpose
+    # (pit.as_of_bundle): bundle["splits"] stays filtered to <= as_of, because the
+    # 2026-06-10 event was unknowable at the tick (§6.14), while the today-basis market cap
+    # must look past it to match its price side. The trend cannot care either way — a
+    # factor common to both endpoints cancels in the ratio.
+    facts = _splitter_facts()
+    splits = {"SYN": {SPLIT_DAY: SPLIT_RATIO}}
+    raw = pit.as_of_bundle(facts, "SYN", META, TICK, RAW_GRID, splits)
+    today = pit.as_of_bundle(facts, "SYN", META, TICK, TODAY_GRID, splits,
+                             pit.BASIS_SPLIT_ADJUSTED_TODAY)
+    assert raw["splits"] == today["splits"] == {}          # post-tick event hidden in BOTH
+    assert raw["shares_series"] == today["shares_series"]
+    assert scoring.adjusted_shares_series(raw) == scoring.adjusted_shares_series(today)
+    trend = scoring._share_trend_pct(scoring.adjusted_shares_series(raw))
+    assert trend == pytest.approx(
+        scoring._share_trend_pct(scoring.adjusted_shares_series(today)))
+    restated = [[day, val * SPLIT_RATIO] for day, val in raw["shares_series"]]
+    assert scoring._share_trend_pct(restated) == pytest.approx(trend)   # the factor cancels
+    assert trend == pytest.approx(1.01, abs=0.05)          # ~+1%/yr dilution, not +900%
+
+
 def test_quarter_ends_take_the_last_weekly_bar_per_calendar_quarter():
     spy = {"2024-03-22": 1.0, "2024-03-28": 1.0, "2024-04-05": 1.0,
            "2024-06-28": 1.0, "2024-07-03": 1.0, "2024-09-27": 1.0}
@@ -297,12 +461,16 @@ def test_bt_fetch_prices_payload_carries_both_prices_and_the_true_symbol():
     idx = pd.to_datetime(["2019-12-27", "2020-01-03", "2020-01-10"], utc=True)
     frame = pd.DataFrame({"close": [2.0, 4.0, 6.0], "adj_close": [1.0, 2.0, 3.0],
                           "currency": "USD"}, index=idx)
+    # The envelope now also DECLARES the share terms of its closes (§3.6 price_basis);
+    # Yahoo's raw column is as-traded, so this writer declares "raw" (this assertion used
+    # to pin the pre-declaration envelope).
     assert bt_fetch.prices_payload(frame, "2020-01-01", "BRK/B",
                                    {"2020-01-06": 2.0}) == {
         "symbol": "BRK/B",
         "bars": {"2020-01-03": {"close": 4.0, "adj_close": 2.0},
                  "2020-01-10": {"close": 6.0, "adj_close": 3.0}},
-        "splits": {"2020-01-06": 2.0}}
+        "splits": {"2020-01-06": 2.0},
+        "price_basis": "raw"}
     # An adjusted-only frame (today's vendored fetch_weekly_bars shape) degrades honestly.
     legacy = pd.DataFrame({"adj_close": [1.0, 2.0, 3.0], "currency": "USD"}, index=idx)
     degraded = bt_fetch.prices_payload(legacy, "2020-01-01", "SYN")
