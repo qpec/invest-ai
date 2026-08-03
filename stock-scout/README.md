@@ -33,6 +33,13 @@ nohup python reporter.py &               # optional: 15-min Telegram progress + 
 python grade.py                          # writes reports/scout-run-<date>.md + scout-grades-<date>.json,
                                          # updates formation-state.json
 python datasheet.py                      # writes reports/datasheet-<date>.html (self-contained audit sheet)
+python picks.py                          # writes reports/picks-<date>.html (the shortlist + fragility)
+```
+
+Bulk SEC path (no Yahoo needed — the whole universe from one CSV export):
+
+```bash
+python picks.py --sec-data <export-dir> --prices <price-cache-dir> --as-of 2026-08-01
 ```
 
 Telegram (optional): set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`; without them every
@@ -67,6 +74,63 @@ Shadow layers that never enter the score: a multi-stage-DCF margin of safety and
 percentile), two quarters of evidence before entry, and exit only when quality actually
 breaks (veto, rank > 40, extreme overvaluation) — winners are left alone.
 
+## High-level design
+
+Read this section first if you are new to the repo. Everything below is enforced in code,
+and every row names the module that enforces it.
+
+### The pipeline, end to end
+
+| # | Stage | Question it answers | In → out | Module |
+|---|---|---|---|---|
+| 1 | **Universe** | *What is even eligible?* | FinanceDatabase → `universe.csv` | `universe.py` |
+| 2 | **Fundamentals** | *What do the filings say?* | yfinance → `cache/<SYM>.json` · SEC CSV export → Bundles | `populate.py` · `secsv.py` |
+| 3 | **Prices** | *What does the market say, and in whose share terms?* | vendor → weekly bars + a declared basis | `pricesrc.py` |
+| 4 | **Scoring** | *How does this rank against its sector?* | Bundle → V/Q/G/D/M percentiles + vetoes | `scoring.py` |
+| 5 | **Scorecard** | *How good is this business, on absolute lines?* | Bundle → 100-point card, band, consensus | `scorecard.py` |
+| 6 | **Inversion** | *How would this lose my money?* | Bundle + prices → 7 probes, a verdict, sentences | `inversion.py` |
+| 7 | **Formation** | *What do I actually hold?* | grades → buy/sell rules, `formation-state.json` | `formation.py` |
+| 8 | **Reports** | *Can I audit every number?* | → markdown, datasheet HTML, picks HTML | `grade.py` · `datasheet.py` · `picks.py` |
+
+Steps 4–6 are three **independent** readings of the same Bundle. They are never combined
+into one number — see *Two judgements* below.
+
+### Two judgements, kept in separate columns
+
+| | **The scorecard** | **The inversion layer** |
+|---|---|---|
+| Asks | How good is this business? | How would this break me? |
+| Pillar | Buffett | Munger |
+| Output | 0–100 points → a band | 7 probe severities → a verdict |
+| Scale | absolute anchors, not percentiles | counted severities, never averaged |
+| Can it suppress? | yes — §4.4 vetoes | **no** — it names, the human decides |
+
+A name can be **Exceptional and Fragile at once.** That pairing is the most useful thing
+the system produces, and both reports show it rather than reconciling it away.
+
+### Key requirements
+
+The rules the code must not break. Each was earned — most from a real defect found by
+running the pipeline over real filings.
+
+| # | Requirement | Why | Enforced in |
+|---|---|---|---|
+| R1 | **Never executes trades** | The system advises and monitors; the Gate is a human step | whole repo — no broker path exists |
+| R2 | **Point-in-time discipline** — only facts with `filed <= as_of` | A backtest that reads tomorrow's filing measures nothing | `pit._latest_filed` |
+| R3 | **One decision layer** — backtest and live run import the same code | Two copies drift, and the validated one is never the one that runs | `scoring.py`, imported by both |
+| R4 | **Price basis is declared, never inferred** | A split-adjusted close × an as-reported share count understates a market cap by the whole split factor | `pricesrc`, `pit.market_cap_at` |
+| R5 | **Vetoes run before analysis** | Munger's Hell-No filter: one failure rejects, regardless of upside | `scoring` vetoes → `scorecard` §4.4 |
+| R6 | **No price, no verdict** | A price-less run is a quality profile, not a buy case | `scorecard` `NO PRICE` band |
+| R7 | **Missing data shrinks the denominator; it never scores zero** | A zero is a judgement; absence is not | `scorecard.available_max` |
+| R8 | **Evidence tiers, so a percentage is not read as a ranking** | 97% of 64 measurable points is not better than 94% of 87 | `scorecard.evidence_tier` |
+| R9 | **Severities are counted, never averaged** | An average lets a good probe cancel a fatal one — the inversion error itself | `inversion.verdict_for` |
+| R10 | **Absent evidence is stated, never read as safety** | Silence about customer concentration is what cost the owner on Cirrus Logic | every probe's `measured` flag |
+| R11 | **A finding survives thin evidence** | Absent data may refuse to certify safety; it may never delete a finding | `inversion.inversion`, `consensus_lens` |
+| R12 | **Thresholds are declared with provenance and measured coverage** | A line copied from a reference and never measured caught 71% of the universe | `PROBES[...]["provenance"]` |
+| R13 | **A quantity the layer cannot attribute is refused, not guessed** | A 20:1 split read as +1,923% dilution; a tagged 100% concentration is a disaggregation total | `max_share_change`, `_CONCENTRATION_TOTAL_ROW` |
+| R14 | **No GPL-family runtime dependency** (NFR7) | Licence wall for the wider system | `tools/license_gate.py` |
+| R15 | **Tests are fully offline** | Network in a test is a test failure | `tests/` — synthetic fixtures only |
+
 ## Files
 
 | File | Role |
@@ -74,16 +138,25 @@ breaks (veto, rank > 40, extreme overvaluation) — winners are left alone.
 | `universe.py` | FinanceDatabase → `universe.csv` (default / `--broad`) |
 | `populate.py` / `augment.py` | paced resumable yfinance cache → `cache/<SYM>.json`, `progress.json`, `failures.log` |
 | `reporter.py` / `tg.py` | detached 15-min Telegram progress reporter / stdlib bot client |
+| `pricesrc.py` | price vendors, each DECLARING the share terms of its closes (`raw` / `split_adjusted_today`) |
 | `scoring.py` | **the** decision layer — pure functions shared by live run and backtests |
+| `scorecard.py` | the Owner's Scorecard — 100 absolute points, bands, evidence tiers, consensus |
+| `inversion.py` | the Munger layer — 7 fragility probes → a verdict and its sentences |
 | `grade.py` | cache → report md + grades json + formation update |
 | `formation.py` | frozen v3 owner-mode rules + `formation-state.json` |
 | `datasheet.py` | self-contained audit HTML (evidence chain, recompute check, Stage-2 layer) |
+| `picks.py` | self-contained picks HTML — the shortlist, with fragility beside every score |
 | `bt_fetch.py` / `pit.py` | EDGAR companyfacts + weekly prices / point-in-time Bundle adapter |
+| `secsv.py` | bulk SEC CSV export → companyfacts shape → Bundles (1,904 names in ~20 s) |
 | `backtest.py` / `backtest3.py` | v2-composite backtest / v3 owner-mode + walk-forward harness |
 | `vendor/` | the ratified grader (reference) + hardened yfinance layer (see `vendor/README.md`) |
 | `data/stage2-*.json` | qualitative Stage-2 validation layers, picked up by the datasheet |
 
-Tests: `python -m pytest tests/ -q` — 188 tests, fully offline on synthetic fixtures.
+Design docs: `docs/RECONSTRUCTION.md` (chat → code, plus 19 documented deviations),
+`docs/SCORECARD-DESIGN.md` (why the percentile composite was replaced),
+`docs/INVERSION-DESIGN.md` (the Munger layer, and §8 on what its first cut got wrong).
+
+Tests: `python -m pytest tests/ -q` — 585 tests, fully offline on synthetic fixtures.
 
 ## Validation status
 
