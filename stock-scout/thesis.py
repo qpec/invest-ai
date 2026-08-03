@@ -218,7 +218,13 @@ def validate(doc: dict, *, symbol: str | None = None) -> list[str]:
 
     seen_ids = set()
     for t in triggers:
-        tid = t.get("id") or "?"
+        # A non-empty id is REQUIRED because monitor.py keys trigger_state by it. With an
+        # empty id the monitor falls back to a statement prefix while this loop deduped on
+        # a placeholder, so two triggers could quietly share one streak entry.
+        tid = (t.get("id") or "").strip()
+        if not tid:
+            problems.append("a trigger has no id; the monitor keys its evidence by id")
+            tid = (t.get("statement") or "?")[:40]
         if tid in seen_ids:
             problems.append(f"duplicate trigger id {tid!r}")
         seen_ids.add(tid)
@@ -393,15 +399,92 @@ def ratify(symbol: str, *, theses_dir: Path = THESES_DIR, ask=input) -> dict:
     if not circle:
         raise ValueError("outside the circle of competence -> PASS (the framework wins)")
 
-    doc.update({"status": "committed", "version": 1,
+    committed = Path(theses_dir) / "committed"
+    path = committed / f"{symbol}.json"
+    version, carried_state = 1, {}
+    if path.exists():
+        version, carried_state = _goalpost_guard(path, doc, ask=ask)
+
+    doc.update({"status": "committed", "version": version,
                 "ratified_at": _dt.date.today().isoformat(),
                 "conviction": conviction, "circle_of_competence": circle,
-                "trigger_state": {}})
-    committed = Path(theses_dir) / "committed"
+                "trigger_state": carried_state})
     committed.mkdir(parents=True, exist_ok=True)
-    path = committed / f"{symbol}.json"
-    path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+    import os
+    os.replace(tmp, path)
     return doc
+
+
+def _loosened(old: dict, new: dict) -> list[str]:
+    """Triggers that got easier to satisfy, or vanished, between two theses. This is the
+    goalpost move the architecture's guard exists to catch: rewriting the rule you were
+    about to fail is how a thesis becomes unfalsifiable."""
+    def by_id(thesis_doc):
+        return {t.get("id"): t for t in (thesis_doc.get("triggers") or [])}
+    before, after = by_id(old.get("thesis") or {}), by_id(new.get("thesis") or {})
+    moved = [f"{tid} was REMOVED ({t.get('statement')!r})"
+             for tid, t in before.items() if tid not in after]
+    for tid, old_t in before.items():
+        new_t = after.get(tid)
+        if not new_t or old_t.get("kind") != "metric" or new_t.get("kind") != "metric":
+            continue
+        if old_t.get("metric") != new_t.get("metric"):
+            moved.append(f"{tid} now tests {new_t.get('metric')} instead of "
+                         f"{old_t.get('metric')}")
+            continue
+        o_thr, n_thr = old_t.get("threshold"), new_t.get("threshold")
+        op = old_t.get("op")
+        if isinstance(o_thr, (int, float)) and isinstance(n_thr, (int, float)):
+            easier = (n_thr < o_thr) if op in ("<", "<=") else (n_thr > o_thr)
+            if easier:
+                moved.append(f"{tid} threshold moved {o_thr} -> {n_thr} (easier to pass)")
+        o_ck, n_ck = old_t.get("consecutive_checks") or 1, new_t.get("consecutive_checks") or 1
+        if n_ck > o_ck:
+            moved.append(f"{tid} now needs {n_ck} consecutive checks, was {o_ck} "
+                         f"(slower to fire)")
+    return moved
+
+
+def _goalpost_guard(path: Path, new_doc: dict, *, ask) -> tuple[int, dict]:
+    """Re-ratifying over an existing committed thesis. Returns (version, trigger_state
+    to carry) and refuses quietly-destructive rewrites.
+
+    Three things the naive overwrite destroyed: the version history, the monitor's
+    accumulated streaks, and — worst — a standing `broken` status, i.e. live sell advice.
+    Re-arming a broken thesis is exactly the sunk-cost move the Constitution names, so it
+    takes an explicit typed acknowledgement rather than a silent file write."""
+    old = json.loads(path.read_text(encoding="utf-8"))
+    version = int(old.get("version") or 1) + 1
+    status = old.get("status")
+
+    moved = _loosened(old, new_doc)
+    if moved:
+        print(f"GOALPOST WARNING — triggers got easier since v{old.get('version')}:")
+        for line in moved:
+            print(f"  - {line}")
+
+    if status in ("broken", "under_review"):
+        answer = ask(
+            f"{path.stem}'s committed thesis is {status.upper()}"
+            + (" — that is standing sell advice. " if status == "broken" else " — ")
+            + "Re-ratifying re-arms it and clears that state. Type 're-arm' to proceed: ")
+        if answer.strip().lower() != "re-arm":
+            raise ValueError(f"{path.stem}: re-ratification declined; the {status} "
+                             f"thesis stands")
+
+    archive = path.parent / "history"
+    archive.mkdir(parents=True, exist_ok=True)
+    (archive / f"{path.stem}.v{old.get('version') or 1}.json").write_text(
+        json.dumps(old, indent=2), encoding="utf-8")
+    # Streaks are carried ONLY for triggers that survived unchanged; a rewritten trigger
+    # starts its evidence over rather than inheriting a streak it never earned.
+    old_triggers = {t.get("id"): t for t in ((old.get("thesis") or {}).get("triggers") or [])}
+    new_triggers = {t.get("id"): t for t in ((new_doc.get("thesis") or {}).get("triggers") or [])}
+    carried = {tid: state for tid, state in (old.get("trigger_state") or {}).items()
+               if tid in new_triggers and old_triggers.get(tid) == new_triggers.get(tid)}
+    return version, carried
 
 
 # --- CLI ----------------------------------------------------------------------------------

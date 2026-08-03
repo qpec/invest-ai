@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
+import os
 from pathlib import Path
 
 import llm
@@ -82,7 +83,18 @@ def check_trigger(trigger: dict, *, symbol: str, bundle=None, evaluated=None,
         hit = {"<": value < threshold, "<=": value <= threshold,
                ">": value > threshold, ">=": value >= threshold}[op]
         needed = trigger.get("consecutive_checks") or 1
-        streak = (state.get("streak") or 0) + 1 if hit else 0
+        # IDEMPOTENT PER as_of. A second run on the same date — a manual re-run, a systemd
+        # retry, crash recovery — re-reads the SAME unchanged filings, and counting that as
+        # another "consecutive check" would let one week's data satisfy a rule that asked
+        # for two. A repeat hit on a date already counted holds the streak where it is; a
+        # repeat that now misses still resets, because a miss is new information.
+        previous = state.get("streak") or 0
+        if not hit:
+            streak = 0
+        elif state.get("last_checked") == as_of and previous > 0:
+            streak = previous
+        else:
+            streak = previous + 1
         state.update({"streak": streak, "last_value": value, "last_checked": as_of})
         tripped = hit and streak >= needed
         detail = (f"{trigger['metric']} = {value:,.2f} {op} {threshold:,.2f}"
@@ -166,6 +178,16 @@ def check_thesis(doc: dict, *, bundle=None, client=None, as_of: str = "") -> dic
 
 # --- The weekly run -----------------------------------------------------------------------
 
+def _save(path: Path, doc: dict):
+    """Atomic write. A committed thesis is portfolio data living OUTSIDE the code repo
+    (NFR2) — its file is the only copy, so a truncate-then-write interrupted by a crash
+    destroys it. Write beside it, then rename: the rename is atomic, so the file is
+    either the old thesis or the new one, never half of each."""
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def _render(report: list[dict], as_of: str) -> str:
     lines = [f"# Weekly thesis monitor — {as_of}", ""]
     if not report:
@@ -178,6 +200,11 @@ def _render(report: list[dict], as_of: str) -> str:
                      "trigger was checked. Doing nothing is the plan working (FR4).")
     for entry in report:
         lines += ["", f"## {entry['symbol']} — {entry['status'].upper()}"]
+        if entry["status"] == "error":
+            lines.append(f"**This thesis could not be read or checked: "
+                         f"{entry.get('error')}. Nothing about it was verified — that is "
+                         f"a gap, not an all-clear.**")
+            continue
         if entry["status"] == "broken":
             lines.append("**A pre-committed break trigger fired: the thesis is broken. "
                          "The standing advice is to sell, ignoring cost basis (FR7). "
@@ -199,10 +226,19 @@ def run(*, theses_dir: Path, bundles_by_symbol: dict, client=None, as_of: str,
     committed = sorted(Path(theses_dir, "committed").glob("*.json"))
     report = []
     for path in committed:
-        doc = json.loads(path.read_text(encoding="utf-8"))
-        entry = check_thesis(doc, bundle=bundles_by_symbol.get(doc["symbol"]),
-                             client=client, as_of=as_of)
-        path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+        # One bad thesis must not silence the whole monitor. Without this, a corrupt file
+        # raises out of the loop, every later thesis goes unchecked, and no report is
+        # written at all — the failure mode that looks exactly like "nothing to report".
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+            entry = check_thesis(doc, bundle=bundles_by_symbol.get(doc["symbol"]),
+                                 client=client, as_of=as_of)
+            _save(path, doc)
+        except Exception as error:  # noqa: BLE001 — every failure must still be reported
+            report.append({"symbol": path.stem, "status": "error", "broken_by": [],
+                           "review_by": [], "unchecked": ["(whole thesis)"],
+                           "triggers": [], "error": f"{type(error).__name__}: {error}"})
+            continue
         report.append(entry)
     reports_dir.mkdir(parents=True, exist_ok=True)
     out = reports_dir / f"monitor-{as_of}.md"

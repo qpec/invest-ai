@@ -13,6 +13,7 @@ import pytest
 
 import llm
 import monitor
+import scoring
 import thesis
 
 
@@ -238,6 +239,62 @@ class TestRatify:
         with pytest.raises(ValueError, match="circle of competence"):
             thesis.ratify("AAA", theses_dir=tmp_path, ask=lambda _: next(answers))
 
+    def test_re_ratifying_a_broken_thesis_demands_an_explicit_re_arm(self, tmp_path):
+        """A broken thesis is standing sell advice. Silently overwriting it — which the
+        naive write did — is the sunk-cost trap operating itself."""
+        committed = tmp_path / "committed"
+        committed.mkdir(parents=True)
+        old = committed_doc()
+        old["status"] = "broken"
+        (committed / "AAA.json").write_text(json.dumps(old))
+        self._write_draft(tmp_path, {"symbol": "AAA", "status": "draft",
+                                     "thesis": draft()})
+        answers = iter(["high", "cloud", "no"])
+        with pytest.raises(ValueError, match="re-ratification declined"):
+            thesis.ratify("AAA", theses_dir=tmp_path, ask=lambda _: next(answers))
+        assert json.loads((committed / "AAA.json").read_text())["status"] == "broken"
+
+    def test_re_ratification_versions_archives_and_keeps_earned_streaks(self, tmp_path):
+        committed = tmp_path / "committed"
+        committed.mkdir(parents=True)
+        old = committed_doc()
+        old["trigger_state"] = {"T1": {"streak": 1}, "T2": {"last_checked": "w1"}}
+        (committed / "AAA.json").write_text(json.dumps(old))
+        # T1 unchanged (streak carries); T2's question is rewritten (streak does not).
+        rewritten = draft(triggers=[metric_trigger(),
+                                    question_trigger(question="A different question?"),
+                                    question_trigger("T3", kind="event", action="break",
+                                                     question="Has the CEO departed?")])
+        self._write_draft(tmp_path, {"symbol": "AAA", "status": "draft",
+                                     "thesis": rewritten})
+        answers = iter(["high", "cloud"])
+        doc = thesis.ratify("AAA", theses_dir=tmp_path, ask=lambda _: next(answers))
+        assert doc["version"] == 2
+        assert (committed / "history" / "AAA.v1.json").exists()
+        assert doc["trigger_state"] == {"T1": {"streak": 1}}
+
+    def test_a_loosened_threshold_is_announced(self, tmp_path, capsys):
+        """The goalpost guard: rewriting the rule you were about to fail is how a thesis
+        becomes unfalsifiable. It must be said out loud at ratification."""
+        committed = tmp_path / "committed"
+        committed.mkdir(parents=True)
+        (committed / "AAA.json").write_text(json.dumps(committed_doc()))
+        loose = draft(triggers=[metric_trigger(threshold=2.0),  # was 12.0, "<" -> easier
+                                question_trigger(),
+                                question_trigger("T3", kind="event", action="break",
+                                                 question="Has the CEO departed?")])
+        self._write_draft(tmp_path, {"symbol": "AAA", "status": "draft", "thesis": loose})
+        answers = iter(["high", "cloud"])
+        thesis.ratify("AAA", theses_dir=tmp_path, ask=lambda _: next(answers))
+        assert "GOALPOST WARNING" in capsys.readouterr().out
+
+    def test_a_trigger_without_an_id_is_refused(self):
+        """The monitor keys evidence by trigger id; an empty id lets two triggers share
+        one streak entry."""
+        bad = draft(triggers=[dict(metric_trigger(), id=""), question_trigger(),
+                              question_trigger("T3")])
+        assert any("no id" in p for p in thesis.validate(bad))
+
     def test_an_unvalidatable_draft_cannot_be_ratified(self, tmp_path):
         bad = draft(triggers=[metric_trigger(metric="vibes"), question_trigger(),
                               question_trigger("T3")])
@@ -354,6 +411,45 @@ class TestMetricTriggers:
         assert result["status"] == "broken"
         assert doc["status"] == "broken"
 
+    def test_a_same_day_rerun_does_not_double_count_the_streak(self, monkeypatch):
+        """A manual re-run, a systemd retry, or crash recovery re-reads the SAME filings.
+        Counting that as a second consecutive check would let one week satisfy a rule
+        that pre-committed to two."""
+        doc = committed_doc(triggers=[metric_trigger(checks=2)])
+        monkeypatch.setattr(monitor.scoring, "evaluate",
+                            lambda bundle: {"ofcf_margin": 8.0})
+        first = monitor.check_thesis(doc, bundle={"symbol": "AAA"}, as_of="2026-08-08")
+        second = monitor.check_thesis(doc, bundle={"symbol": "AAA"}, as_of="2026-08-08")
+        assert first["status"] == "intact" and second["status"] == "intact"
+        assert doc["trigger_state"]["T1"]["streak"] == 1
+        # A genuinely new week still advances it.
+        third = monitor.check_thesis(doc, bundle={"symbol": "AAA"}, as_of="2026-08-15")
+        assert third["status"] == "broken"
+
+    def test_a_same_day_rerun_that_now_misses_still_resets(self, monkeypatch):
+        """Idempotence must not freeze a streak: a miss is new information whenever it
+        arrives."""
+        doc = committed_doc(triggers=[metric_trigger(checks=2)])
+        monkeypatch.setattr(monitor.scoring, "evaluate",
+                            lambda bundle: {"ofcf_margin": 8.0})
+        monitor.check_thesis(doc, bundle={"symbol": "AAA"}, as_of="w1")
+        monkeypatch.setattr(monitor.scoring, "evaluate",
+                            lambda bundle: {"ofcf_margin": 30.0})
+        monitor.check_thesis(doc, bundle={"symbol": "AAA"}, as_of="w1")
+        assert doc["trigger_state"]["T1"]["streak"] == 0
+
+    def test_a_missing_revenue_denominator_is_unchecked_not_a_zero_margin(self):
+        """scoring returned 0.0 for owner-FCF margin when revenue was missing. Against a
+        pre-committed '< 12%' break trigger that sentinel reads as the WORST possible
+        margin and fires the sell rule on a data gap. It must be None -> UNCHECKED."""
+        bundle = {"symbol": "AAA", "annual": {"cashflow": {"2025-12-31": {
+            "Operating Cash Flow": 100.0, "Capital Expenditure": -10.0}}}}
+        assert scoring.evaluate(bundle)["ofcf_margin"] is None
+        doc = committed_doc(triggers=[metric_trigger(checks=1)])
+        result = monitor.check_thesis(doc, bundle=bundle, as_of="w1")
+        assert result["status"] == "intact" and result["unchecked"] == ["T1"]
+        assert doc["trigger_state"].get("T1", {}).get("streak") in (None, 0)
+
     def test_an_uncomputable_metric_is_unchecked_never_safe(self, monkeypatch):
         doc = committed_doc(triggers=[metric_trigger()])
         monkeypatch.setattr(monitor.scoring, "evaluate", lambda bundle: {})
@@ -425,6 +521,42 @@ class TestWeeklyRun:
                     client=None, as_of="2026-08-08", reports_dir=tmp_path / "reports")
         rendered = (tmp_path / "reports" / "monitor-2026-08-08.md").read_text()
         assert "No action needed" in rendered              # FR4, first-class
+
+    def test_one_corrupt_thesis_cannot_silence_the_whole_monitor(self, tmp_path,
+                                                                 monkeypatch):
+        """Without isolation a corrupt file raises out of the loop: every later thesis
+        goes unchecked and NO report is written — which looks exactly like 'all clear'."""
+        committed = tmp_path / "theses" / "committed"
+        committed.mkdir(parents=True)
+        (committed / "AAA.json").write_text("{ not json")
+        (committed / "BBB.json").write_text(json.dumps(
+            committed_doc("BBB", triggers=[metric_trigger(checks=1)])))
+        monkeypatch.setattr(monitor.scoring, "evaluate",
+                            lambda bundle: {"ofcf_margin": 8.0})
+        report = monitor.run(theses_dir=tmp_path / "theses",
+                             bundles_by_symbol={"BBB": {"symbol": "BBB"}},
+                             client=None, as_of="2026-08-08",
+                             reports_dir=tmp_path / "reports")
+        statuses = {e["symbol"]: e["status"] for e in report}
+        assert statuses == {"AAA": "error", "BBB": "broken"}
+        rendered = (tmp_path / "reports" / "monitor-2026-08-08.md").read_text()
+        assert "could not be read" in rendered and "not an all-clear" in rendered
+
+    def test_the_thesis_file_is_written_atomically(self, tmp_path, monkeypatch):
+        """A committed thesis is the only copy of portfolio data outside the code repo:
+        an interrupted truncate-then-write destroys it."""
+        calls = []
+        real_replace = monitor.os.replace
+        monkeypatch.setattr(monitor.os, "replace",
+                            lambda src, dst: (calls.append((src, dst)),
+                                              real_replace(src, dst))[1])
+        committed = tmp_path / "theses" / "committed"
+        committed.mkdir(parents=True)
+        (committed / "AAA.json").write_text(json.dumps(committed_doc()))
+        monitor.run(theses_dir=tmp_path / "theses", bundles_by_symbol={},
+                    client=None, as_of="w1", reports_dir=tmp_path / "reports")
+        assert calls and str(calls[0][0]).endswith(".json.tmp")
+        assert not list(committed.glob("*.tmp"))
 
     def test_no_committed_theses_renders_the_empty_state(self, tmp_path):
         report = monitor.run(theses_dir=tmp_path / "theses", bundles_by_symbol={},

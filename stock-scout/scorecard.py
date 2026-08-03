@@ -212,7 +212,7 @@ _LEG_OF = {
 _MISSING_REASON = {
     "roic": "no TTM EBIT or Greenblatt capital base (or the base is <= 0 with EBIT <= 0)",
     "gross_margin": "no TTM gross profit or revenue",
-    "owner_fcf_margin": "no TTM owner-FCF",
+    "owner_fcf_margin": "no TTM owner-FCF or revenue",
     "owner_fcf_yield": "no market cap, own EV <= 0, or no TTM owner-FCF",
     "net_debt_ebitda": "TTM EBITDA is 0 or missing, or debt/cash missing",
     "sbc": "no TTM SBC or revenue",

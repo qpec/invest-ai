@@ -529,8 +529,17 @@ def _evaluate(bundle: dict) -> dict:
     gm_level = (100.0 * ttm["gross_profit"] / rev
                 if ttm["gross_profit"] is not None and rev is not None and rev > 0 else None)
     gm_cv = _gross_margin_cv(bundle)
-    ofcf_margin = (None if owner_fcf is None
-                   else 100.0 * owner_fcf / rev if rev is not None and rev > 0 else 0.0)
+    # A missing revenue denominator is NOT a 0% margin. The vendored grader returned 0.0
+    # here, and that sentinel is a lie with teeth now that monitor.py tests this metric
+    # against pre-committed thresholds: a bundle with owner-FCF but no revenue would read
+    # as the worst possible margin and trip a "< 12%" break trigger on a data gap.
+    # Returning None routes it to the "not computable -> UNCHECKED" path instead, and
+    # matches §4.7's rule that absent data shrinks a denominator rather than scoring zero.
+    # Provably inert for the GRADE: this branch only fires when rev is None or <= 0, and
+    # gm_level is None under exactly that condition and sits BEFORE ofcf_margin in
+    # _REQUIRED — so the name already suspends as INSUFFICIENT with the same reason.
+    ofcf_margin = (100.0 * owner_fcf / rev
+                   if owner_fcf is not None and rev is not None and rev > 0 else None)
 
     rev_growth, rev_note = _revenue_growth(bundle)
     ps_growth, ps_note, low_base = _per_share_ofcf_growth(bundle)
