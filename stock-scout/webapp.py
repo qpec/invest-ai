@@ -161,7 +161,7 @@ def _round(value, digits=2):
 
 
 def registry_map(bundle: dict) -> dict[str, float | None]:
-    evaluated = scoring.evaluate(bundle)
+    evaluated = thesis_mod.registry_evaluate(bundle)
     return {name: thesis_mod.metric_value(name, bundle, evaluated)
             for name in thesis_mod.METRICS}
 
@@ -328,12 +328,14 @@ def assemble(*, sec_data: str, prices_dir: str | None, universe: str, as_of: str
         [{"symbol": r["symbol"], "card": r["card"]} for r in rows], len(rows))
     top_rank = {r["symbol"]: i + 1 for i, r in enumerate(top_rows)}
 
-    registry_by_symbol, prov_by_symbol = {}, {}
+    import registry as registry_mod
+    registry_by_symbol, prov_by_symbol, composites_by_symbol = {}, {}, {}
     for bundle in bundles:
         symbol = bundle["symbol"]
         registry_by_symbol[symbol] = registry_map(bundle)
         prov_by_symbol[symbol] = provenance(pre_registry.get(symbol),
                                             registry_by_symbol[symbol])
+        composites_by_symbol[symbol] = registry_mod.composites(bundle)
 
     compact, details = [], {}
     rank_order = sorted(rows, key=lambda r: (
@@ -375,6 +377,7 @@ def assemble(*, sec_data: str, prices_dir: str | None, universe: str, as_of: str
                     for k, v in registry.items()},
             "vendor": {k: v for k, v in (vendor_display.get(symbol) or {}).items()
                        if registry.get(k) is None},
+            "composites": composites_by_symbol.get(symbol),
             "mc": _round(bundle.get("market_cap"), 0),
         }
 
@@ -757,8 +760,11 @@ const fmtMc = v => {
 };
 const fmtV = (v, unit) => {
   if (v == null) return '—';
-  if (unit && unit.startsWith('USD')) return fmtMc(v).replace('$', '$');
+  if (unit && unit.startsWith('USD/share')) return '$' + v.toFixed(2);
+  if (unit && unit.startsWith('USD')) return fmtMc(v);
   if (unit && unit.startsWith('x')) return v.toFixed(2) + '×';
+  if (unit && (unit.startsWith('pts') || unit.startsWith('margin pts')))
+    return v.toFixed(1) + ' pts';
   return (Math.abs(v) >= 100 ? v.toFixed(0) : v.toFixed(1)) + '%';
 };
 const REG_COLS = ['owner_fcf_yield_pct', 'roic_pct', 'revenue_growth_pct',
@@ -767,7 +773,15 @@ const REG_SHORT = {owner_fcf_yield_pct:'FCF yield', roic_pct:'ROIC',
   revenue_growth_pct:'Growth', gross_margin_pct:'Gross margin',
   net_debt_to_ebitda:'Net debt/EBITDA', owner_fcf_margin_pct:'FCF margin',
   sbc_pct_of_revenue:'SBC', share_count_trend_pct_per_year:'Share trend',
-  accrual_divergence_pct:'Accruals', owner_fcf_usd:'Owner FCF'};
+  accrual_divergence_pct:'Accruals', owner_fcf_usd:'Owner FCF',
+  owner_fcf_per_share_usd:'FCF / share', fcf_conversion_pct:'FCF conversion',
+  cash_conversion_pct:'Cash conversion', owner_fcf_per_share_growth_pct:'FCF/sh growth',
+  incremental_roic_pct:'Incremental ROIC', capex_intensity_pct:'Capex intensity',
+  rd_intensity_pct:'R&D intensity', operating_margin_pct:'Operating margin',
+  operating_margin_mad_pts:'Op-margin stability', interest_coverage_x:'Interest cover',
+  current_ratio:'Current ratio', goodwill_pct_assets:'Goodwill + intang.',
+  tax_gap_pts:'Tax gap', dividends_pct_of_ocf:'Dividends / OCF',
+  buybacks_pct_of_ocf:'Buybacks / OCF', acquisition_spend_pct_of_ocf:'Acquisitions / OCF'};
 
 const VERDICT_CLS = {Robust:'p-good', Ordinary:'p-quiet', Fragile:'p-serious',
   Ruinous:'p-crit', Unknown:'p-ghost'};
@@ -981,12 +995,30 @@ function renderPanel(sym, row, d){
     ${veto}
     <details class="fold"><summary>All seven probes</summary><div class="fbody">${probes}</div></details>
     ${flags ? `<h3>Flags</h3><div>${flags}</div>` : ''}
+    ${compositesBlock(d.composites)}
     <h3>Sources</h3>
     <div style="font-size:12.5px">
       <a href="https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&company=${encodeURIComponent(sym)}&type=10-K&dateb=&owner=include&count=10" target="_blank" rel="noopener">EDGAR filings ↗</a>
       · TTM ${esc((sc.ttm && sc.ttm.basis) || '—')} through ${esc((sc.ttm && sc.ttm.through) || '—')}
       ${sc.note ? `<div style="color:var(--text2);margin-top:4px">${esc(sc.note)}</div>` : ''}
     </div>`;
+}
+
+function compositesBlock(c){
+  if (!c) return '';
+  const p = c.piotroski || {}, a = c.altman || {};
+  const zoneCls = {safe: 'p-good', grey: 'p-warn', distress: 'p-crit'}[a.zone] || 'p-ghost';
+  const checks = Object.entries(p.checks || {}).map(([k, v]) => `
+    <div class="metric-row"><span class="k">${esc(k.replace(/_/g, ' '))}</span>
+      <span class="v">${v == null ? '<span style="color:var(--faint)">unmeasured</span>'
+        : v ? '✓' : '✗'}</span></div>`).join('');
+  return `<h3>Composites <span style="text-transform:none;letter-spacing:0">(display-only — a composite never fires a trigger)</span></h3>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px">
+      ${pill('Piotroski F ' + (p.score ?? '—') + ' of ' + (p.measured ?? 0) + ' measured (9 tests)', 'p-acc')}
+      ${pill('Altman Z ' + (a.z == null ? 'unmeasured' : a.z + ' · ' + a.zone), zoneCls)}
+    </div>
+    <details class="fold"><summary>The nine Piotroski tests</summary>
+      <div class="fbody">${checks}</div></details>`;
 }
 
 /* ---------- charts ---------- */

@@ -108,7 +108,13 @@ INSTANT_TAGS = frozenset(
 # disclosure tag is not in _BALANCE_CONCEPTS, so it cannot enter the balance section.
 DISCLOSURE_TAGS = frozenset(
     tag for chain in pit._DISCLOSURE_CONCEPTS.values() for tag in chain)
-FOLDED_TAGS = INSTANT_TAGS | DISCLOSURE_TAGS
+# Registry-v2 supplement POINTS (goodwill, intangibles, liabilities, retained earnings):
+# the bulk export's tag index carries these instants for most of the universe (measured
+# 2026-08-03: Goodwill 1,580 filers, RetainedEarningsAccumulatedDeficit 1,893), so
+# folding them lifts goodwill_pct_assets and Altman Z from tier-2-only to tier-1.
+SUPPLEMENT_POINT_TAGS = frozenset(
+    tag for chain in pit._SUPPLEMENT_POINT_CONCEPTS.values() for tag in chain)
+FOLDED_TAGS = INSTANT_TAGS | DISCLOSURE_TAGS | SUPPLEMENT_POINT_TAGS
 
 # --prices column inference: normalized (lowercased, non-alphanumerics dropped) names.
 _SYMBOL_ALIASES = ("symbol", "ticker", "sym")

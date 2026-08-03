@@ -47,16 +47,37 @@ MONITOR_SEARCH_BUDGET = 5            # searches per weekly trigger check
 # v_yield is a fraction in scoring and is normalized to percent here.
 
 METRICS = {
+    # --- the engine (cash) ---------------------------------------------------------
     "owner_fcf_margin_pct": ("ofcf_margin", "% of TTM revenue", None),
-    "owner_fcf_yield_pct": ("v_yield", "% of own EV", lambda v: v * 100.0),
+    "owner_fcf_usd": ("owner_fcf", "USD (TTM)", None),
+    "owner_fcf_per_share_usd": ("fcf_per_share", "USD/share (TTM, split-adjusted)", None),
+    "fcf_conversion_pct": ("fcf_conversion", "% of net income (incl NCI)", None),
+    "cash_conversion_pct": ("cash_conversion", "% of TTM EBITDA", None),
+    # --- growth & reinvestment ------------------------------------------------------
     "revenue_growth_pct": ("rev_growth", "%/yr (annual CAGR)", None),
+    "owner_fcf_per_share_growth_pct": ("ps_growth", "%/yr (per-share CAGR)", None),
     "roic_pct": ("roic", "% (Greenblatt)", None),
+    "incremental_roic_pct": ("incremental_roic", "% (3y dNOPAT/dIC)", None),
+    "capex_intensity_pct": ("capex_intensity", "% of TTM revenue", None),
+    "rd_intensity_pct": ("rd_intensity", "% of TTM revenue", None),
+    # --- pricing power --------------------------------------------------------------
     "gross_margin_pct": ("gm_level", "% of TTM revenue", None),
+    "operating_margin_pct": ("op_margin", "% of TTM revenue", None),
+    "operating_margin_mad_pts": ("op_margin_mad", "margin pts (annual MAD)", None),
+    # --- balance sheet --------------------------------------------------------------
+    "owner_fcf_yield_pct": ("v_yield", "% of own EV", lambda v: v * 100.0),
     "net_debt_to_ebitda": ("nd2e", "x (TTM)", None),
+    "interest_coverage_x": ("interest_coverage", "x (TTM EBIT/interest)", None),
+    "current_ratio": ("current_ratio", "x (latest balance)", None),
+    "goodwill_pct_assets": ("goodwill_pct", "% of total assets (incl intangibles)", None),
+    # --- stewardship & integrity ----------------------------------------------------
     "sbc_pct_of_revenue": ("sbc_pct", "% of TTM revenue", None),
     "share_count_trend_pct_per_year": ("share_trend", "%/yr (split-adjusted)", None),
     "accrual_divergence_pct": ("accrual", "% of TTM revenue (NI incl NCI - OCF)", None),
-    "owner_fcf_usd": ("owner_fcf", "USD (TTM)", None),
+    "tax_gap_pts": ("tax_gap", "pts of pretax (effective - cash tax)", None),
+    "dividends_pct_of_ocf": ("dividends_pct_ocf", "% of TTM OCF", None),
+    "buybacks_pct_of_ocf": ("buybacks_pct_ocf", "% of TTM OCF", None),
+    "acquisition_spend_pct_of_ocf": ("acquisitions_pct_ocf", "% of TTM OCF", None),
 }
 
 TRIGGER_KINDS = ("metric", "event", "narrative")
@@ -172,6 +193,16 @@ TRIGGER_RULES = """## Trigger discipline (this is the part the machine holds you
 
 # --- Metric evaluation (shared with monitor.py) ------------------------------------------
 
+def registry_evaluate(bundle: dict) -> dict:
+    """scoring.evaluate() plus the Registry-v2 extras (registry.py), merged — the ONE
+    dict `metric_value` reads. The decision layer's own keys are computed first and the
+    extras can never shadow them (the merge order guarantees it), so the grader's
+    arithmetic remains the authority wherever the two could disagree."""
+    import registry
+    evaluated = scoring.evaluate(bundle)
+    return {**registry.extras(bundle, evaluated), **evaluated}
+
+
 def metric_value(name: str, bundle: dict, evaluated: dict | None = None):
     """The current value of a registry metric for one Bundle, via scoring.evaluate — the
     same code path the grader runs, so the monitor cannot disagree with the live run."""
@@ -179,7 +210,7 @@ def metric_value(name: str, bundle: dict, evaluated: dict | None = None):
     if spec is None:
         raise KeyError(f"not a registry metric: {name}")
     key, _, transform = spec
-    metrics = evaluated if evaluated is not None else scoring.evaluate(bundle)
+    metrics = evaluated if evaluated is not None else registry_evaluate(bundle)
     value = metrics.get(key)
     if value is None:
         return None
@@ -253,7 +284,7 @@ def _fmt(value, digits=1):
 def packet(bundle: dict, card: dict, inv: dict, *, name=None, sector=None) -> str:
     """The metrics half of the builder's grounding: both judgements, unmerged, plus the
     registry's current values so trigger thresholds are set against known numbers."""
-    evaluated = scoring.evaluate(bundle)
+    evaluated = registry_evaluate(bundle)
     lines = [f"SYMBOL: {bundle.get('symbol')}  ({name or 'name unknown'} — "
              f"{sector or 'sector unknown'})",
              f"market cap: {_fmt(bundle.get('market_cap'), 0)} USD",

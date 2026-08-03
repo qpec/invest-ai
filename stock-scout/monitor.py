@@ -136,7 +136,7 @@ def check_thesis(doc: dict, *, bundle=None, verdicts: dict | None = None,
     """All triggers of one committed thesis -> the FR7 status plus per-trigger results.
     Mutates doc's trigger_state and status (the caller writes the file)."""
     symbol = doc["symbol"]
-    evaluated = scoring.evaluate(bundle) if bundle else None
+    evaluated = thesis_mod.registry_evaluate(bundle) if bundle else None
     trigger_state = doc.setdefault("trigger_state", {})
     results, broken_by, review_by, unchecked = [], [], [], []
 

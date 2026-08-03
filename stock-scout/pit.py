@@ -98,6 +98,42 @@ _SHARES_TAG = "EntityCommonStockSharesOutstanding"
 # the newest real balance date would silently become the entire latest-balance payload —
 # cash, debt, current ratio and ROIC all replaced by one tag. In their own dict they reach
 # exactly their own consumer, and the balance section is bit-for-bit what it was.
+# SUPPLEMENT concepts — Registry v2 inputs (REGISTRY-DESIGN.md, ratified 2026-08-03).
+# Deliberately NOT in the statement concept dicts: `_section` unions every label's period
+# ends into the statement, and scoring's TTM selection reads `sorted(inc_src)[-1:]` — so a
+# supplement tag whose newest period post-dates revenue's would create a period row without
+# revenue and silently break TTM for the frozen decision layer. In their own stream they
+# reach exactly their one consumer (registry.py), and every statement section stays
+# bit-identical to the pre-v2 pipeline by construction (verified against a full-universe
+# baseline diff, 2026-08-03).
+_SUPPLEMENT_FLOW_CONCEPTS = {
+    # income-side (summed over the TTM's income periods)
+    "Interest Expense": ("InterestExpense", "InterestExpenseNonoperating",
+                         "InterestExpenseDebt"),
+    "Research And Development": ("ResearchAndDevelopmentExpense",),
+    "Income Tax Expense": ("IncomeTaxExpenseBenefit",),
+    "Pretax Income": (
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments"),
+    # cashflow-side (summed over the TTM's cashflow periods). Dividends and buybacks are
+    # ALSO regular cashflow rows; they are re-merged here BY REFERENCE to the statement
+    # chains so the two access paths cannot drift (the first cut shipped a narrower
+    # dividend chain here, and the zero-default turned that drift into a confident 0%).
+    "Acquisitions": ("PaymentsToAcquireBusinessesNetOfCashAcquired",),
+    "Income Taxes Paid": ("IncomeTaxesPaidNet", "IncomeTaxesPaid"),
+}
+_SUPPLEMENT_FLOW_CONCEPTS["Cash Dividends Paid"] = \
+    _CASHFLOW_CONCEPTS["Cash Dividends Paid"]
+_SUPPLEMENT_FLOW_CONCEPTS["Repurchase Of Capital Stock"] = \
+    _CASHFLOW_CONCEPTS["Repurchase Of Capital Stock"]
+_SUPPLEMENT_POINT_CONCEPTS = {
+    "Goodwill": ("Goodwill",),
+    "Intangible Assets": ("IntangibleAssetsNetExcludingGoodwill",
+                          "FiniteLivedIntangibleAssetsNet"),
+    "Total Liabilities": ("Liabilities",),
+    "Retained Earnings": ("RetainedEarningsAccumulatedDeficit",),
+}
+
 _DISCLOSURE_CONCEPTS = {
     # "Long-Term Debt, Maturity, Year One" — tagged by ~66% of the filers in the 2026 SEC
     # export, median end 2025-12-31. This is §3.6's "debt due within twelve months".
@@ -106,6 +142,26 @@ _DISCLOSURE_CONCEPTS = {
     # with its date attached precisely because it is that stale (§3.7 flags, never scores).
     "concentration_risk": ("ConcentrationRiskPercentage1",),
 }
+
+
+def supplements(facts: dict, as_of) -> dict:
+    """The Registry-v2 supplement stream: {"flows": {label: {"annual": {end: v},
+    "quarterly": {end: v}}}, "points": {label: {"value", "end"}}}. Same PIT filter as
+    everything else (only facts filed on or before `as_of` are visible); points carry
+    their period end so the consumer can refuse one that is stale relative to the
+    balance date rather than trusting it silently."""
+    as_of = _iso(as_of)
+    flows = {}
+    for label, tags in _SUPPLEMENT_FLOW_CONCEPTS.items():
+        annual, quarterly = _chain_flows(facts, tags, as_of)
+        flows[label] = {"annual": annual, "quarterly": quarterly}
+    points = {}
+    for label, tags in _SUPPLEMENT_POINT_CONCEPTS.items():
+        merged = _merge_chain(facts, tags, as_of, instant=True)
+        if merged:
+            end = max(merged)
+            points[label] = {"value": merged[end], "end": end}
+    return {"flows": flows, "points": points}
 
 
 def _iso(d) -> str:
@@ -295,13 +351,35 @@ def _debt_with_unlevered_dates(debt: dict, maps: dict) -> dict:
     return out
 
 
+def _chain_flows(facts: dict, tags: tuple, as_of: str) -> tuple[dict, dict]:
+    """Annual and quarterly flows for one tag CHAIN — derived PER TAG, then merged
+    first-present-wins per period end.
+
+    The order matters and is the 2026-08-03 review's fabricated-D&A fix: merging the
+    chain BEFORE differencing let quarterly_flows subtract a YTD tagged under one
+    concept from a full year tagged under another. Where the two tags measure different
+    things (CRM: DepreciationDepletionAndAmortization for the FY but a narrower
+    DepreciationAndAmortization for the YTDs), the difference booked a NEGATIVE fourth
+    quarter (-$1.3bn of D&A) that then contaminated every TTM built on it. Differencing
+    within one tag makes that arithmetic impossible; the cost is that a filer whose YTDs
+    and FY genuinely live under different tags of the chain loses its derived Q4 and
+    falls back to the annual TTM basis — staler, but true."""
+    annual, quarterly = {}, {}
+    for tag in tags:
+        periods = _latest_filed(_unit_entries(facts, "us-gaap", tag), as_of,
+                                instant=False)
+        for end, value in annual_flows(periods).items():
+            annual.setdefault(end, value)
+        for end, value in quarterly_flows(periods).items():
+            quarterly.setdefault(end, value)
+    return annual, quarterly
+
+
 def _flow_maps(facts: dict, concepts: dict, as_of: str) -> tuple[dict, dict]:
     """Per-label annual and quarterly {end: value} maps for one statement's concepts."""
     annual, quarterly = {}, {}
     for label, tags in concepts.items():
-        periods = _merge_chain(facts, tags, as_of, instant=False)
-        annual[label] = annual_flows(periods)
-        quarterly[label] = quarterly_flows(periods)
+        annual[label], quarterly[label] = _chain_flows(facts, tags, as_of)
     return annual, quarterly
 
 
@@ -665,6 +743,7 @@ def as_of_bundle(facts: dict, symbol: str, meta: dict, as_of, prices: dict,
         return None
     income_a, income_q = _flow_maps(facts, _INCOME_CONCEPTS, as_of)
     cashflow_a, cashflow_q = _flow_maps(facts, _CASHFLOW_CONCEPTS, as_of)
+    supplement = supplements(facts, as_of)
     for cf in (cashflow_a, cashflow_q):   # EDGAR payments are outflow-positive; Yahoo is negative
         cf["Capital Expenditure"] = {end: -val
                                      for end, val in cf["Capital Expenditure"].items()}
@@ -698,6 +777,7 @@ def as_of_bundle(facts: dict, symbol: str, meta: dict, as_of, prices: dict,
         "shares_series": series, "shares_basis": shares_basis,
         "splits": splits_as_of((splits or {}).get(symbol) or {}, as_of),
         "disclosures": disclosures(facts, as_of),
+        "supplements": supplement,
         "annual": {"income": annual_income,
                    "balance": {end: payload for end, payload in balance.items()
                                if end in annual_income},

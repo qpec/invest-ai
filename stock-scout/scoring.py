@@ -178,14 +178,24 @@ def assemble_ttm(bundle: dict) -> dict:
 
     owner = [_owner_fcf(cf_src[p]) for p in cf_periods]
     ocf = [_row(cf_src[p], "ocf") for p in cf_periods]
+    capex = [_row(cf_src[p], "capex") for p in cf_periods]
     used = sorted(set(inc_periods) | set(cf_periods))
     return {
         "basis": basis, "quarters": quarters, "through": max(used) if used else None,
         "periods": used,
+        # Registry v2 (additive): the EXACT per-statement windows this TTM summed, so a
+        # consumer summing supplement flows uses the same periods instead of re-deriving
+        # a window that could drift from this one.
+        "inc_periods": list(inc_periods), "cf_periods": list(cf_periods),
         "revenue": isum("revenue"), "ebit": isum("ebit"), "ebitda": isum("ebitda"),
         "gross_profit": isum("gross_profit"), "ni_incl_nci": isum("ni_incl_nci"),
         "interest_expense": isum("interest_expense"),
         "ocf": sum(ocf) if ocf and None not in ocf else None,
+        # Registry v2 (additive): GROSS capex over the same window. Deliberately not
+        # derivable from owner_fcf, which subtracts min(|capex|, D&A) + SBC — a
+        # "capex" reconstructed from that difference is maintenance-capex-plus-SBC
+        # wearing the wrong name.
+        "capex": (abs(sum(capex)) if capex and None not in capex else None),
         "sbc": sum(_row(cf_src[p], "sbc") or 0.0 for p in cf_periods) if cf_periods else None,
         "owner_fcf": sum(owner) if owner and None not in owner else None,
         "credit_loss": sum(_credit_loss(cf_src[p]) for p in cf_periods) if cf_periods else None,

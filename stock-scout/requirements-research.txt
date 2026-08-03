@@ -2,3 +2,10 @@
 # Deliberately NOT in requirements.txt: edgartools carries a heavy dependency tree,
 # so it is confined to the human-triggered build path behind a guarded import.
 edgartools
+
+# The ratio canon + cross-check oracle for Registry v2 (REGISTRY-DESIGN.md §3):
+# 87 pure-pandas ratio functions + Piotroski/Altman/DuPont, runnable on our own
+# as-filed facts. Desk-side only; the scheduled runtime never imports it.
+financetoolkit
+# financetoolkit imports yaml via its package __init__ but does not declare it.
+pyyaml

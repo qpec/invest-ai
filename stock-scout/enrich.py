@@ -145,9 +145,9 @@ def merge_payload(base: dict, extra: dict, *, source: str = TIER_EDGAR) -> list[
 
 
 def registry_metrics(bundle: dict) -> dict[str, float | None]:
-    """The 10 thesis-registry values for one bundle — the numbers a trigger may test."""
+    """Every thesis-registry value for one bundle — the numbers a trigger may test."""
     import thesis
-    evaluated = scoring.evaluate(bundle)
+    evaluated = thesis.registry_evaluate(bundle)
     return {name: thesis.metric_value(name, bundle, evaluated) for name in thesis.METRICS}
 
 

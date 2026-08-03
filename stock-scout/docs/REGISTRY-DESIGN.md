@@ -1,11 +1,18 @@
 # The Metric Registry, audited — and Registry v2 (PROPOSED)
 
-**Status:** design + journal, 2026-08-03. Owner asked: *"be honest, are these metrics
-sufficient to build a thesis? Furthermore, I want a more complete set. Use deepgit to
-find repos that provide these."* This document is the honest answer, the DeepGit sweep
-record, and the proposed v2 registry. **Nothing here is implemented yet** — the registry
-is the monitor's trigger vocabulary, so widening it changes what a thesis can promise,
-and that is a Gate-grade decision the owner ratifies first.
+**Status:** RATIFIED and IMPLEMENTED, 2026-08-03. The owner's ratifying words — *"the
+goal is to maintain within the philosophy, use metrics for a richer overview"* — set the
+implementation's two constraints: the decision machinery stays frozen (proven: full-
+universe bit-identity diff, 1,904 names, 0 differing values), and the new metrics enrich
+what the owner READS (registry, packet, site drill-down) rather than what the machine
+DECIDES. Composites are display-only accordingly. Shipped: `registry.py` (the v2
+arithmetic), a `supplements` stream in `pit.py` (new concepts that can never enter the
+frozen statement sections), `thesis.METRICS` at 26 metrics (§4 below said 24 rows; the
+shareholder-yield split ships as two metrics and acquisitions as a third, hence 26 keys),
+FinanceToolkit in `requirements-research.txt` as the desk-side ratio canon and test
+oracle. One §4 amendment made during implementation: the capital-allocation trio is
+measured as **% of OCF, not % of market cap** — a market-cap denominator would have made
+them quote-derived, which the no-price-triggers rule exists to prevent.
 
 ---
 
