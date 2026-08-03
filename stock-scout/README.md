@@ -61,6 +61,15 @@ python monitor.py run --sec-data <dir> --prices <dir> \
 The agent-facing instructions live in `.claude/skills/thesis-desk/SKILL.md` at the repo
 root, so a harness picks the workflow up without being told.
 
+Metric hardening + the desk site (the three-tab interface, served by GitHub Pages from
+`docs/`):
+
+```bash
+python enrich.py --sec-data <dir> --symbols CROX --cache enrich_cache   # tier 2: live EDGAR fills export gaps
+python webapp.py --sec-data <dir> --prices <dir> --enrich-cache enrich_cache \
+    --theses-dir theses --out-dir ../docs    # Scout · Thesis · Monitor -> docs/index.html
+```
+
 Telegram (optional): set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`; without them every
 send prints to stdout. `grade.py --telegram` sends the report; `reporter.py` reports
 long-running populates every 15 minutes (hard requirement from the owner, msg 5).
@@ -165,6 +174,7 @@ running the pipeline over real filings.
 | R19 | **An unchecked trigger is reported, never read as intact** | An unanswered question ≠ no risk; silence is not safety | `monitor` UNCHECKED reporting |
 | R20 | **The agent is the runtime, not a dependency** | Python owns the packet and the validation; the agent owns the research and the prose, and is never trusted for the contract | `deskwork.py`, `thesis.record`, `monitor.run` |
 | R21 | **Best-available models only, recorded and enforced** | Deleting the API client deleted the one place a model was pinned; a thesis written by a cheap model must never look like one that wasn't | `deskwork.APPROVED_MODELS`, `deskwork.observed_model` |
+| R22 | **A fallback tier fills gaps, never overrides, and always says so** | The bulk export is a *selection* of tags (net debt/EBITDA: 0% coverage); more data must not become different data silently | `enrich.merge_payload` (tag-level fill-only + provenance ledger), vendor tier display-only |
 
 **Architecture revision (2026-08-03, journaled in `docs/THESIS-DESIGN.md` §1):** the
 2026-07-08 "no LLM in the scheduled runtime" lock is lifted by owner decision.
@@ -220,6 +230,8 @@ the thing being constrained. When a better model ships, the owner edits one cons
 | `datasheet.py` | self-contained audit HTML (evidence chain, recompute check, Stage-2 layer) |
 | `picks.py` | self-contained picks HTML — the shortlist, with fragility beside every score |
 | `deskwork.py` | the agent seam — work-order formatting, atomic writes, JSON I/O, and the best-available model gate. No API client anywhere in this repo |
+| `enrich.py` | hardened metric fetching: sec-export → edgar-live (as-filed, PIT-safe, cache-first) → vendor-yf (display-only). Fill-only-missing, per-tag provenance |
+| `webapp.py` | the desk site: Scout · Thesis · Monitor as one self-contained page + lazy detail shards → `docs/` (GitHub Pages) |
 | `thesis.py` | the Thesis Builder: `brief` (work order) → agent research → `record` (validation) → `ratify` (the Gate) |
 | `monitor.py` | the Weekly Monitor: `brief` (open questions) → agent verdicts → `run` (evaluate every committed thesis, FR7) |
 | `bt_fetch.py` / `pit.py` | EDGAR companyfacts + weekly prices / point-in-time Bundle adapter |

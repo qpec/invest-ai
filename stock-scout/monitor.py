@@ -362,6 +362,8 @@ def main(argv=None) -> int:
     p.add_argument("--theses-dir", default=str(thesis_mod.THESES_DIR))
     p.add_argument("--verdicts", help="verdicts.json from the agent's work order")
     p.add_argument("--reports-dir", default="reports")
+    p.add_argument("--enrich-cache", help="tier-2 companyfacts cache dir (enrich.py); "
+                                          "cache-first, so no network is needed weekly")
     p.add_argument("--model", help="the model id you are running. Ignored when the "
                                    "harness keeps a readable transcript — that is read "
                                    "instead, and a mismatch is refused")
@@ -382,12 +384,31 @@ def main(argv=None) -> int:
     bundles_by_symbol = {}
     if symbols:
         import picks
+        import pit
         import secsv
         meta = picks._load_meta(Path(args.universe))
         prices = picks._load_prices(Path(args.prices) if args.prices else None)
-        for bundle in secsv.bundles(args.sec_data, args.as_of, symbols=symbols,
-                                    meta=meta, prices=prices):
-            bundles_by_symbol[bundle["symbol"]] = bundle
+        facts = secsv.load_facts(args.sec_data, symbols=symbols)
+        secsv.merge_tag_index(facts, args.sec_data, symbols=symbols)
+        if args.enrich_cache:
+            # Tier 2 (cache-first, so a weekly run without network still monitors): the
+            # export is a SELECTION of tags, and a trigger on a metric only the fuller
+            # companyfacts carries — net debt / EBITDA was the canonical case — would
+            # otherwise be UNCHECKED every week by construction.
+            import enrich
+            try:
+                ciks = enrich.cik_map_cached(Path(args.enrich_cache))
+                enrich.enrich_payloads(facts, [s for s in symbols if s in facts],
+                                       cache_dir=Path(args.enrich_cache), ciks=ciks)
+            except Exception as error:  # noqa: BLE001 — enrichment is a bonus, never a gate
+                print(f"enrichment unavailable ({type(error).__name__}: {error}) — "
+                      f"monitoring on export facts only", file=sys.stderr)
+        for symbol in symbols:
+            if symbol in facts:
+                bundle = pit.as_of_bundle(facts[symbol], symbol, meta.get(symbol),
+                                          args.as_of, prices)
+                if bundle is not None:
+                    bundles_by_symbol[symbol] = bundle
 
     verdicts = load_verdicts(Path(args.verdicts) if args.verdicts else None)
     if not verdicts:

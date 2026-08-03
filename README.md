@@ -84,6 +84,16 @@ the Gate), and a weekly monitor validates committed theses — metric triggers
 mechanically, judgement triggers by asking. FR9 and FR11 bind unchanged: the
 owner ratifies every thesis, and nothing executes trades.
 
+**The desk site.** `stock-scout/webapp.py` renders the whole flow as one
+interactive page — ① the Scout (1,904 names, filterable, per-name drill-down
+with metric provenance), ② the Thesis Desk (top 1%, drafts in full), ③ the
+Monitor (committed theses vs their own triggers) — into `docs/`, which GitHub
+Pages serves. Enable once: repo Settings → Pages → Deploy from a branch →
+`main` + `/docs`. Metric fetching behind it is hardened by `enrich.py`: the
+bulk export is tier 1, live EDGAR companyfacts fills its gaps (as-filed,
+point-in-time-safe, cache-first), and vendor numbers exist only as labelled
+display — they can never reach scoring or fire a trigger.
+
 **The LLM is the operator, not a dependency.** This repo contains no LLM API
 client. The thesis desk is driven by an agent harness — Claude Code, OpenClaw —
 which already has a model, web search and a shell; the Python writes a work
