@@ -95,6 +95,11 @@ Rules the builder is held to (enforced by `thesis.validate()`, not by hoping):
 - Conviction and circle-of-competence fields are **absent from the builder's schema** and
   added at ratification.
 
+> **Registry audit 2026-08-03:** the 10-metric registry was audited for sufficiency and
+> a v2 expansion is PROPOSED, with the DeepGit sweep that grounds it, in
+> `REGISTRY-DESIGN.md`. Until the owner ratifies v2, this section describes the registry
+> as it runs.
+
 ## 4. The builder's inputs — judgement grounded three ways
 
 1. **The repo's own metrics** — the scorecard card (points, blocks, evidence tier,

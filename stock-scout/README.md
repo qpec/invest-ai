@@ -240,7 +240,8 @@ the thing being constrained. When a better model ships, the owner edits one cons
 | `vendor/` | the ratified grader (reference) + hardened yfinance layer (see `vendor/README.md`) |
 | `data/stage2-*.json` | qualitative Stage-2 validation layers, picked up by the datasheet |
 
-Design docs: `docs/RECONSTRUCTION.md` (chat → code, plus 19 documented deviations),
+Design docs: `docs/REGISTRY-DESIGN.md` (the metric-registry audit + PROPOSED v2 + the DeepGit sweep record),
+`docs/RECONSTRUCTION.md` (chat → code, plus 19 documented deviations),
 `docs/SCORECARD-DESIGN.md` (why the percentile composite was replaced),
 `docs/INVERSION-DESIGN.md` (the Munger layer, and §8 on what its first cut got wrong).
 
