@@ -72,17 +72,25 @@ baseline; this is what each one means in practice.
 ### Runtime shape
 
 Always-on Ubuntu box · systemd timers + oneshot jobs + one small synchronous
-daemon · stdlib spine (hand-rolled Telegram client, hand-rolled Claude client) ·
-two SQLite files with the benchmark physically quarantined · rendered-markdown
-archive in its own git repo · four runtime pip packages.
+daemon · stdlib spine (hand-rolled Telegram client) · two SQLite files with the
+benchmark physically quarantined · rendered-markdown archive in its own git
+repo · four runtime pip packages.
 
 **Architecture revision 2026-08-03** (journaled in
 `stock-scout/docs/THESIS-DESIGN.md` §1): the original "no LLM in the scheduled
 runtime" lock is lifted by owner decision. The Scout is now the starting
 engine; its top 1% feeds a thesis builder (deep research → draft thesis for
 the Gate), and a weekly monitor validates committed theses — metric triggers
-mechanically, narrative triggers via LLM with web search. FR9 and FR11 bind
-unchanged: the owner ratifies every thesis, and nothing executes trades.
+mechanically, judgement triggers by asking. FR9 and FR11 bind unchanged: the
+owner ratifies every thesis, and nothing executes trades.
+
+**The LLM is the operator, not a dependency.** This repo contains no LLM API
+client. The thesis desk is driven by an agent harness — Claude Code, OpenClaw —
+which already has a model, web search and a shell; the Python writes a work
+order, the agent researches and writes files, and the Python re-checks every
+rule mechanically and exits non-zero if it refuses the work. Nothing downstream
+depends on the agent having behaved well, and the runtime dependency budget is
+unchanged at four packages.
 
     agentcy run {daily,weekly,quarterly,event}
     agentcy bot

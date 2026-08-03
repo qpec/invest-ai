@@ -1,9 +1,14 @@
 """The Thesis Builder — the Scout's top 1% becomes draft theses for the Gate
 (THESIS-DESIGN.md; thesis content per FR2).
 
-    python thesis.py build CROX --sec-data <dir> --prices <dir>
-    python thesis.py batch --sec-data <dir> --prices <dir>       # the current top 1%
-    python thesis.py ratify CROX                                 # the Gate step (FR9)
+Run BY an agent harness (Claude Code, OpenClaw), not by calling an API:
+
+    python thesis.py brief CROX --sec-data <dir> --prices <dir>   # 1. the work order
+    <the agent researches and writes thesis.json / report.md / summary.md>
+    python thesis.py record CROX                                  # 2. mechanical validation
+    python thesis.py ratify CROX                                  # 3. the Gate (FR9, human)
+
+    python thesis.py batch --sec-data <dir> --prices <dir>        # briefs for the top 1%
 
 Three rules carried from the design, enforced here rather than hoped for:
 
@@ -26,8 +31,8 @@ import json
 import sys
 from pathlib import Path
 
+import deskwork
 import inversion
-import llm
 import scorecard
 import scoring
 
@@ -126,59 +131,43 @@ THESIS_SCHEMA = {
     "additionalProperties": False,
 }
 
-RECORD_THESIS_TOOL = {
-    "name": "record_thesis",
-    "description": "Record the finished draft thesis. Call exactly once, after the "
-                   "extensive report and the executive summary have been written as text.",
-    "strict": True,
-    "input_schema": THESIS_SCHEMA,
-}
-
 SUMMARY_HEADING = "## Executive summary"
 
-SYSTEM_PROMPT = """You are the thesis builder inside stock-agentcy, a Buffett/Munger/Naval
-portfolio-oversight system. You write DRAFT investment theses for the owner's Gate session.
-The owner — not you — decides conviction, circle-of-competence fit, and whether to buy.
-The system advises and monitors; it never executes trades.
+# The framework the agent must apply, stated once and injected into every work order.
+# This is the Constitution in the form a researching agent can act on.
+FRAMEWORK = """## The framework you must apply (the Constitution)
 
-The framework you must apply (the Constitution):
-- Buffett: wonderful businesses at fair prices. Moat with evidence, owner earnings (free
-  cash flow the owner could extract) over reported EPS, the 10-year test. If the business
-  model and its moat cannot be explained in two sentences, say so plainly.
-- Munger: inversion. How would this lose the owner's money? Your bear case must address,
-  by name, every severe fragility finding in the packet — you may argue against one, but
-  never ignore one.
-- Honesty rules: cite sources for factual claims from your research; no price targets; a
-  weakness stated plainly beats a strength oversold. Ignore cost basis and entry timing.
+- **Buffett — what to buy.** Wonderful businesses at fair prices. A moat with EVIDENCE,
+  owner earnings (the cash the owner could actually extract) over reported EPS, and the
+  10-year test. If the business model and its moat cannot be explained in two sentences,
+  say so plainly rather than writing three.
+- **Munger — what to avoid.** Inversion: how would this lose the owner's money? Your bear
+  case must address, BY NAME, every severe fragility finding in the packet. You may argue
+  against one; you may never ignore one.
+- **Honesty.** Cite a source for every factual claim from your research. No price targets.
+  A weakness stated plainly beats a strength oversold. Ignore cost basis and entry timing
+  entirely — the stock does not know what anyone paid.
+- **Not yours to decide.** Conviction, circle-of-competence fit, and whether to buy belong
+  to the owner at the Gate. The schema has no field for them; do not editorialise them
+  into the prose either."""
 
-Your deliverable, in this exact order:
-1. THE EXTENSIVE REPORT as ordinary text: business model, moat evidence, owner-earnings
-   history and quality, valuation work anchored on the metrics provided, competitive
-   landscape from your research, the bear case, and what you could not verify.
-2. A final text section headed exactly "{summary_heading}" — one page, for a
-   non-technical reader: what the business does, why it might compound, what would make
-   us leave, what it costs to be wrong. No jargon, no ratios without translation.
-3. ONE call to record_thesis with the structured draft.
+TRIGGER_RULES = """## Trigger discipline (this is the part the machine holds you to)
 
-Trigger discipline (the part the machine holds you to):
-- At least {min_triggers} triggers, at least one of kind "metric".
-- A "metric" trigger tests ONE registry metric against a threshold. The registry, with
-  units, is: {registry}. No other quantity is checkable — do not invent one.
-- An "event" or "narrative" trigger is ONE yes/no question about public information,
-  with its evidence standard inside the question. Events are facts (a contract lost, a
-  CEO departure); narratives are judgements and their action MUST be "review".
-- No price-based triggers: a falling quote with an intact thesis is an opportunity, not
-  an invalidation. Triggers test the business.
-- Set "action": "break" only where the pre-committed answer is sell; "review" where the
-  owner should re-examine. Metric thresholds should demand persistence
-  (consecutive_checks >= 2) unless a single reading is genuinely conclusive.
-"""
-
-
-def _system_prompt() -> str:
-    registry = "; ".join(f"{name} ({unit})" for name, (_, unit, _) in METRICS.items())
-    return SYSTEM_PROMPT.format(summary_heading=SUMMARY_HEADING,
-                                min_triggers=MIN_TRIGGERS, registry=registry)
+- At least {min_triggers} triggers, of which at least one is `kind: "metric"`.
+- A **metric** trigger tests ONE registry metric against a threshold. The registry is
+  fixed — see the packet for the metrics, their units, and their current values. No other
+  quantity is checkable; do not invent one, and do not reference a metric the packet shows
+  as `n/a`.
+- An **event** or **narrative** trigger is ONE yes/no question about public information,
+  with its evidence standard inside the question. Events are facts (a contract lost, a CEO
+  departure). Narratives are judgements, and their `action` MUST be `"review"`.
+- **No price-based triggers.** A falling quote with an intact thesis is an opportunity,
+  not an invalidation.
+- `action: "break"` only where the pre-committed answer is sell. `"review"` where the
+  owner should re-examine.
+- Metric thresholds should demand persistence (`consecutive_checks` >= 2) unless a single
+  reading is genuinely conclusive. Set thresholds against the CURRENT values in the
+  packet, so a trigger is neither already-fired nor unreachable."""
 
 
 # --- Metric evaluation (shared with monitor.py) ------------------------------------------
@@ -318,53 +307,124 @@ def _grounding(symbol: str, max_chars: int = 12000) -> str:
 
 # --- Build --------------------------------------------------------------------------------
 
-def build(symbol: str, bundle: dict, card: dict, inv: dict, *, client=None,
+def brief(symbol: str, bundle: dict, card: dict, inv: dict, *,
           theses_dir: Path = THESES_DIR, name=None, sector=None,
-          with_filings: bool = True) -> dict:
-    """One deep-research run -> theses/drafts/<SYM>/{thesis.json,report.md,summary.md}."""
-    client = client or llm.Client()
-    grounding = _grounding(symbol) if with_filings else "[filings text skipped]"
-    user = (f"Write the draft thesis for {symbol}.\n\n"
-            f"{packet(bundle, card, inv, name=name, sector=sector)}\n\n{grounding}\n\n"
-            f"Research the company on the web before judging: competitive landscape, "
-            f"management, anything the filings and metrics cannot show. Then deliver the "
-            f"report, the executive summary, and the record_thesis call.")
-    tools = [dict(llm.WEB_SEARCH_TOOL, max_uses=WEB_SEARCH_BUDGET), RECORD_THESIS_TOOL]
-    result = client.run(system=_system_prompt(), user=user, tools=tools,
-                        capture_tool="record_thesis")
-    draft = result.get("captured")
-    if draft is None:
-        raise llm.LLMError(f"{symbol}: the run ended ({result.get('stop_reason')}) "
-                           f"without calling record_thesis — no thesis was recorded")
-    problems = validate(draft, symbol=symbol)
+          with_filings: bool = True) -> Path:
+    """Beat 1: write the work order the agent executes. Returns the order's path.
 
-    doc = {
-        "symbol": symbol, "status": "draft", "version": 0,
-        "built_at": _dt.date.today().isoformat(),
-        "metrics_snapshot": {"scorecard_pct": card.get("pct"), "band": card.get("band"),
-                             "inversion_verdict": inv.get("verdict"),
-                             "market_cap": bundle.get("market_cap")},
-        "thesis": draft,
-        "validation_problems": problems,
-        "usage": result.get("usage"),
-    }
+    Everything the agent needs is in one file — the packet, the schema, the framework,
+    the rules, and the command that will judge the result. Nothing about the run depends
+    on a credential or a network call from this process."""
     out = Path(theses_dir) / "drafts" / symbol
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "thesis.json").write_text(json.dumps(doc, indent=2), encoding="utf-8")
-    report, summary = _split_report(result.get("text") or "")
-    (out / "report.md").write_text(report, encoding="utf-8")
-    (out / "summary.md").write_text(summary, encoding="utf-8")
+    body = "\n\n".join([
+        "## The research packet (both judgements, unmerged)", "```",
+        packet(bundle, card, inv, name=name, sector=sector), "```",
+        "## Filings text", "```",
+        _grounding(symbol) if with_filings else "[filings text skipped by --no-filings]",
+        "```",
+        FRAMEWORK,
+        TRIGGER_RULES.format(min_triggers=MIN_TRIGGERS),
+        deskwork.schema_block(THESIS_SCHEMA, title="The thesis schema (thesis.json)"),
+    ])
+    text = deskwork.order(
+        title=f"Draft investment thesis — {symbol}"
+              + (f" ({name})" if name else ""),
+        why=f"{symbol} is in the Scout's top {TOP_FRACTION:.0%}. Write the DRAFT thesis "
+            f"the owner will take to the Gate. You are researching and writing; the "
+            f"owner decides conviction and whether to buy (FR9), and this system never "
+            f"executes trades (FR11).",
+        artifacts=[
+            (f"{out}/report.md", "the extensive research: business model, moat evidence, "
+                                 "owner-earnings history and quality, valuation work "
+                                 "anchored on the packet's metrics, competitive "
+                                 "landscape, the bear case, and what you could NOT "
+                                 "verify"),
+            (f"{out}/summary.md", f"one page for a NON-TECHNICAL reader, opening with "
+                                  f"the heading `{SUMMARY_HEADING}`: what the business "
+                                  f"does, why it might compound, what would make us "
+                                  f"leave, what it costs to be wrong. No jargon, no "
+                                  f"ratio without a translation"),
+            (f"{out}/thesis.json", "the structured draft matching the schema below"),
+        ],
+        steps=[
+            "Read the packet below in full — especially the fragility findings.",
+            "Research the company with your own web tools: competitive landscape, "
+            "management, recent events, anything the filings and metrics cannot show. "
+            f"Budget roughly {WEB_SEARCH_BUDGET} searches; depth beats breadth.",
+            "Write `report.md`, then `summary.md`, then `thesis.json`.",
+            f"Run the validation command below and fix anything it reports.",
+        ],
+        rules=[
+            "Every factual claim from research carries a source URL in `sources`.",
+            "The bear case names every severe fragility finding from the packet.",
+            "No conviction, no circle-of-competence, no price target, no buy "
+            "recommendation — none of those are yours to write.",
+            "If the business cannot be explained in two sentences, say so in the report "
+            "and let the owner PASS rather than padding the thesis.",
+        ],
+        body=body,
+        finish=f"python thesis.py record {symbol} --theses-dir {theses_dir}",
+    )
+    path = out / deskwork.ORDER_NAME
+    deskwork.write_atomic(path, text)
+    deskwork.write_json(out / "packet.json", {
+        "symbol": symbol, "name": name, "sector": sector,
+        "prepared_at": _dt.date.today().isoformat(),
+        "scorecard": {"pct": card.get("pct"), "band": card.get("band"),
+                      "evidence": card.get("evidence")},
+        "inversion": {"verdict": inv.get("verdict"),
+                      "severe": (inv.get("coverage") or {}).get("severe"),
+                      "failure_modes": inv.get("failure_modes")},
+        "metrics": {m: metric_value(m, bundle) for m in METRICS},
+        "market_cap": bundle.get("market_cap"),
+    })
+    return path
+
+
+def record(symbol: str, *, theses_dir: Path = THESES_DIR) -> dict:
+    """Beat 3: accept or refuse what the agent wrote.
+
+    This is the seam's whole point. The agent is trusted for research and prose; it is
+    never trusted for the contract, so every rule that makes a thesis monitorable is
+    re-checked here against the file on disk. A missing artifact is a refusal, not a
+    warning — a thesis without its report is not a thesis."""
+    out = Path(theses_dir) / "drafts" / symbol
+    problems: list[str] = []
+    for filename in ("report.md", "summary.md"):
+        path = out / filename
+        if not path.exists():
+            problems.append(f"{filename} was not written")
+        elif not path.read_text(encoding="utf-8").strip():
+            problems.append(f"{filename} is empty")
+    summary_path = out / "summary.md"
+    if summary_path.exists() and SUMMARY_HEADING not in summary_path.read_text(
+            encoding="utf-8"):
+        problems.append(f"summary.md does not carry the required heading "
+                        f"{SUMMARY_HEADING!r}")
+
+    draft = deskwork.read_json(out / "thesis.json")
+    problems += validate(draft, symbol=symbol)
+    packet_path = out / "packet.json"
+    snapshot = deskwork.read_json(packet_path) if packet_path.exists() else {}
+    # A metric trigger on a metric the packet could not compute is unmonitorable from day
+    # one: the monitor would report it UNCHECKED forever. Catch it here, not in week one.
+    for trigger in draft.get("triggers") or []:
+        if trigger.get("kind") == "metric":
+            current = (snapshot.get("metrics") or {}).get(trigger.get("metric"))
+            if packet_path.exists() and current is None:
+                problems.append(
+                    f"trigger {trigger.get('id')}: {trigger.get('metric')} is not "
+                    f"computable for this name, so the monitor could never check it")
+
+    doc = {"symbol": symbol, "status": "draft", "version": 0,
+           "built_at": _dt.date.today().isoformat(),
+           "metrics_snapshot": snapshot,
+           "thesis": draft, "validation_problems": problems}
+    deskwork.write_json(out / "record.json", doc)
+    if problems:
+        raise deskwork.OrderError(
+            f"{symbol}: the draft is NOT accepted:\n  - " + "\n  - ".join(problems))
     return doc
-
-
-def _split_report(text: str) -> tuple[str, str]:
-    """The report text and the executive summary, split on the demanded heading. A run
-    that skipped the heading still yields both files — with the gap named, not hidden."""
-    index = text.find(SUMMARY_HEADING)
-    if index < 0:
-        return (text or "[no report text was produced]",
-                "[the run produced no executive-summary section — read report.md]")
-    return text[:index].rstrip() or "[report text was empty]", text[index:].strip()
 
 
 def top_symbols(rows: list[dict], universe_size: int) -> list[dict]:
@@ -383,10 +443,14 @@ def top_symbols(rows: list[dict], universe_size: int) -> list[dict]:
 def ratify(symbol: str, *, theses_dir: Path = THESES_DIR, ask=input) -> dict:
     """Owner ratification: the FR9 questions are ASKED, the triggers re-validated, and
     only then does the thesis move to committed/ where the monitor reads it."""
-    draft_path = Path(theses_dir) / "drafts" / symbol / "thesis.json"
-    if not draft_path.exists():
-        raise FileNotFoundError(f"no draft thesis for {symbol} at {draft_path}")
-    doc = json.loads(draft_path.read_text(encoding="utf-8"))
+    # Ratify reads the RECORD, not the agent's raw file: the record only exists once
+    # `record` accepted the draft, so the Gate cannot be reached around the validation.
+    record_path = Path(theses_dir) / "drafts" / symbol / "record.json"
+    if not record_path.exists():
+        raise FileNotFoundError(
+            f"no accepted draft for {symbol} — run `python thesis.py record {symbol}` "
+            f"first (it validates what the agent wrote)")
+    doc = json.loads(record_path.read_text(encoding="utf-8"))
     problems = validate(doc.get("thesis") or {}, symbol=symbol)
     if problems:
         raise ValueError(f"{symbol}: not ratifiable until fixed (edit the draft): "
@@ -511,9 +575,9 @@ def _load_rows(args) -> tuple[list[dict], dict]:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
-    for cmd in ("build", "batch"):
-        p = sub.add_parser(cmd)
-        if cmd == "build":
+    for cmd in ("brief", "batch"):
+        p = sub.add_parser(cmd, help="write the agent's work order(s)")
+        if cmd == "brief":
             p.add_argument("symbols", nargs="+")
         p.add_argument("--sec-data", required=True)
         p.add_argument("--prices")
@@ -521,20 +585,44 @@ def main(argv=None) -> int:
         p.add_argument("--as-of", default=_dt.date.today().isoformat())
         p.add_argument("--theses-dir", default=str(THESES_DIR))
         p.add_argument("--no-filings", action="store_true")
-    p = sub.add_parser("ratify")
-    p.add_argument("symbols", nargs="+")
-    p.add_argument("--theses-dir", default=str(THESES_DIR))
+    for cmd, help_text in (("record", "validate what the agent wrote"),
+                           ("ratify", "the Gate: the owner commits it (FR9)")):
+        p = sub.add_parser(cmd, help=help_text)
+        p.add_argument("symbols", nargs="+")
+        p.add_argument("--theses-dir", default=str(THESES_DIR))
     args = parser.parse_args(argv)
 
-    if args.command == "ratify":
+    if args.command == "record":
+        failures = 0
         for symbol in args.symbols:
-            doc = ratify(symbol, theses_dir=Path(args.theses_dir))
-            print(f"{symbol}: committed (conviction={doc['conviction']}) — "
-                  f"the weekly monitor now owns its triggers")
-        return 0
+            try:
+                record(symbol, theses_dir=Path(args.theses_dir))
+                print(f"{symbol}: draft ACCEPTED — ready for the Gate "
+                      f"(`python thesis.py ratify {symbol}`)")
+            except deskwork.OrderError as error:
+                failures += 1
+                print(str(error), file=sys.stderr)
+        return 1 if failures else 0
+
+    if args.command == "ratify":
+        failures = 0
+        for symbol in args.symbols:
+            # A refused ratification is an ordinary desk outcome — an unanswered FR9
+            # question, a draft that was never recorded — so it prints like one. A
+            # traceback here would read as a broken tool rather than a closed Gate.
+            try:
+                doc = ratify(symbol, theses_dir=Path(args.theses_dir))
+            except (ValueError, FileNotFoundError, deskwork.OrderError) as error:
+                failures += 1
+                print(f"{symbol}: not committed — {error}", file=sys.stderr)
+                continue
+            print(f"{symbol}: committed v{doc['version']} "
+                  f"(conviction={doc['conviction']}) — the weekly monitor now owns "
+                  f"its triggers")
+        return 1 if failures else 0
 
     rows, _ = _load_rows(args)
-    if args.command == "build":
+    if args.command == "brief":
         chosen = [r for r in rows if r["symbol"] in set(args.symbols)]
         missing = set(args.symbols) - {r["symbol"] for r in chosen}
         if missing:
@@ -545,18 +633,13 @@ def main(argv=None) -> int:
         print(f"top {TOP_FRACTION:.0%} of {len(rows)} screened = {len(chosen)} names: "
               + ", ".join(r["symbol"] for r in chosen))
 
-    total_cost = 0.0
     for row in chosen:
-        doc = build(row["symbol"], row["bundle"], row["card"], row["inversion"],
-                    theses_dir=Path(args.theses_dir), name=row["name"],
-                    sector=row["sector"], with_filings=not args.no_filings)
-        cost = (doc.get("usage") or {}).get("estimated_cost_usd") or 0.0
-        total_cost += cost
-        state = "OK" if not doc["validation_problems"] else \
-            f"NEEDS EDITS ({len(doc['validation_problems'])} problem(s))"
-        print(f"{row['symbol']}: draft written [{state}] ~${cost:.2f}")
-    print(f"batch estimated cost ~${total_cost:.2f}. Drafts await the Gate: "
-          f"`python thesis.py ratify <SYM>`.")
+        path = brief(row["symbol"], row["bundle"], row["card"], row["inversion"],
+                     theses_dir=Path(args.theses_dir), name=row["name"],
+                     sector=row["sector"], with_filings=not args.no_filings)
+        print(f"{row['symbol']}: work order -> {path}")
+    print(f"\n{len(chosen)} work order(s) written. Execute each one (read it, research, "
+          f"write the three artifacts), then `python thesis.py record <SYM>`.")
     return 0
 
 

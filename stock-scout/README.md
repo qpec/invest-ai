@@ -42,14 +42,24 @@ Bulk SEC path (no Yahoo needed — the whole universe from one CSV export):
 python picks.py --sec-data <export-dir> --prices <price-cache-dir> --as-of 2026-08-01
 ```
 
-The thesis engine (needs `ANTHROPIC_API_KEY`; `pip install -r requirements-research.txt`
-for filings-text grounding):
+The thesis engine. It has **no API client**: the runtime is an agent harness (Claude Code,
+OpenClaw), so each command either writes a work order for the agent or validates what the
+agent wrote. `pip install -r requirements-research.txt` adds filings-text grounding.
 
 ```bash
-python thesis.py batch --sec-data <dir> --prices <dir>   # draft theses for the top 1%
-python thesis.py ratify CROX                             # the Gate — owner ratifies (FR9)
-python monitor.py --sec-data <dir> --prices <dir>        # weekly: validate committed theses
+python thesis.py batch --sec-data <dir> --prices <dir>   # 1. work orders for the top 1%
+#   ... the agent reads theses/drafts/<SYM>/WORK-ORDER.md, researches, writes 3 files ...
+python thesis.py record CROX                             # 2. mechanical validation (exit 1 = refused)
+python thesis.py ratify CROX                             # 3. the Gate — owner ratifies (FR9)
+
+python monitor.py brief --theses-dir theses              # 4. the week's open questions
+#   ... the agent answers them into monitor-<date>/verdicts.json ...
+python monitor.py run --sec-data <dir> --prices <dir> \
+    --verdicts theses/monitor-<date>/verdicts.json       # 5. evaluate every committed thesis
 ```
+
+The agent-facing instructions live in `.claude/skills/thesis-desk/SKILL.md` at the repo
+root, so a harness picks the workflow up without being told.
 
 Telegram (optional): set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`; without them every
 send prints to stdout. `grade.py --telegram` sends the report; `reporter.py` reports
@@ -100,7 +110,7 @@ and every row names the module that enforces it.
 | 6 | **Inversion** | *How would this lose my money?* | Bundle + prices → 7 probes, a verdict, sentences | `inversion.py` |
 | 7 | **Formation** | *What do I actually hold?* | grades → buy/sell rules, `formation-state.json` | `formation.py` |
 | 8 | **Reports** | *Can I audit every number?* | → markdown, datasheet HTML, picks HTML | `grade.py` · `datasheet.py` · `picks.py` |
-| 9 | **Thesis Builder** | *Why would we own this — and what would make us leave?* | top 1% + deep research → draft thesis + summary + report | `thesis.py` · `llm.py` |
+| 9 | **Thesis Builder** | *Why would we own this — and what would make us leave?* | top 1% → work order → agent research → draft thesis + summary + report | `thesis.py` · `deskwork.py` |
 | 10 | **The Gate** | *Does the owner ratify it?* | draft → owner conviction + circle fit → committed thesis | `thesis.py ratify` (human, FR9) |
 | 11 | **Weekly Monitor** | *Is every committed thesis still true?* | committed theses + fresh SEC data → intact / under review / broken | `monitor.py` |
 
@@ -109,8 +119,10 @@ into one number — see *Two judgements* below. Steps 9–11 are the thesis engi
 (`docs/THESIS-DESIGN.md`): the Scout is the starting engine, a thesis is a draft until
 the owner ratifies it, and every trigger a thesis carries must be machine-validatable —
 metric triggers run mechanically off the same `scoring.evaluate` the grader uses, and
-narrative triggers are answered weekly by an LLM with web search (they can summon the
-owner to the desk but never fire the sell rule alone).
+narrative triggers are answered weekly by the agent (they can summon the owner to the
+desk but never fire the sell rule alone). Steps 9 and 11 are the only places an LLM
+appears anywhere in this repo, and it appears as the *operator* of the tooling rather
+than as a dependency of it — see *The agent is the runtime* below.
 
 ### Two judgements, kept in separate columns
 
@@ -150,12 +162,35 @@ running the pipeline over real filings.
 | R16 | **A thesis is a draft until the owner ratifies it** | FR9: conviction and circle fit are asked, never invented — the builder's schema cannot even carry them | `thesis.validate`, `thesis.ratify` |
 | R17 | **Every trigger machine-validatable, none price-based** | The thesis drives the monitoring; the stock doesn't know what you paid | `thesis.METRICS`, `thesis.validate` |
 | R18 | **Judgement never fires the sell rule alone** | A narrative verdict can only send a thesis to review; breaks need a mechanical trigger or a documented fact | `monitor.check_trigger` |
-| R19 | **An unchecked trigger is reported, never read as intact** | No API key ≠ no risk; silence is not safety | `monitor` UNCHECKED reporting |
+| R19 | **An unchecked trigger is reported, never read as intact** | An unanswered question ≠ no risk; silence is not safety | `monitor` UNCHECKED reporting |
+| R20 | **The agent is the runtime, not a dependency** | Python owns the packet and the validation; the agent owns the research and the prose, and is never trusted for the contract | `deskwork.py`, `thesis.record`, `monitor.run` |
 
 **Architecture revision (2026-08-03, journaled in `docs/THESIS-DESIGN.md` §1):** the
-2026-07-08 "no LLM in the scheduled runtime" lock is lifted by owner decision. The LLM
-transport is a hand-rolled stdlib client (`llm.py`, the `tg.py` pattern), default model
-`claude-opus-5`.
+2026-07-08 "no LLM in the scheduled runtime" lock is lifted by owner decision.
+
+### The agent is the runtime
+
+This repo has **no LLM API client**. The system is driven by an agent harness — Claude
+Code, OpenClaw — which already has a model, web search, a file system and a shell. Asking
+it to call a second model over HTTP would be paying twice for the same capability, and it
+would put a network dependency and an API key in front of work the harness can already
+do. (The owner reached the same conclusion once before, for the Stage-2 qualitative
+reviewer: `docs/plans/2026-07-11-scout-stage2-qualitative-reviewer-design.md`.)
+
+Every agent-facing task therefore runs in three beats:
+
+```
+python … brief   →   the agent researches and writes files   →   python … record
+```
+
+`brief` writes a **work order** (`deskwork.order()`): the research packet, the framework,
+the trigger rules, the JSON schema, and the exact command that will judge the result.
+`record` re-checks every rule mechanically against the files on disk and **exits non-zero
+if it refuses the work**. The seam is deliberately one-directional — the agent is trusted
+for research and prose, never for the contract. A metric trigger naming an unknown or
+uncomputable metric, a narrative trigger that tries to fire a sell, a missing report, a
+summary without its heading: all refused by Python, none of it a matter of the agent
+behaving well.
 
 ## Files
 
@@ -172,9 +207,9 @@ transport is a hand-rolled stdlib client (`llm.py`, the `tg.py` pattern), defaul
 | `formation.py` | frozen v3 owner-mode rules + `formation-state.json` |
 | `datasheet.py` | self-contained audit HTML (evidence chain, recompute check, Stage-2 layer) |
 | `picks.py` | self-contained picks HTML — the shortlist, with fragility beside every score |
-| `llm.py` | stdlib Claude Messages client (web search, strict tools, pause_turn, refusal fallbacks) |
-| `thesis.py` | the Thesis Builder: top 1% → deep research → draft thesis + summary + report; `ratify` = the Gate |
-| `monitor.py` | the Weekly Monitor: committed theses validated against their own triggers (FR7) |
+| `deskwork.py` | the agent seam — work-order formatting, atomic writes, JSON I/O. No API client anywhere in this repo |
+| `thesis.py` | the Thesis Builder: `brief` (work order) → agent research → `record` (validation) → `ratify` (the Gate) |
+| `monitor.py` | the Weekly Monitor: `brief` (open questions) → agent verdicts → `run` (evaluate every committed thesis, FR7) |
 | `bt_fetch.py` / `pit.py` | EDGAR companyfacts + weekly prices / point-in-time Bundle adapter |
 | `secsv.py` | bulk SEC CSV export → companyfacts shape → Bundles (1,904 names in ~20 s) |
 | `backtest.py` / `backtest3.py` | v2-composite backtest / v3 owner-mode + walk-forward harness |

@@ -5,7 +5,10 @@ now be the scout. After the scout a thesis builder should run for the best 1%...
 the thesis, executive summary (non technical) and the extensive report. The committed
 investment + thesis will be validated by a weekly monitor."* Clarifications taken 2026-08-03:
 LLM lock **fully lifted**, builder output is a **draft for the Gate**, grounding is a
-**data tool + our own research loop**, cadence is an **on-demand batch**.
+**data tool + our own research loop**, cadence is an **on-demand batch**. Revised the same
+day, on the owner's follow-up — *"This thing will be run by claude code or openclaw. Not
+api"* — so the "own research loop" is executed by the agent harness itself and there is no
+API client anywhere in the repo. See §5.
 
 ---
 
@@ -21,6 +24,13 @@ invalidation question. The rest of the constitution is untouched; in particular 
 judgement is sacred) and FR11 (advice, never execution) bind these components hardest of
 all.
 
+The follow-up decision, journaled the same day: the LLM enters as the **operator of the
+tooling, not a dependency of it**. The owner runs this from Claude Code or OpenClaw, so the
+harness supplies the model, the web search and the shell; the repo supplies the packet and
+the validation and stays stdlib. NFR7 and the four-runtime-dependency budget are therefore
+untouched by this revision — the thesis engine adds *zero* runtime dependencies, and the
+one optional extra (edgartools, MIT) remains a desk-side guarded import.
+
 ## 2. The pipeline, re-anchored on the Scout
 
 ```
@@ -29,6 +39,7 @@ all.
                               │
                               ▼  top 1% (~19 of 1,904)
                     THESIS BUILDER  (on-demand batch, FR14)
+      brief → WORK-ORDER.md → agent researches → record (validation)
         metrics + fragility findings + filings text + web research
                               │
              draft thesis + executive summary + extensive report
@@ -39,7 +50,7 @@ all.
                               ▼  committed thesis, triggers armed
                     WEEKLY MONITOR
         metric triggers → evaluated mechanically from fresh SEC data
-        narrative triggers → answered by LLM with web search
+        narrative triggers → asked as a brief, answered by the agent
                               │
                               ▼
         intact / under review / broken  →  report; broken ⇒ sell
@@ -98,35 +109,64 @@ Rules the builder is held to (enforced by `thesis.validate()`, not by hoping):
    to the **desk-triggered builder only** behind a guarded import — the scheduled runtime
    never imports it, and its absence degrades the packet honestly ("filings text
    unavailable — web research only") instead of failing the run.
-3. **The open web** — Anthropic's server-side `web_search` tool inside the research loop:
-   news, competitive landscape, management changes, anything past the filings.
+3. **The open web** — the agent's own web search, used while executing the work order:
+   news, competitive landscape, management changes, anything past the filings. The work
+   order sets a budget (~20 searches) and says depth beats breadth; it does not, and
+   cannot, police how the agent searches.
 
-## 5. The research loop (own loop, stdlib transport)
+## 5. The agent is the runtime (revised 2026-08-03)
 
-Per the repo's stdlib-spine precedent (the hand-rolled Telegram client), the Claude
-Messages API client is ~200 lines of `urllib` in `llm.py` — no SDK dependency in the
-runtime. The loop:
+**There is no LLM API client in this repo.** The first cut of this design specified a
+hand-rolled `urllib` Claude client (`llm.py`), a server-side `web_search` tool, a strict
+`record_thesis` tool and a cost model. That was the right shape for a headless daemon and
+the wrong shape for this system, because this system is run by an agent harness — Claude
+Code, OpenClaw — that *already* has a model, web search, a file system and a shell. Asking
+it to open a socket to a second model would be paying twice for the same capability, and
+it would put an API key and a network dependency in front of work the harness can already
+do. (The owner reached the same conclusion once before, for the Stage-2 qualitative
+reviewer: `docs/plans/2026-07-11-scout-stage2-qualitative-reviewer-design.md` — "no
+Anthropic API key, no new agentcy dependency".)
 
-- **Model** `claude-opus-5` (thinking on by default; no sampling params). Configurable via
-  `AGENTCY_LLM_MODEL`.
-- **Tools**: `web_search_20260209` (server-side, capped uses) + one custom **strict** tool,
-  `record_thesis`, whose input schema *is* the thesis draft. The system prompt requires the
-  run to end by calling it exactly once; strict mode makes the API guarantee the JSON
-  validates. Structured output and free-prose research coexist in one conversation: the
-  extensive report and executive summary are written as text turns, the thesis arrives as
-  the tool call.
-- **`pause_turn`** (server tool iteration limit) is resumed by re-sending; **`refusal`** is
-  handled before reading content, with the server-side `fallbacks: "default"` opt-in
-  (beta `server-side-fallback-2026-07-01`) enabled by default so a classifier
-  false-positive re-runs on the recommended fallback instead of killing a batch. Turned
-  off with `fallbacks=None`.
-- Usage is accumulated across turns and written into the run record — every thesis carries
-  what it cost to write.
+The client is deleted. What replaces it is a seam, in `deskwork.py`:
 
-**Cost model** (opus-5 at $5/$25 per MTok): a deep-research run is ~8–20 searches and a
-long context, ≈ $1.5–4 per name; a full top-1% batch (~19 names) ≈ **$30–75**. The weekly
-monitor touches only narrative/event triggers with small contexts: ≈ $0.05–0.20 per thesis
-per week. Both numbers are printed by the tools themselves after each run.
+```
+python … brief   →   the agent researches and writes files   →   python … record
+```
+
+**Beat 1 — `brief` writes a work order.** `deskwork.order()` renders
+`theses/drafts/<SYM>/WORK-ORDER.md`: what to produce and where, how to go about it, the
+rules, the research packet (both judgements unmerged), the filings text, the framework,
+the trigger discipline, the JSON schema, and — last — the exact command that will judge
+the result. A machine-readable `packet.json` is written beside it so beat 3 can check the
+draft against the same numbers the agent was given.
+
+**Beat 2 — the agent works.** It reads the order, researches with its own tools, and
+writes `report.md`, `summary.md`, `thesis.json`. The repo has no opinion about how. The
+agent-facing instructions live in `.claude/skills/thesis-desk/SKILL.md` at the repo root,
+so a harness discovers the workflow without being told about it.
+
+**Beat 3 — `record` accepts or refuses.** This is the seam's whole point. Every rule that
+makes a thesis monitorable is re-checked mechanically against the files on disk: the three
+artifacts exist and are non-empty, the summary carries its heading, the draft validates,
+no conviction or circle-of-competence field leaked in from the builder (FR9), at least
+three triggers with at least one mechanical, no metric outside the registry, no metric the
+packet could not compute (it would be UNCHECKED forever), no narrative trigger with a
+`break` action. Problems are written into `record.json` **and** raised: a non-zero exit
+means the artifact is not accepted.
+
+The seam is deliberately one-directional. The agent is trusted for research and prose and
+never for the contract. Nothing in beat 3 depends on the agent having behaved well, which
+is the only property that makes an LLM safe to put inside a decision pipeline.
+
+Two consequences worth stating:
+
+- **The cost model is gone.** There is no per-name dollar figure to print, because there
+  is no metered API call. The budget is the owner's harness subscription and the owner's
+  attention.
+- **Determinism moved to the right side of the line.** The parts that must be reproducible
+  — packet, registry, validation, monitor arithmetic — are pure Python and covered by
+  tests. The parts that cannot be reproducible — research, judgement, prose — are the
+  agent's, and are bounded by what beat 3 will accept.
 
 ## 6. Outputs
 
@@ -135,7 +175,7 @@ state does not live in the code repo):
 
 | File | Audience | Content |
 |---|---|---|
-| `thesis.json` | the machine | the FR2 schema + typed triggers + metrics snapshot + sources + usage |
+| `thesis.json` | the machine | the FR2 schema + typed triggers + sources (the metrics snapshot and the validation verdict are recorded beside it in `record.json`) |
 | `summary.md` | the owner's non-technical self, family, future-you | one page, no jargon: what the business does, why it might compound, what would make us leave, what it costs to be wrong |
 | `report.md` | the Gate session | the extensive research: moat evidence, owner-earnings history, valuation work, bear case addressing every severe fragility finding, competitive landscape, sources |
 
@@ -151,9 +191,13 @@ trigger is checkable, stamps version/status/date, and moves the thesis to
 2. **Metric triggers**: evaluate against the registry; a trigger with
    `consecutive_checks: N` keeps its streak in the thesis's own trigger state, so a single
    noisy week cannot break a thesis that demands persistence.
-3. **Event/narrative triggers**: one LLM call per trigger — web search on, a strict
-   `record_verdict` tool returning `{tripped, confidence, evidence, sources}`. No API key
-   → the trigger is reported **unchecked**, loudly; silence is never safety.
+3. **Event/narrative triggers**: the same three-beat seam. `monitor.py brief` lists only
+   the judgement questions — asking the agent about a metric trigger would be inviting an
+   opinion about a fact — and the agent answers them into `verdicts.json` as
+   `{tripped, confidence, evidence, sources}` per trigger id. A question with no verdict
+   is reported **UNCHECKED**, loudly; silence is never safety. Confidence is mechanical:
+   only `high` (documented public fact) lets a `break` trigger actually break, anything
+   less demotes to review.
 4. Status per FR7: any tripped `break`-action trigger ⇒ **broken** (sell advice ignoring
    cost basis); any tripped `review`-action trigger ⇒ **under review** with the evidence
    quoted; else **intact** — and "no action needed" is printed as the first-class good
@@ -170,3 +214,6 @@ trigger is checkable, stamps version/status/date, and moves the thesis to
   cannot be in the top 1% and gets no thesis; a veto is Munger's pillar doing its job.
 - **No narrative auto-break.** An LLM's judgement can summon the owner to the desk; it
   cannot fire the owner's sell rule on its own.
+- **No API client, and no way to add one quietly.** The validation lives in Python and the
+  research lives in the harness; a future transport would have to re-implement beat 3 to
+  get around it, which is exactly the kind of change a review would notice.

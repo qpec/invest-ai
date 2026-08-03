@@ -1,56 +1,22 @@
-"""The thesis engine: the LLM loop, the builder's validation contract, and the monitor.
+"""The thesis engine: work orders out, validated artifacts in.
 
-Fully offline (network in a test is a test failure): every LLM interaction goes through a
-scripted FakeTransport, and metric evaluation is fed canned scoring.evaluate output. What
-these tests protect is the CONTRACT the design states out loud — a pause_turn is resumed
-rather than read as an answer, a refusal is an error rather than an empty thesis, an
-unvalidatable trigger cannot be ratified, judgement never fires the sell rule alone, and
-a missing API key reads as UNCHECKED rather than intact.
+There is no API client to fake — the agent harness IS the runtime, so these tests drive
+the seam the way the harness does: write a work order, drop artifacts on disk as an agent
+would, then assert what `record` and the monitor accept and refuse.
+
+What they protect is the contract the design states out loud: an unvalidatable trigger
+cannot reach the Gate, the agent cannot invent conviction, judgement never fires the sell
+rule alone, an unanswered question reads as UNCHECKED rather than intact, and a broken
+thesis stays broken until the owner acts.
 """
 import json
 
 import pytest
 
-import llm
+import deskwork
 import monitor
 import scoring
 import thesis
-
-
-# --- Scripted transport -------------------------------------------------------------------
-
-def response(stop_reason="end_turn", content=None, usage=None, stop_details=None):
-    return {"stop_reason": stop_reason, "content": content or [],
-            "usage": usage or {"input_tokens": 100, "output_tokens": 50},
-            "stop_details": stop_details}
-
-
-def text(t):
-    return {"type": "text", "text": t}
-
-
-def tool_use(name, payload, block_id="toolu_1"):
-    return {"type": "tool_use", "id": block_id, "name": name, "input": payload}
-
-
-class FakeTransport:
-    """Plays back a script of responses and records every payload sent."""
-
-    def __init__(self, script):
-        self.script = list(script)
-        self.payloads = []
-        self.betas = []
-
-    def __call__(self, payload, betas=()):
-        self.payloads.append(payload)
-        self.betas.append(tuple(betas))
-        if not self.script:
-            raise AssertionError("transport called more times than scripted")
-        return self.script.pop(0)
-
-
-def make_client(script, **kwargs):
-    return llm.Client(transport=FakeTransport(script), **kwargs)
 
 
 # --- Fixture thesis material --------------------------------------------------------------
@@ -93,81 +59,6 @@ def committed_doc(symbol="AAA", triggers=None):
     return {"symbol": symbol, "status": "committed", "version": 1,
             "conviction": "high", "circle_of_competence": "cloud",
             "thesis": draft(symbol, triggers), "trigger_state": {}}
-
-
-# --- llm.Client ---------------------------------------------------------------------------
-
-class TestClientLoop:
-    def test_captures_the_strict_tool_and_stops(self):
-        client = make_client([response("tool_use", [
-            text("report text"), tool_use("record_thesis", {"symbol": "AAA"})])])
-        result = client.run(system="s", user="u", tools=[], capture_tool="record_thesis")
-        assert result["captured"] == {"symbol": "AAA"}
-        assert result["text"] == "report text"
-
-    def test_pause_turn_is_resumed_not_returned(self):
-        """A pause_turn is an UNFINISHED server-tool turn. Treating it as final would
-        silently truncate a research run — the loop must re-send and continue."""
-        client = make_client([
-            response("pause_turn", [text("searching...")]),
-            response("tool_use", [tool_use("record_thesis", {"symbol": "AAA"})]),
-        ])
-        result = client.run(system="s", user="u", tools=[], capture_tool="record_thesis")
-        assert result["captured"] == {"symbol": "AAA"}
-        resumed = client.transport.payloads[1]["messages"]
-        assert resumed[1]["role"] == "assistant"          # the paused turn went back
-
-    def test_refusal_is_an_error_not_an_empty_result(self):
-        client = make_client([response("refusal", [],
-                                       stop_details={"category": "cyber",
-                                                     "explanation": "declined"})])
-        with pytest.raises(llm.RefusalError) as excinfo:
-            client.run(system="s", user="u", tools=[], capture_tool="record_thesis")
-        assert excinfo.value.category == "cyber"
-
-    def test_end_turn_without_the_tool_reports_no_capture(self):
-        client = make_client([response("end_turn", [text("just prose")])])
-        result = client.run(system="s", user="u", tools=[], capture_tool="record_thesis")
-        assert result["captured"] is None
-        assert result["stop_reason"] == "end_turn"
-
-    def test_fallbacks_default_is_sent_with_its_beta_header(self):
-        client = make_client([response("end_turn")])
-        client.run(system="s", user="u", tools=[], capture_tool="x")
-        assert client.transport.payloads[0]["fallbacks"] == "default"
-        assert llm.FALLBACK_BETA in client.transport.betas[0]
-
-    def test_fallbacks_opt_out_sends_neither(self):
-        client = make_client([response("end_turn")], fallbacks=None)
-        client.run(system="s", user="u", tools=[], capture_tool="x")
-        assert "fallbacks" not in client.transport.payloads[0]
-        assert client.transport.betas[0] == ()
-
-    def test_no_sampling_or_thinking_params_are_ever_sent(self):
-        """claude-opus-5 rejects temperature/top_p/top_k, and thinking is on by default —
-        the payload must carry none of them."""
-        client = make_client([response("end_turn")])
-        client.run(system="s", user="u", tools=[], capture_tool="x")
-        payload = client.transport.payloads[0]
-        for banned in ("temperature", "top_p", "top_k", "thinking"):
-            assert banned not in payload
-
-    def test_the_loop_is_bounded(self):
-        client = make_client([response("pause_turn", [text("...")])] * 3, max_turns=3)
-        with pytest.raises(llm.LLMError, match="no result after 3 turns"):
-            client.run(system="s", user="u", tools=[], capture_tool="x")
-
-    def test_usage_accumulates_across_turns_and_prices_the_run(self):
-        client = make_client([
-            response("pause_turn", usage={"input_tokens": 1000, "output_tokens": 100}),
-            response("end_turn", usage={"input_tokens": 2000, "output_tokens": 300}),
-        ])
-        result = client.run(system="s", user="u", tools=[], capture_tool="x")
-        usage = result["usage"]
-        assert usage["turns"] == 2
-        assert usage["input_tokens"] == 3000 and usage["output_tokens"] == 400
-        expected = (3000 * 5.00 + 400 * 25.00) / 1_000_000
-        assert usage["estimated_cost_usd"] == pytest.approx(expected)
 
 
 # --- thesis.validate ----------------------------------------------------------------------
@@ -219,9 +110,10 @@ class TestValidate:
 
 class TestRatify:
     def _write_draft(self, tmp_path, doc):
+        """An ACCEPTED draft — ratify reads record.json, which only `record` writes."""
         out = tmp_path / "drafts" / doc["thesis"]["symbol"]
-        out.mkdir(parents=True)
-        (out / "thesis.json").write_text(json.dumps(doc))
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "record.json").write_text(json.dumps(doc))
 
     def test_ratification_asks_the_owner_and_commits(self, tmp_path):
         self._write_draft(tmp_path, {"symbol": "AAA", "status": "draft",
@@ -305,7 +197,7 @@ class TestRatify:
 
 # --- thesis.build -------------------------------------------------------------------------
 
-class TestBuild:
+class TestBriefAndRecord:
     def _row(self, monkeypatch):
         monkeypatch.setattr(thesis.scoring, "evaluate",
                             lambda bundle: {key: 10.0 for key, _, _
@@ -316,42 +208,95 @@ class TestBuild:
                "failure_modes": ["the price fell 45%"], "coverage": {"severe": 0}}
         return {"symbol": "AAA"}, card, inv
 
-    def test_build_writes_the_three_artifacts(self, tmp_path, monkeypatch):
+    def _agent_writes(self, tmp_path, symbol="AAA", doc=None, summary=None, report=None):
+        """Stand in for the agent: drop the three artifacts on disk."""
+        out = tmp_path / "drafts" / symbol
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "report.md").write_text(report or "# Report\nlong analysis")
+        (out / "summary.md").write_text(
+            summary if summary is not None
+            else f"{thesis.SUMMARY_HEADING}\nplain words for a human")
+        (out / "thesis.json").write_text(json.dumps(doc or draft(symbol)))
+        return out
+
+    def test_the_work_order_carries_everything_the_agent_needs(self, tmp_path,
+                                                               monkeypatch):
         bundle, card, inv = self._row(monkeypatch)
-        client = make_client([response("tool_use", [
-            text(f"# Report\nlong analysis\n\n{thesis.SUMMARY_HEADING}\nplain words"),
-            tool_use("record_thesis", draft())])])
-        doc = thesis.build("AAA", bundle, card, inv, client=client,
-                           theses_dir=tmp_path, with_filings=False)
+        path = thesis.brief("AAA", bundle, card, inv, theses_dir=tmp_path,
+                            name="Alpha Corp.", sector="IT", with_filings=False)
+        text = path.read_text()
+        assert path.name == deskwork.ORDER_NAME
+        for needed in ("report.md", "summary.md", "thesis.json",     # the artifacts
+                       "Constitution", "Trigger discipline",          # the rules
+                       "owner_fcf_margin_pct",                        # the registry
+                       "thesis.py record AAA"):                       # how it is judged
+            assert needed in text, needed
+        packet = json.loads((tmp_path / "drafts" / "AAA" / "packet.json").read_text())
+        assert packet["metrics"]["owner_fcf_margin_pct"] == 10.0
+
+    def test_a_good_artifact_set_is_accepted(self, tmp_path, monkeypatch):
+        bundle, card, inv = self._row(monkeypatch)
+        thesis.brief("AAA", bundle, card, inv, theses_dir=tmp_path, with_filings=False)
+        self._agent_writes(tmp_path)
+        doc = thesis.record("AAA", theses_dir=tmp_path)
         assert doc["status"] == "draft" and doc["validation_problems"] == []
-        base = tmp_path / "drafts" / "AAA"
-        assert "long analysis" in (base / "report.md").read_text()
-        summary = (base / "summary.md").read_text()
-        assert summary.startswith(thesis.SUMMARY_HEADING)
-        assert thesis.SUMMARY_HEADING not in (base / "report.md").read_text()
-        saved = json.loads((base / "thesis.json").read_text())
-        assert saved["thesis"]["symbol"] == "AAA"
-        assert saved["usage"]["estimated_cost_usd"] is not None
+        assert (tmp_path / "drafts" / "AAA" / "record.json").exists()
 
-    def test_a_run_that_never_records_is_an_error_not_an_empty_thesis(
-            self, tmp_path, monkeypatch):
+    def test_an_unvalidatable_trigger_is_refused_at_record(self, tmp_path, monkeypatch):
+        """The agent is trusted for prose, never for the contract."""
         bundle, card, inv = self._row(monkeypatch)
-        client = make_client([response("end_turn", [text("prose only")])])
-        with pytest.raises(llm.LLMError, match="without calling record_thesis"):
-            thesis.build("AAA", bundle, card, inv, client=client,
-                         theses_dir=tmp_path, with_filings=False)
-
-    def test_an_invalid_draft_is_saved_with_its_problems_named(
-            self, tmp_path, monkeypatch):
-        """A bad draft is still worth keeping for the Gate — but its problems ride along
-        and ratification will refuse it until they are fixed."""
-        bundle, card, inv = self._row(monkeypatch)
+        thesis.brief("AAA", bundle, card, inv, theses_dir=tmp_path, with_filings=False)
         bad = draft(triggers=[metric_trigger(metric="vibes"), question_trigger(),
                               question_trigger("T3")])
-        client = make_client([response("tool_use", [tool_use("record_thesis", bad)])])
-        doc = thesis.build("AAA", bundle, card, inv, client=client,
-                           theses_dir=tmp_path, with_filings=False)
-        assert doc["validation_problems"]
+        self._agent_writes(tmp_path, doc=bad)
+        with pytest.raises(deskwork.OrderError, match="not in the registry"):
+            thesis.record("AAA", theses_dir=tmp_path)
+        assert not (tmp_path / "drafts" / "AAA" / "record.json").read_text() == ""
+
+    def test_a_missing_report_is_a_refusal_not_a_warning(self, tmp_path, monkeypatch):
+        bundle, card, inv = self._row(monkeypatch)
+        thesis.brief("AAA", bundle, card, inv, theses_dir=tmp_path, with_filings=False)
+        out = self._agent_writes(tmp_path)
+        (out / "report.md").unlink()
+        with pytest.raises(deskwork.OrderError, match="report.md was not written"):
+            thesis.record("AAA", theses_dir=tmp_path)
+
+    def test_a_summary_without_its_heading_is_refused(self, tmp_path, monkeypatch):
+        bundle, card, inv = self._row(monkeypatch)
+        thesis.brief("AAA", bundle, card, inv, theses_dir=tmp_path, with_filings=False)
+        self._agent_writes(tmp_path, summary="just some prose, no heading")
+        with pytest.raises(deskwork.OrderError, match="required heading"):
+            thesis.record("AAA", theses_dir=tmp_path)
+
+    def test_a_trigger_on_an_uncomputable_metric_is_caught_at_record(self, tmp_path,
+                                                                     monkeypatch):
+        """Better to refuse now than to report it UNCHECKED every week forever."""
+        monkeypatch.setattr(thesis.scoring, "evaluate", lambda bundle: {})
+        card = {"score": 1.0, "available_max": 2, "pct": 50, "band": "Mixed",
+                "evidence": "thin", "why": {}}
+        inv = {"verdict": "Unknown", "failure_modes": [], "coverage": {"severe": 0}}
+        thesis.brief("AAA", {"symbol": "AAA"}, card, inv, theses_dir=tmp_path,
+                     with_filings=False)
+        self._agent_writes(tmp_path)
+        with pytest.raises(deskwork.OrderError, match="never check it"):
+            thesis.record("AAA", theses_dir=tmp_path)
+
+    def test_a_malformed_thesis_json_is_a_clean_refusal(self, tmp_path, monkeypatch):
+        bundle, card, inv = self._row(monkeypatch)
+        thesis.brief("AAA", bundle, card, inv, theses_dir=tmp_path, with_filings=False)
+        out = self._agent_writes(tmp_path)
+        (out / "thesis.json").write_text("{ not json")
+        with pytest.raises(deskwork.OrderError, match="not valid JSON"):
+            thesis.record("AAA", theses_dir=tmp_path)
+
+    def test_ratify_cannot_be_reached_around_record(self, tmp_path, monkeypatch):
+        """The Gate reads record.json, so an agent that skipped validation cannot commit
+        a thesis by writing thesis.json alone."""
+        bundle, card, inv = self._row(monkeypatch)
+        thesis.brief("AAA", bundle, card, inv, theses_dir=tmp_path, with_filings=False)
+        self._agent_writes(tmp_path)
+        with pytest.raises(FileNotFoundError, match="no accepted draft"):
+            thesis.ratify("AAA", theses_dir=tmp_path, ask=lambda _: "high")
 
     def test_the_packet_carries_both_judgements_unmerged(self, monkeypatch):
         bundle, card, inv = self._row(monkeypatch)
@@ -459,35 +404,90 @@ class TestMetricTriggers:
 
 
 class TestQuestionTriggers:
-    def _verdict(self, tripped, confidence):
-        return response("tool_use", [tool_use("record_verdict", {
-            "tripped": tripped, "confidence": confidence,
-            "evidence": "the filing says so", "sources": ["sec.gov"]})])
+    def _verdict(self, tripped, confidence, tid="T2"):
+        return {tid: {"trigger_id": tid, "symbol": "AAA", "tripped": tripped,
+                      "confidence": confidence, "evidence": "the filing says so",
+                      "sources": ["sec.gov"]}}
 
-    def test_no_llm_means_unchecked_loudly(self):
+    def test_no_verdict_means_unchecked_loudly(self):
+        """The agent did not answer — that is a gap in the owner's monitoring, and it
+        must never read as an intact thesis."""
         doc = committed_doc(triggers=[question_trigger()])
-        result = monitor.check_thesis(doc, bundle=None, client=None, as_of="w1")
+        result = monitor.check_thesis(doc, bundle=None, as_of="w1")
         assert result["status"] == "intact" and result["unchecked"] == ["T2"]
         assert "UNCHECKED" in result["triggers"][0]["detail"]
+        assert "not an all-clear" in result["triggers"][0]["detail"]
 
     def test_a_tripped_narrative_reviews_and_never_breaks(self):
         doc = committed_doc(triggers=[question_trigger(action="review")])
-        client = make_client([self._verdict(True, "high")])
-        result = monitor.check_thesis(doc, bundle=None, client=client, as_of="w1")
+        result = monitor.check_thesis(doc, bundle=None,
+                                      verdicts=self._verdict(True, "high"), as_of="w1")
         assert result["status"] == "under_review"
         assert result["broken_by"] == []
 
     def test_an_event_break_demands_high_confidence(self):
-        """A break-action event tripped on medium confidence is demoted to review this
-        week — a documented fact fires the rule, an inference summons the owner."""
+        """A break-action event tripped on medium confidence is demoted to review — a
+        documented fact fires the rule, an inference summons the owner."""
         doc = committed_doc(triggers=[question_trigger(
             "T9", kind="event", action="break", question="Has the CEO departed?")])
-        client = make_client([self._verdict(True, "medium")])
-        result = monitor.check_thesis(doc, bundle=None, client=client, as_of="w1")
+        result = monitor.check_thesis(doc, bundle=None,
+                                      verdicts=self._verdict(True, "medium", "T9"),
+                                      as_of="w1")
         assert result["status"] == "under_review" and result["broken_by"] == []
-        client = make_client([self._verdict(True, "high")])
-        result = monitor.check_thesis(doc, bundle=None, client=client, as_of="w2")
+        doc = committed_doc(triggers=[question_trigger(
+            "T9", kind="event", action="break", question="Has the CEO departed?")])
+        result = monitor.check_thesis(doc, bundle=None,
+                                      verdicts=self._verdict(True, "high", "T9"),
+                                      as_of="w2")
         assert result["status"] == "broken" and result["broken_by"] == ["T9"]
+
+
+class TestMonitorBrief:
+    def _commit(self, tmp_path, doc):
+        committed = tmp_path / "committed"
+        committed.mkdir(parents=True, exist_ok=True)
+        (committed / f"{doc['symbol']}.json").write_text(json.dumps(doc))
+
+    def test_the_brief_lists_only_judgement_questions(self, tmp_path):
+        """Metric triggers are answered by arithmetic; sending them to an agent would be
+        inviting an opinion about a fact."""
+        self._commit(tmp_path, committed_doc())
+        path = monitor.brief(tmp_path, as_of="2026-08-08")
+        text = path.read_text()
+        assert "T2" in text and "T3" in text        # the narrative + event questions
+        assert "T1" not in text                     # the metric trigger
+        questions = json.loads((path.parent / "questions.json").read_text())
+        assert {q["trigger_id"] for q in questions} == {"T2", "T3"}
+
+    def test_no_judgement_triggers_writes_no_order(self, tmp_path):
+        """Inventing a question would be the open-ended news scanning the design
+        forbids."""
+        self._commit(tmp_path, committed_doc(triggers=[metric_trigger()]))
+        assert monitor.brief(tmp_path, as_of="2026-08-08") is None
+
+    def test_verdicts_load_by_symbol_and_trigger(self, tmp_path):
+        path = tmp_path / "verdicts.json"
+        path.write_text(json.dumps([
+            {"symbol": "AAA", "trigger_id": "T2", "tripped": False,
+             "confidence": "low", "evidence": "nothing found", "sources": []},
+            {"symbol": "BBB", "trigger_id": "T9", "tripped": True,
+             "confidence": "high", "evidence": "filed", "sources": ["x"]},
+        ]))
+        loaded = monitor.load_verdicts(path)
+        assert loaded["AAA"]["T2"]["tripped"] is False
+        assert loaded["BBB"]["T9"]["confidence"] == "high"
+
+    def test_an_unattributable_verdict_is_dropped_not_guessed(self, tmp_path):
+        path = tmp_path / "verdicts.json"
+        path.write_text(json.dumps([{"tripped": True, "confidence": "high",
+                                     "evidence": "?", "sources": []}]))
+        assert monitor.load_verdicts(path) == {}
+
+    def test_a_non_array_verdicts_file_is_refused(self, tmp_path):
+        path = tmp_path / "verdicts.json"
+        path.write_text(json.dumps({"symbol": "AAA"}))
+        with pytest.raises(deskwork.OrderError, match="must be a JSON ARRAY"):
+            monitor.load_verdicts(path)
 
 
 class TestWeeklyRun:
@@ -500,7 +500,7 @@ class TestWeeklyRun:
                             lambda bundle: {"ofcf_margin": 8.0})
         report = monitor.run(theses_dir=tmp_path / "theses",
                              bundles_by_symbol={"AAA": {"symbol": "AAA"}},
-                             client=None, as_of="2026-08-08",
+                             as_of="2026-08-08",
                              reports_dir=tmp_path / "reports")
         assert report[0]["status"] == "broken"
         saved = json.loads((committed / "AAA.json").read_text())
@@ -518,7 +518,7 @@ class TestWeeklyRun:
                             lambda bundle: {"ofcf_margin": 25.0})
         monitor.run(theses_dir=tmp_path / "theses",
                     bundles_by_symbol={"AAA": {"symbol": "AAA"}},
-                    client=None, as_of="2026-08-08", reports_dir=tmp_path / "reports")
+                    as_of="2026-08-08", reports_dir=tmp_path / "reports")
         rendered = (tmp_path / "reports" / "monitor-2026-08-08.md").read_text()
         assert "No action needed" in rendered              # FR4, first-class
 
@@ -535,7 +535,7 @@ class TestWeeklyRun:
                             lambda bundle: {"ofcf_margin": 8.0})
         report = monitor.run(theses_dir=tmp_path / "theses",
                              bundles_by_symbol={"BBB": {"symbol": "BBB"}},
-                             client=None, as_of="2026-08-08",
+                             as_of="2026-08-08",
                              reports_dir=tmp_path / "reports")
         statuses = {e["symbol"]: e["status"] for e in report}
         assert statuses == {"AAA": "error", "BBB": "broken"}
@@ -554,13 +554,13 @@ class TestWeeklyRun:
         committed.mkdir(parents=True)
         (committed / "AAA.json").write_text(json.dumps(committed_doc()))
         monitor.run(theses_dir=tmp_path / "theses", bundles_by_symbol={},
-                    client=None, as_of="w1", reports_dir=tmp_path / "reports")
+                    as_of="w1", reports_dir=tmp_path / "reports")
         assert calls and str(calls[0][0]).endswith(".json.tmp")
         assert not list(committed.glob("*.tmp"))
 
     def test_no_committed_theses_renders_the_empty_state(self, tmp_path):
         report = monitor.run(theses_dir=tmp_path / "theses", bundles_by_symbol={},
-                             client=None, as_of="2026-08-08",
+                             as_of="2026-08-08",
                              reports_dir=tmp_path / "reports")
         assert report == []
         rendered = (tmp_path / "reports" / "monitor-2026-08-08.md").read_text()

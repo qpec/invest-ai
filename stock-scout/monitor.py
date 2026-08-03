@@ -10,12 +10,13 @@ runs ONLY the pre-committed triggers of ratified theses — never open-ended new
   scoring.evaluate the live grader uses (thesis.metric_value). A trigger demanding
   persistence keeps its streak in the thesis's own trigger_state, so one noisy week
   cannot fire a rule that asked for two.
-- `event`/`narrative` triggers are one LLM call each: web search on, a strict
-  record_verdict tool. An event may break only on HIGH confidence; a narrative trigger
-  can only send the thesis to review — judgement summons the owner to the desk, it never
-  fires the sell rule alone.
-- No API key -> those triggers are reported UNCHECKED, loudly. Absent evidence is not
-  safety; a thesis is never called intact because its questions could not be asked.
+- `event`/`narrative` triggers need judgement, so they go to the AGENT: the run writes a
+  work order listing every open question, the agent answers it with its own web tools,
+  and `record` ingests the verdicts. An event may break only on HIGH confidence; a
+  narrative trigger can only send the thesis to review — judgement summons the owner to
+  the desk, it never fires the sell rule alone.
+- A question with no verdict is reported UNCHECKED, loudly. Absent evidence is not
+  safety; a thesis is never called intact because its questions went unanswered.
 
 Statuses per FR7: intact / under_review / broken. Broken means sell advice that ignores
 cost basis; the report says so, and nothing here executes anything (FR11). "No action
@@ -29,42 +30,44 @@ import json
 import os
 from pathlib import Path
 
-import llm
+import deskwork
 import scoring
 import thesis as thesis_mod
 
 VERDICT_SCHEMA = {
     "type": "object",
     "properties": {
+        "trigger_id": {"type": "string"},
+        "symbol": {"type": "string"},
         "tripped": {"type": "boolean"},
         "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
         "evidence": {"type": "string"},
         "sources": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["tripped", "confidence", "evidence", "sources"],
+    "required": ["trigger_id", "symbol", "tripped", "confidence", "evidence", "sources"],
     "additionalProperties": False,
 }
 
-RECORD_VERDICT_TOOL = {
-    "name": "record_verdict",
-    "description": "Record the verdict on the trigger question. Call exactly once.",
-    "strict": True,
-    "input_schema": VERDICT_SCHEMA,
-}
+VERDICT_RULES = """## How to answer
 
-VERDICT_SYSTEM = """You answer ONE pre-committed invalidation-trigger question about a
-company, for a portfolio monitor. Search the web for evidence, then call record_verdict
-exactly once. Rules: answer only the question asked — no broader opinion on the stock;
-"tripped" means the question's condition IS met by the evidence standard stated in the
-question; confidence "high" only for documented public facts (filings, company
-statements, major outlets), "medium" for credible but unconfirmed reporting, "low" for
-inference. Quote the decisive evidence and list source URLs. If you find nothing
-relevant, tripped=false with confidence "low" and evidence saying exactly that.
-"""
+Answer ONLY the question asked. You are not forming a view on the stock — you are
+checking one pre-committed invalidation trigger the owner wrote at the Gate.
+
+- `tripped` means the question's condition IS met by the evidence standard stated in the
+  question itself.
+- `confidence` is `"high"` ONLY for documented public fact (a filing, a company
+  statement, a major outlet). `"medium"` for credible but unconfirmed reporting.
+  `"low"` for inference. This matters: a `break`-action event trigger is DEMOTED to
+  review unless confidence is high, because an inference must not fire a sell rule.
+- Quote the decisive evidence in `evidence`, and list source URLs in `sources`.
+- Found nothing relevant? `tripped: false`, `confidence: "low"`, and say exactly that in
+  `evidence`. Do not pad it into a judgement you did not make.
+- Answer every question in the list. A question you skip is reported UNCHECKED, which is
+  a gap in the owner's monitoring — not a pass."""
 
 
 def check_trigger(trigger: dict, *, symbol: str, bundle=None, evaluated=None,
-                  state=None, client=None, as_of: str = "") -> dict:
+                  state=None, verdicts: dict | None = None, as_of: str = "") -> dict:
     """One trigger -> {tripped, checked, detail, ...}. Pure over its inputs; the caller
     owns persistence of the returned state."""
     state = dict(state or {})
@@ -102,26 +105,13 @@ def check_trigger(trigger: dict, *, symbol: str, bundle=None, evaluated=None,
         return {"checked": True, "tripped": tripped, "state": state, "detail": detail,
                 "value": value}
 
-    # event / narrative: one LLM call with web search
-    if client is None:
-        return {"checked": False, "tripped": False, "state": state,
-                "detail": "UNCHECKED — no LLM available to ask the question; this is "
-                          "not safety"}
-    question = trigger.get("question") or trigger.get("statement")
-    user = (f"Company: {symbol}. As of {as_of}.\n"
-            f"Trigger ({kind}, pre-committed at ratification): {trigger.get('statement')}\n"
-            f"Question to answer now: {question}")
-    tools = [dict(llm.WEB_SEARCH_TOOL, max_uses=thesis_mod.MONITOR_SEARCH_BUDGET),
-             RECORD_VERDICT_TOOL]
-    # 8k, not less: max_tokens caps thinking + text together on claude-opus-5, and a
-    # verdict starved of thinking room truncates instead of answering.
-    result = client.run(system=VERDICT_SYSTEM, user=user, tools=tools,
-                        capture_tool="record_verdict", max_tokens=8000)
-    verdict = result.get("captured")
+    # event / narrative: judgement, so the verdict comes from the agent (via `verdicts`),
+    # not from this process. No verdict is UNCHECKED — never a pass.
+    verdict = (verdicts or {}).get(trigger.get("id"))
     if verdict is None:
         return {"checked": False, "tripped": False, "state": state,
-                "detail": f"UNCHECKED — the verdict run ended "
-                          f"({result.get('stop_reason')}) without recording"}
+                "detail": "UNCHECKED — no verdict was supplied for this question; that "
+                          "is a gap in the monitoring, not an all-clear"}
     tripped = bool(verdict.get("tripped"))
     confidence = verdict.get("confidence")
     # An event may break only on documented fact; below that it summons, not fires (§7).
@@ -129,15 +119,16 @@ def check_trigger(trigger: dict, *, symbol: str, bundle=None, evaluated=None,
                and confidence != "high")
     state.update({"last_checked": as_of, "last_confidence": confidence})
     detail = (f"{'TRIPPED' if tripped else 'not tripped'} ({confidence} confidence): "
-              f"{verdict.get('evidence', '')[:300]}")
+              f"{str(verdict.get('evidence', ''))[:300]}")
     if demoted:
         detail += " [confidence below 'high': demoted from break to review this week]"
     return {"checked": True, "tripped": tripped, "state": state, "detail": detail,
             "confidence": confidence, "demoted_to_review": demoted,
-            "sources": verdict.get("sources") or [], "usage": result.get("usage")}
+            "sources": verdict.get("sources") or []}
 
 
-def check_thesis(doc: dict, *, bundle=None, client=None, as_of: str = "") -> dict:
+def check_thesis(doc: dict, *, bundle=None, verdicts: dict | None = None,
+                 as_of: str = "") -> dict:
     """All triggers of one committed thesis -> the FR7 status plus per-trigger results.
     Mutates doc's trigger_state and status (the caller writes the file)."""
     symbol = doc["symbol"]
@@ -149,7 +140,7 @@ def check_thesis(doc: dict, *, bundle=None, client=None, as_of: str = "") -> dic
         tid = trigger.get("id") or trigger.get("statement", "?")[:40]
         outcome = check_trigger(trigger, symbol=symbol, bundle=bundle,
                                 evaluated=evaluated, state=trigger_state.get(tid),
-                                client=client, as_of=as_of)
+                                verdicts=verdicts, as_of=as_of)
         trigger_state[tid] = outcome["state"]
         results.append({"id": tid, "kind": trigger.get("kind"),
                         "action": trigger.get("action"), **{k: v for k, v in
@@ -221,8 +212,8 @@ def _render(report: list[dict], as_of: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def run(*, theses_dir: Path, bundles_by_symbol: dict, client=None, as_of: str,
-        reports_dir: Path = Path("reports")) -> list[dict]:
+def run(*, theses_dir: Path, bundles_by_symbol: dict, verdicts: dict | None = None,
+        as_of: str, reports_dir: Path = Path("reports")) -> list[dict]:
     committed = sorted(Path(theses_dir, "committed").glob("*.json"))
     report = []
     for path in committed:
@@ -232,7 +223,8 @@ def run(*, theses_dir: Path, bundles_by_symbol: dict, client=None, as_of: str,
         try:
             doc = json.loads(path.read_text(encoding="utf-8"))
             entry = check_thesis(doc, bundle=bundles_by_symbol.get(doc["symbol"]),
-                                 client=client, as_of=as_of)
+                                 verdicts=(verdicts or {}).get(doc["symbol"]),
+                                 as_of=as_of)
             _save(path, doc)
         except Exception as error:  # noqa: BLE001 — every failure must still be reported
             report.append({"symbol": path.stem, "status": "error", "broken_by": [],
@@ -246,18 +238,115 @@ def run(*, theses_dir: Path, bundles_by_symbol: dict, client=None, as_of: str,
     return report
 
 
+def open_questions(theses_dir: Path) -> list[dict]:
+    """Every event/narrative trigger of every committed thesis — the questions that need
+    judgement this week. Metric triggers are absent by design: they are answered by
+    arithmetic, and sending them to an agent would be inviting an opinion about a fact."""
+    questions = []
+    for path in sorted(Path(theses_dir, "committed").glob("*.json")):
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        for trigger in (doc.get("thesis") or {}).get("triggers", []):
+            if trigger.get("kind") in ("event", "narrative"):
+                questions.append({
+                    "symbol": doc["symbol"], "trigger_id": trigger.get("id"),
+                    "kind": trigger.get("kind"), "action": trigger.get("action"),
+                    "statement": trigger.get("statement"),
+                    "question": trigger.get("question") or trigger.get("statement"),
+                })
+    return questions
+
+
+def brief(theses_dir: Path, *, as_of: str, out_dir: Path | None = None) -> Path | None:
+    """The weekly work order: the open questions, the rules, and the file to write.
+    Returns None when no committed thesis carries a judgement trigger — there is nothing
+    to ask, and inventing a question would be the open-ended news scanning the design
+    forbids."""
+    questions = open_questions(theses_dir)
+    if not questions:
+        return None
+    out = Path(out_dir or Path(theses_dir) / f"monitor-{as_of}")
+    lines = []
+    for q in questions:
+        lines += [f"### {q['symbol']} / {q['trigger_id']}  "
+                  f"({q['kind']}, action `{q['action']}`)",
+                  f"- Pre-committed trigger: {q['statement']}",
+                  f"- **Question:** {q['question']}", ""]
+    body = "\n".join(["## The open questions", ""] + lines + [
+        VERDICT_RULES, "",
+        deskwork.schema_block({"type": "array", "items": VERDICT_SCHEMA},
+                              title="verdicts.json — an ARRAY, one entry per question")])
+    text = deskwork.order(
+        title=f"Weekly thesis monitor — judgement triggers, {as_of}",
+        why=f"{len(questions)} pre-committed invalidation question(s) across the "
+            f"committed theses need answering. These are the owner's OWN triggers, "
+            f"written at the Gate — you are not scanning for news, you are checking "
+            f"exactly these.",
+        artifacts=[(f"{out}/verdicts.json",
+                    "one verdict per question, in the schema below")],
+        steps=["Read each question below.",
+               "Research it with your own web tools — recent, sourced, specific. Budget "
+               f"about {thesis_mod.MONITOR_SEARCH_BUDGET} searches per question.",
+               "Write every verdict into the one array file.",
+               "Run the command below to ingest them."],
+        rules=["Answer the question asked, nothing broader.",
+               "`high` confidence means documented public fact — it is what lets a "
+               "break trigger actually break.",
+               "Never leave a question out; a missing verdict is reported UNCHECKED."],
+        body=body,
+        finish=f"python monitor.py run --theses-dir {theses_dir} --as-of {as_of} "
+               f"--verdicts {out}/verdicts.json --sec-data <dir> --prices <dir>",
+    )
+    path = out / deskwork.ORDER_NAME
+    deskwork.write_atomic(path, text)
+    deskwork.write_json(out / "questions.json", questions)
+    return path
+
+
+def load_verdicts(path: Path | None) -> dict:
+    """verdicts.json -> {symbol: {trigger_id: verdict}}. A verdict missing its ids is
+    dropped rather than guessed at — an unattributable answer is not an answer."""
+    if not path:
+        return {}
+    payload = deskwork.read_json(Path(path))
+    if not isinstance(payload, list):
+        raise deskwork.OrderError(f"{path} must be a JSON ARRAY of verdicts")
+    out: dict = {}
+    for entry in payload:
+        symbol, trigger_id = entry.get("symbol"), entry.get("trigger_id")
+        if symbol and trigger_id:
+            out.setdefault(symbol, {})[trigger_id] = entry
+    return out
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--sec-data", required=True)
-    parser.add_argument("--prices")
-    parser.add_argument("--universe", default="universe.csv")
-    parser.add_argument("--as-of", default=_dt.date.today().isoformat())
-    parser.add_argument("--theses-dir", default=str(thesis_mod.THESES_DIR))
-    parser.add_argument("--no-llm", action="store_true",
-                        help="skip event/narrative triggers (reported UNCHECKED)")
+    sub = parser.add_subparsers(dest="command", required=True)
+    p = sub.add_parser("brief", help="write the agent's work order for this week")
+    p.add_argument("--theses-dir", default=str(thesis_mod.THESES_DIR))
+    p.add_argument("--as-of", default=_dt.date.today().isoformat())
+    p = sub.add_parser("run", help="evaluate every trigger and write the report")
+    p.add_argument("--sec-data", required=True)
+    p.add_argument("--prices")
+    p.add_argument("--universe", default="universe.csv")
+    p.add_argument("--as-of", default=_dt.date.today().isoformat())
+    p.add_argument("--theses-dir", default=str(thesis_mod.THESES_DIR))
+    p.add_argument("--verdicts", help="verdicts.json from the agent's work order")
+    p.add_argument("--reports-dir", default="reports")
     args = parser.parse_args(argv)
 
     theses_dir = Path(args.theses_dir)
+    if args.command == "brief":
+        path = brief(theses_dir, as_of=args.as_of)
+        if path is None:
+            print("no judgement triggers among the committed theses — nothing to ask. "
+                  "Run `monitor.py run` for the mechanical checks.")
+        else:
+            print(f"work order -> {path}")
+        return 0
+
     symbols = [json.loads(p.read_text(encoding="utf-8"))["symbol"]
                for p in sorted(Path(theses_dir, "committed").glob("*.json"))]
     bundles_by_symbol = {}
@@ -270,17 +359,14 @@ def main(argv=None) -> int:
                                     meta=meta, prices=prices):
             bundles_by_symbol[bundle["symbol"]] = bundle
 
-    client = None
-    if not args.no_llm:
-        try:
-            client = llm.Client()
-            llm._credentials()
-        except llm.NoAPIKeyError:
-            client = None
-            print("no ANTHROPIC_API_KEY: event/narrative triggers will be UNCHECKED")
+    verdicts = load_verdicts(Path(args.verdicts) if args.verdicts else None)
+    if not verdicts:
+        print("no verdicts supplied: event/narrative triggers will be UNCHECKED "
+              "(`python monitor.py brief` writes the work order that produces them)")
 
     report = run(theses_dir=theses_dir, bundles_by_symbol=bundles_by_symbol,
-                 client=client, as_of=args.as_of)
+                 verdicts=verdicts, as_of=args.as_of,
+                 reports_dir=Path(args.reports_dir))
     for entry in report:
         print(f"{entry['symbol']}: {entry['status']}"
               + (f"  (unchecked: {len(entry['unchecked'])})" if entry["unchecked"] else ""))
