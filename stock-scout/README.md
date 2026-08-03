@@ -42,6 +42,15 @@ Bulk SEC path (no Yahoo needed — the whole universe from one CSV export):
 python picks.py --sec-data <export-dir> --prices <price-cache-dir> --as-of 2026-08-01
 ```
 
+The thesis engine (needs `ANTHROPIC_API_KEY`; `pip install -r requirements-research.txt`
+for filings-text grounding):
+
+```bash
+python thesis.py batch --sec-data <dir> --prices <dir>   # draft theses for the top 1%
+python thesis.py ratify CROX                             # the Gate — owner ratifies (FR9)
+python monitor.py --sec-data <dir> --prices <dir>        # weekly: validate committed theses
+```
+
 Telegram (optional): set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`; without them every
 send prints to stdout. `grade.py --telegram` sends the report; `reporter.py` reports
 long-running populates every 15 minutes (hard requirement from the owner, msg 5).
@@ -91,9 +100,17 @@ and every row names the module that enforces it.
 | 6 | **Inversion** | *How would this lose my money?* | Bundle + prices → 7 probes, a verdict, sentences | `inversion.py` |
 | 7 | **Formation** | *What do I actually hold?* | grades → buy/sell rules, `formation-state.json` | `formation.py` |
 | 8 | **Reports** | *Can I audit every number?* | → markdown, datasheet HTML, picks HTML | `grade.py` · `datasheet.py` · `picks.py` |
+| 9 | **Thesis Builder** | *Why would we own this — and what would make us leave?* | top 1% + deep research → draft thesis + summary + report | `thesis.py` · `llm.py` |
+| 10 | **The Gate** | *Does the owner ratify it?* | draft → owner conviction + circle fit → committed thesis | `thesis.py ratify` (human, FR9) |
+| 11 | **Weekly Monitor** | *Is every committed thesis still true?* | committed theses + fresh SEC data → intact / under review / broken | `monitor.py` |
 
 Steps 4–6 are three **independent** readings of the same Bundle. They are never combined
-into one number — see *Two judgements* below.
+into one number — see *Two judgements* below. Steps 9–11 are the thesis engine
+(`docs/THESIS-DESIGN.md`): the Scout is the starting engine, a thesis is a draft until
+the owner ratifies it, and every trigger a thesis carries must be machine-validatable —
+metric triggers run mechanically off the same `scoring.evaluate` the grader uses, and
+narrative triggers are answered weekly by an LLM with web search (they can summon the
+owner to the desk but never fire the sell rule alone).
 
 ### Two judgements, kept in separate columns
 
@@ -130,6 +147,15 @@ running the pipeline over real filings.
 | R13 | **A quantity the layer cannot attribute is refused, not guessed** | A 20:1 split read as +1,923% dilution; a tagged 100% concentration is a disaggregation total | `max_share_change`, `_CONCENTRATION_TOTAL_ROW` |
 | R14 | **No GPL-family runtime dependency** (NFR7) | Licence wall for the wider system | `tools/license_gate.py` |
 | R15 | **Tests are fully offline** | Network in a test is a test failure | `tests/` — synthetic fixtures only |
+| R16 | **A thesis is a draft until the owner ratifies it** | FR9: conviction and circle fit are asked, never invented — the builder's schema cannot even carry them | `thesis.validate`, `thesis.ratify` |
+| R17 | **Every trigger machine-validatable, none price-based** | The thesis drives the monitoring; the stock doesn't know what you paid | `thesis.METRICS`, `thesis.validate` |
+| R18 | **Judgement never fires the sell rule alone** | A narrative verdict can only send a thesis to review; breaks need a mechanical trigger or a documented fact | `monitor.check_trigger` |
+| R19 | **An unchecked trigger is reported, never read as intact** | No API key ≠ no risk; silence is not safety | `monitor` UNCHECKED reporting |
+
+**Architecture revision (2026-08-03, journaled in `docs/THESIS-DESIGN.md` §1):** the
+2026-07-08 "no LLM in the scheduled runtime" lock is lifted by owner decision. The LLM
+transport is a hand-rolled stdlib client (`llm.py`, the `tg.py` pattern), default model
+`claude-opus-5`.
 
 ## Files
 
@@ -146,6 +172,9 @@ running the pipeline over real filings.
 | `formation.py` | frozen v3 owner-mode rules + `formation-state.json` |
 | `datasheet.py` | self-contained audit HTML (evidence chain, recompute check, Stage-2 layer) |
 | `picks.py` | self-contained picks HTML — the shortlist, with fragility beside every score |
+| `llm.py` | stdlib Claude Messages client (web search, strict tools, pause_turn, refusal fallbacks) |
+| `thesis.py` | the Thesis Builder: top 1% → deep research → draft thesis + summary + report; `ratify` = the Gate |
+| `monitor.py` | the Weekly Monitor: committed theses validated against their own triggers (FR7) |
 | `bt_fetch.py` / `pit.py` | EDGAR companyfacts + weekly prices / point-in-time Bundle adapter |
 | `secsv.py` | bulk SEC CSV export → companyfacts shape → Bundles (1,904 names in ~20 s) |
 | `backtest.py` / `backtest3.py` | v2-composite backtest / v3 owner-mode + walk-forward harness |
@@ -156,7 +185,7 @@ Design docs: `docs/RECONSTRUCTION.md` (chat → code, plus 19 documented deviati
 `docs/SCORECARD-DESIGN.md` (why the percentile composite was replaced),
 `docs/INVERSION-DESIGN.md` (the Munger layer, and §8 on what its first cut got wrong).
 
-Tests: `python -m pytest tests/ -q` — 585 tests, fully offline on synthetic fixtures.
+Tests: `python -m pytest tests/ -q` — 671 tests, fully offline on synthetic fixtures.
 
 ## Validation status
 

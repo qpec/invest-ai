@@ -72,10 +72,17 @@ baseline; this is what each one means in practice.
 ### Runtime shape
 
 Always-on Ubuntu box · systemd timers + oneshot jobs + one small synchronous
-daemon · stdlib spine (hand-rolled Telegram client) · two SQLite files with the
-benchmark physically quarantined · rendered-markdown archive in its own git
-repo · four runtime pip packages · **no LLM in the scheduled runtime** — the
-Gate and the Study are desk sessions through the `agentcy` CLI.
+daemon · stdlib spine (hand-rolled Telegram client, hand-rolled Claude client) ·
+two SQLite files with the benchmark physically quarantined · rendered-markdown
+archive in its own git repo · four runtime pip packages.
+
+**Architecture revision 2026-08-03** (journaled in
+`stock-scout/docs/THESIS-DESIGN.md` §1): the original "no LLM in the scheduled
+runtime" lock is lifted by owner decision. The Scout is now the starting
+engine; its top 1% feeds a thesis builder (deep research → draft thesis for
+the Gate), and a weekly monitor validates committed theses — metric triggers
+mechanically, narrative triggers via LLM with web search. FR9 and FR11 bind
+unchanged: the owner ratifies every thesis, and nothing executes trades.
 
     agentcy run {daily,weekly,quarterly,event}
     agentcy bot

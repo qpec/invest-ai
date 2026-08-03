@@ -7,3 +7,6 @@ progress.json
 failures.log
 data/equities.bz2
 universe.csv
+
+# thesis engine — theses are portfolio data (NFR2); state never lives in the code repo
+theses/

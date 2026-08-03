@@ -1,0 +1,4 @@
+# Desk-side grounding for the thesis builder (THESIS-DESIGN.md §4).
+# Deliberately NOT in requirements.txt: edgartools carries a heavy dependency tree,
+# so it is confined to the human-triggered build path behind a guarded import.
+edgartools
