@@ -363,7 +363,8 @@ def brief(symbol: str, bundle: dict, card: dict, inv: dict, *,
             "and let the owner PASS rather than padding the thesis.",
         ],
         body=body,
-        finish=f"python thesis.py record {symbol} --theses-dir {theses_dir}",
+        finish=f"python thesis.py record {symbol} --theses-dir {theses_dir}"
+               f" --model <the model id you are running>",
     )
     path = out / deskwork.ORDER_NAME
     deskwork.write_atomic(path, text)
@@ -381,7 +382,8 @@ def brief(symbol: str, bundle: dict, card: dict, inv: dict, *,
     return path
 
 
-def record(symbol: str, *, theses_dir: Path = THESES_DIR) -> dict:
+def record(symbol: str, *, theses_dir: Path = THESES_DIR, model: str | None = None,
+           transcript: Path | None = None) -> dict:
     """Beat 3: accept or refuse what the agent wrote.
 
     This is the seam's whole point. The agent is trusted for research and prose; it is
@@ -389,7 +391,10 @@ def record(symbol: str, *, theses_dir: Path = THESES_DIR) -> dict:
     re-checked here against the file on disk. A missing artifact is a refusal, not a
     warning — a thesis without its report is not a thesis."""
     out = Path(theses_dir) / "drafts" / symbol
-    problems: list[str] = []
+    # Which model wrote this is part of the contract, not metadata: the owner's rule is
+    # best-available only, and a year from now the record is the only thing that can say
+    # whether that rule was kept.
+    agent, problems = deskwork.resolve_model(model, transcript=transcript)
     for filename in ("report.md", "summary.md"):
         path = out / filename
         if not path.exists():
@@ -418,6 +423,7 @@ def record(symbol: str, *, theses_dir: Path = THESES_DIR) -> dict:
 
     doc = {"symbol": symbol, "status": "draft", "version": 0,
            "built_at": _dt.date.today().isoformat(),
+           "agent": agent,
            "metrics_snapshot": snapshot,
            "thesis": draft, "validation_problems": problems}
     deskwork.write_json(out / "record.json", doc)
@@ -455,6 +461,18 @@ def ratify(symbol: str, *, theses_dir: Path = THESES_DIR, ask=input) -> dict:
     if problems:
         raise ValueError(f"{symbol}: not ratifiable until fixed (edit the draft): "
                          + "; ".join(problems))
+
+    # The Gate is where a draft becomes a thing the monitor acts on, so the model that
+    # wrote it is re-checked here rather than trusted from a record written earlier —
+    # a record.json edited by hand between beats would otherwise sail straight through.
+    agent = doc.get("agent") or {}
+    if not agent.get("approved"):
+        raise ValueError(
+            f"the draft was written by {agent.get('id') or 'an unrecorded model'}, which "
+            f"is not approved for desk work (best available only: "
+            f"{', '.join(deskwork.APPROVED_MODELS)}). Re-run the work order on an "
+            f"approved model.")
+    print(f"  {deskwork.model_note(agent)}")
 
     conviction = ask(f"Conviction for {symbol} ({'/'.join(CONVICTION_LEVELS)}): ").strip().lower()
     if conviction not in CONVICTION_LEVELS:
@@ -590,13 +608,20 @@ def main(argv=None) -> int:
         p = sub.add_parser(cmd, help=help_text)
         p.add_argument("symbols", nargs="+")
         p.add_argument("--theses-dir", default=str(THESES_DIR))
+        if cmd == "record":
+            p.add_argument("--model", help="the model id you are running. Ignored when "
+                                           "the harness keeps a readable transcript — "
+                                           "that is read instead, and a mismatch is "
+                                           "refused")
     args = parser.parse_args(argv)
 
     if args.command == "record":
         failures = 0
         for symbol in args.symbols:
             try:
-                record(symbol, theses_dir=Path(args.theses_dir))
+                doc = record(symbol, theses_dir=Path(args.theses_dir),
+                             model=args.model)
+                print(f"  {deskwork.model_note(doc['agent'])}")
                 print(f"{symbol}: draft ACCEPTED — ready for the Gate "
                       f"(`python thesis.py ratify {symbol}`)")
             except deskwork.OrderError as error:

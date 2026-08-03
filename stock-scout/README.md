@@ -164,6 +164,7 @@ running the pipeline over real filings.
 | R18 | **Judgement never fires the sell rule alone** | A narrative verdict can only send a thesis to review; breaks need a mechanical trigger or a documented fact | `monitor.check_trigger` |
 | R19 | **An unchecked trigger is reported, never read as intact** | An unanswered question ≠ no risk; silence is not safety | `monitor` UNCHECKED reporting |
 | R20 | **The agent is the runtime, not a dependency** | Python owns the packet and the validation; the agent owns the research and the prose, and is never trusted for the contract | `deskwork.py`, `thesis.record`, `monitor.run` |
+| R21 | **Best-available models only, recorded and enforced** | Deleting the API client deleted the one place a model was pinned; a thesis written by a cheap model must never look like one that wasn't | `deskwork.APPROVED_MODELS`, `deskwork.observed_model` |
 
 **Architecture revision (2026-08-03, journaled in `docs/THESIS-DESIGN.md` §1):** the
 2026-07-08 "no LLM in the scheduled runtime" lock is lifted by owner decision.
@@ -192,6 +193,17 @@ uncomputable metric, a narrative trigger that tries to fire a sell, a missing re
 summary without its heading: all refused by Python, none of it a matter of the agent
 behaving well.
 
+**Which model did the work is part of that contract.** The owner's rule is best-available
+only, and the model is now a property of how the harness was launched rather than a
+constant in a file — so `deskwork.observed_model()` reads it out of the harness's own
+transcript, `record` stamps it onto `record.json`, the Gate re-checks it rather than
+trusting the stamp, and the weekly report names it. An unapproved model is refused at both
+gates; a `--model` declaration that contradicts the transcript is refused too, which is the
+only thing that makes the declaration worth accepting where no transcript exists. There is
+no override flag on purpose — an escape hatch here would be operated by the agent, which is
+the thing being constrained. When a better model ships, the owner edits one constant
+(`deskwork.APPROVED_MODELS`) in a file that goes through review.
+
 ## Files
 
 | File | Role |
@@ -207,7 +219,7 @@ behaving well.
 | `formation.py` | frozen v3 owner-mode rules + `formation-state.json` |
 | `datasheet.py` | self-contained audit HTML (evidence chain, recompute check, Stage-2 layer) |
 | `picks.py` | self-contained picks HTML — the shortlist, with fragility beside every score |
-| `deskwork.py` | the agent seam — work-order formatting, atomic writes, JSON I/O. No API client anywhere in this repo |
+| `deskwork.py` | the agent seam — work-order formatting, atomic writes, JSON I/O, and the best-available model gate. No API client anywhere in this repo |
 | `thesis.py` | the Thesis Builder: `brief` (work order) → agent research → `record` (validation) → `ratify` (the Gate) |
 | `monitor.py` | the Weekly Monitor: `brief` (open questions) → agent verdicts → `run` (evaluate every committed thesis, FR7) |
 | `bt_fetch.py` / `pit.py` | EDGAR companyfacts + weekly prices / point-in-time Bundle adapter |

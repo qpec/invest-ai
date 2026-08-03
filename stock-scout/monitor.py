@@ -1,7 +1,10 @@
 """The Weekly Monitor — committed theses validated against their own triggers
 (THESIS-DESIGN.md §7; FR4/FR7/FR9/FR11).
 
-    python monitor.py --sec-data <dir> --prices <dir> [--no-llm]
+    python monitor.py brief --theses-dir <dir>              # 1. the week's open questions
+    <the agent answers them into verdicts.json>
+    python monitor.py run --sec-data <dir> --prices <dir> \
+        --verdicts <path> --model <model id>                # 2. evaluate everything
 
 The constitution's core principle made executable: the thesis drives the monitoring. This
 runs ONLY the pre-committed triggers of ratified theses — never open-ended news scanning.
@@ -28,6 +31,7 @@ import argparse
 import datetime as _dt
 import json
 import os
+import sys
 from pathlib import Path
 
 import deskwork
@@ -179,8 +183,13 @@ def _save(path: Path, doc: dict):
     os.replace(tmp, path)
 
 
-def _render(report: list[dict], as_of: str) -> str:
+def _render(report: list[dict], as_of: str, *, provenance: str = "") -> str:
     lines = [f"# Weekly thesis monitor — {as_of}", ""]
+    # Named at the top, not in a footer: whoever reads a BROKEN verdict is about to act on
+    # it, and "which model answered the judgement questions" is part of how much weight
+    # that verdict carries.
+    if provenance:
+        lines += [f"_{provenance}_", ""]
     if not report:
         lines.append("No committed theses. The monitor reads only `theses/committed/` — "
                      "ratify a draft at the Gate first.")
@@ -213,7 +222,19 @@ def _render(report: list[dict], as_of: str) -> str:
 
 
 def run(*, theses_dir: Path, bundles_by_symbol: dict, verdicts: dict | None = None,
-        as_of: str, reports_dir: Path = Path("reports")) -> list[dict]:
+        as_of: str, reports_dir: Path = Path("reports"), model: str | None = None,
+        transcript: Path | None = None) -> list[dict]:
+    # The model gate applies to JUDGEMENT, not to arithmetic. A metric-only run needs no
+    # agent at all and is never blocked; the moment agent verdicts are ingested — the
+    # answers that can send a thesis to review or let a break trigger fire — the owner's
+    # best-available rule binds, and an unapproved model is refused before it can write
+    # a status into a committed thesis.
+    agent = {"id": None, "provenance": None, "approved": False}
+    if verdicts:
+        agent, problems = deskwork.resolve_model(model, transcript=transcript)
+        if problems:
+            raise deskwork.OrderError(
+                "refusing to ingest agent verdicts:\n  - " + "\n  - ".join(problems))
     committed = sorted(Path(theses_dir, "committed").glob("*.json"))
     report = []
     for path in committed:
@@ -234,7 +255,9 @@ def run(*, theses_dir: Path, bundles_by_symbol: dict, verdicts: dict | None = No
         report.append(entry)
     reports_dir.mkdir(parents=True, exist_ok=True)
     out = reports_dir / f"monitor-{as_of}.md"
-    out.write_text(_render(report, as_of), encoding="utf-8")
+    provenance = (deskwork.model_note(agent) if verdicts else
+                  "metric triggers only — no agent judgement was used this run")
+    out.write_text(_render(report, as_of, provenance=provenance), encoding="utf-8")
     return report
 
 
@@ -294,10 +317,14 @@ def brief(theses_dir: Path, *, as_of: str, out_dir: Path | None = None) -> Path 
         rules=["Answer the question asked, nothing broader.",
                "`high` confidence means documented public fact — it is what lets a "
                "break trigger actually break.",
-               "Never leave a question out; a missing verdict is reported UNCHECKED."],
+               "Never leave a question out; a missing verdict is reported UNCHECKED.",
+               "The owner's rule is best-available models only. Your verdicts are refused "
+               "outright if the model answering them is not approved — this is checked "
+               "against the harness, not against what you say."],
         body=body,
         finish=f"python monitor.py run --theses-dir {theses_dir} --as-of {as_of} "
-               f"--verdicts {out}/verdicts.json --sec-data <dir> --prices <dir>",
+               f"--verdicts {out}/verdicts.json --sec-data <dir> --prices <dir> "
+               f"--model <the model id you are running>",
     )
     path = out / deskwork.ORDER_NAME
     deskwork.write_atomic(path, text)
@@ -335,6 +362,9 @@ def main(argv=None) -> int:
     p.add_argument("--theses-dir", default=str(thesis_mod.THESES_DIR))
     p.add_argument("--verdicts", help="verdicts.json from the agent's work order")
     p.add_argument("--reports-dir", default="reports")
+    p.add_argument("--model", help="the model id you are running. Ignored when the "
+                                   "harness keeps a readable transcript — that is read "
+                                   "instead, and a mismatch is refused")
     args = parser.parse_args(argv)
 
     theses_dir = Path(args.theses_dir)
@@ -364,9 +394,13 @@ def main(argv=None) -> int:
         print("no verdicts supplied: event/narrative triggers will be UNCHECKED "
               "(`python monitor.py brief` writes the work order that produces them)")
 
-    report = run(theses_dir=theses_dir, bundles_by_symbol=bundles_by_symbol,
-                 verdicts=verdicts, as_of=args.as_of,
-                 reports_dir=Path(args.reports_dir))
+    try:
+        report = run(theses_dir=theses_dir, bundles_by_symbol=bundles_by_symbol,
+                     verdicts=verdicts, as_of=args.as_of,
+                     reports_dir=Path(args.reports_dir), model=args.model)
+    except deskwork.OrderError as error:
+        print(str(error), file=sys.stderr)
+        return 1
     for entry in report:
         print(f"{entry['symbol']}: {entry['status']}"
               + (f"  (unchecked: {len(entry['unchecked'])})" if entry["unchecked"] else ""))

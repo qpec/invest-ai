@@ -29,6 +29,11 @@ refuses your work**. Do not report a task finished until it exits clean.
   plainly beats a strength oversold.
 - **Address every severe fragility finding by name** in a bear case. You may argue against
   one; you may never ignore one.
+- **Best-available models only.** Desk work is refused outright if the model doing it is
+  not on the owner's approved list. This is read from the harness transcript, not from
+  anything you say — and if you also pass `--model`, a mismatch with what the harness
+  reports is itself a refusal. If you are not running an approved model, stop and say so
+  rather than producing work that will be thrown away.
 
 ## Building a thesis
 
@@ -50,6 +55,8 @@ Then, for each `theses/drafts/<SYM>/WORK-ORDER.md`:
      `## Executive summary`
    - `thesis.json` — the structured draft, matching the schema in the order
 4. **`python thesis.py record <SYM>`** — fix whatever it reports, re-run until accepted.
+   Add `--model <your model id>` if your harness keeps no transcript (OpenClaw, a bare
+   shell); on Claude Code it is read for you and the flag is only cross-checked.
 
 The trigger rules are where most rejections come from. A `metric` trigger may only
 reference the registry metrics listed in the packet, and only ones with a real current
@@ -86,7 +93,9 @@ statement, a major outlet), and it is what lets a `break` trigger actually break
 less demotes to review.
 
 `run` writes `reports/monitor-<date>.md` and sets each thesis to intact / under review /
-broken. **Broken is sticky** — it stays until the owner acts at the desk.
+broken. **Broken is sticky** — it stays until the owner acts at the desk. The report names
+the model that answered the questions, and says plainly whether that was observed or merely
+declared. A metric-only run (no `--verdicts`) involves no judgement and needs no model.
 
 ## What good looks like
 

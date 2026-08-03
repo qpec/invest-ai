@@ -158,6 +158,37 @@ The seam is deliberately one-directional. The agent is trusted for research and 
 never for the contract. Nothing in beat 3 depends on the agent having behaved well, which
 is the only property that makes an LLM safe to put inside a decision pipeline.
 
+### The model gate
+
+Pinning a model was something the deleted client did for free (`AGENTCY_LLM_MODEL`,
+default claude-opus-5). Removing it removed the guarantee, and quietly: the model became a
+property of how the harness was launched, invisible to the repo and — worse — invisible to
+whoever reads a thesis a year later. A thesis written by the cheapest available model would
+have looked exactly like one written by the best.
+
+The owner's rule is **best available only**, so:
+
+- `deskwork.observed_model()` reads the model out of the harness's own transcript. This is
+  the only mechanically trustworthy answer: an agent asked to name its model can say
+  anything, and nothing else in this design trusts the agent for the contract.
+- `record` stamps `{id, provenance, approved}` onto `record.json` and refuses an unapproved
+  model — writing the record anyway, carrying the reason, because a refusal that leaves no
+  trace is the failure mode the seam exists to prevent.
+- `ratify` re-checks rather than trusting the stamp. `record.json` is an ordinary file; if
+  the Gate believed its `approved` flag, editing one line would launder any model at all.
+- `monitor.py run` gates **judgement, not arithmetic**: ingesting agent verdicts requires an
+  approved model, a metric-only sweep requires none, and the weekly report names the model
+  on its first line — whoever reads a BROKEN verdict is about to act on it.
+- Where no transcript exists (OpenClaw, a bare shell), a `--model` declaration is accepted
+  and labelled `NOT independently verified`. Where a transcript does exist, a declaration
+  that contradicts it is refused; that cross-check is the only thing that makes accepting a
+  declaration elsewhere defensible.
+
+There is deliberately **no override flag**. An escape hatch on this gate would be operated
+by the agent, and the agent is the thing being constrained. When a better model ships the
+owner edits `deskwork.APPROVED_MODELS` — a code change, in a file under review, journalled
+by git. That is the correct amount of friction for a rule that is otherwise unfalsifiable.
+
 Two consequences worth stating:
 
 - **The cost model is gone.** There is no per-name dollar figure to print, because there

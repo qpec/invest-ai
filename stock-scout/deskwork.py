@@ -27,9 +27,115 @@ from pathlib import Path
 
 ORDER_NAME = "WORK-ORDER.md"
 
+# --- Which model did the work (the owner's "best available" rule) ------------------------
+#
+# Deleting the API client also deleted the one place a model was pinned (`AGENTCY_LLM_MODEL`,
+# default claude-opus-5). The model is now a property of how the harness was launched:
+# invisible to this repo, and — worse — invisible to whoever reads a thesis a year from now.
+# A thesis written by a cheap model would look exactly like one written by the best model.
+# So the model is recorded on every artifact, and the record is enforced.
+#
+# There is deliberately NO override flag. An escape hatch on this gate would be operated by
+# the agent, and the agent is the thing being constrained. When a better model ships, the
+# owner edits this one constant — a code change, in a file under review, journalled by git.
+APPROVED_MODELS = ("claude-opus-5",)
+
+# The harness transcript is a big append-only file; the model is on every assistant message,
+# so the last one is the model running right now.
+_TRANSCRIPT_TAIL_BYTES = 512 * 1024
+
 
 class OrderError(Exception):
     """A work order could not be prepared, or its artifact could not be accepted."""
+
+
+def transcript_path() -> Path | None:
+    """The current harness transcript, or None when the harness does not keep one where
+    we can see it (OpenClaw, a bare shell, a subprocess with the env stripped)."""
+    session = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not session:
+        return None
+    root = Path(os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude"))
+    matches = sorted((root / "projects").glob(f"*/{session}.jsonl"))
+    return matches[-1] if matches else None
+
+
+def observed_model(transcript: Path | None = None) -> str | None:
+    """The model actually driving this session, read out of the harness's own transcript
+    rather than taken on the agent's word.
+
+    This is the only mechanically trustworthy answer available: an agent asked to name its
+    model can say anything, and the whole design rests on not trusting the agent for the
+    contract. Returns None when there is no transcript to read, which is a real state and
+    is reported as such — never quietly treated as approval."""
+    path = transcript if transcript is not None else transcript_path()
+    if path is None or not Path(path).exists():
+        return None
+    path = Path(path)
+    with path.open("rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        size = fh.tell()
+        start = max(0, size - _TRANSCRIPT_TAIL_BYTES)
+        fh.seek(start)
+        chunk = fh.read()
+    lines = chunk.decode("utf-8", errors="replace").splitlines()
+    if start and lines:
+        lines = lines[1:]        # the seek almost certainly landed mid-line
+    for line in reversed(lines):
+        try:
+            model = (json.loads(line).get("message") or {}).get("model")
+        except (json.JSONDecodeError, AttributeError):
+            continue
+        # "<synthetic>" marks harness-generated turns (cancellations, injected notices),
+        # which carry no model and must not be mistaken for one.
+        if model and not model.startswith("<"):
+            return model
+    return None
+
+
+def resolve_model(declared: str | None = None, *,
+                  transcript: Path | None = None) -> tuple[dict, list[str]]:
+    """Establish which model did the work, and whether the owner allows it.
+
+    Returns ``({"id", "provenance", "approved"}, problems)``. Problems are returned rather
+    than raised so the caller can fold them into the rest of its refusal and still write a
+    record — a refused artifact that leaves no trace of WHY is the failure mode this whole
+    seam exists to prevent."""
+    seen = observed_model(transcript)
+    declared = (declared or "").strip() or None
+    problems: list[str] = []
+
+    if seen and declared and seen != declared:
+        # The declaration is only worth anything because it is cross-checked. A mismatch
+        # is not a typo to smooth over: one of the two is wrong about what wrote the file.
+        problems.append(f"model mismatch: the harness transcript says {seen!r} but "
+                        f"--model says {declared!r}")
+    model_id = seen or declared
+    provenance = "observed" if seen else ("declared" if declared else None)
+
+    if model_id is None:
+        problems.append(
+            "no model recorded: this harness keeps no readable transcript, so pass "
+            "`--model <your model id>`. A thesis whose author is unknown cannot be "
+            "told apart from one written by the cheapest model available.")
+    elif model_id not in APPROVED_MODELS:
+        problems.append(
+            f"model {model_id!r} is not approved for desk work — the owner's rule is best "
+            f"available only, currently {', '.join(APPROVED_MODELS)}. Re-run this task on "
+            f"an approved model, or have the OWNER (not you) widen "
+            f"deskwork.APPROVED_MODELS.")
+
+    return ({"id": model_id, "provenance": provenance,
+             "approved": bool(model_id) and model_id in APPROVED_MODELS}, problems)
+
+
+def model_note(info: dict) -> str:
+    """One line naming the model and how confidently, for a report a human will read."""
+    if not info or not info.get("id"):
+        return "model: UNRECORDED"
+    if info.get("provenance") == "observed":
+        return f"model: {info['id']} (read from the harness transcript)"
+    return f"model: {info['id']} (declared by the agent, NOT independently verified)"
 
 
 def write_atomic(path: Path, text: str):

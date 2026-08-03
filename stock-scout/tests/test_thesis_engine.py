@@ -19,6 +19,25 @@ import scoring
 import thesis
 
 
+APPROVED = deskwork.APPROVED_MODELS[0]
+
+
+@pytest.fixture(autouse=True)
+def _fixed_model(monkeypatch):
+    """Pin the observed model for every test.
+
+    Without this the suite reads whatever harness happens to be running it: green on the
+    desk, red in CI, and silently dependent on ambient state — the exact class of test
+    this repo refuses elsewhere. Tests that are ABOUT the gate override it explicitly."""
+    monkeypatch.setattr(deskwork, "observed_model", lambda transcript=None: APPROVED)
+
+
+def agent_block(model=None, provenance="observed"):
+    model = APPROVED if model is None else model
+    return {"id": model, "provenance": provenance,
+            "approved": model in deskwork.APPROVED_MODELS}
+
+
 # --- Fixture thesis material --------------------------------------------------------------
 
 def metric_trigger(tid="T1", metric="owner_fcf_margin_pct", op="<", threshold=12.0,
@@ -113,6 +132,7 @@ class TestRatify:
         """An ACCEPTED draft — ratify reads record.json, which only `record` writes."""
         out = tmp_path / "drafts" / doc["thesis"]["symbol"]
         out.mkdir(parents=True, exist_ok=True)
+        doc.setdefault("agent", agent_block())
         (out / "record.json").write_text(json.dumps(doc))
 
     def test_ratification_asks_the_owner_and_commits(self, tmp_path):
@@ -565,3 +585,152 @@ class TestWeeklyRun:
         assert report == []
         rendered = (tmp_path / "reports" / "monitor-2026-08-08.md").read_text()
         assert "ratify a draft" in rendered.lower() or "No committed theses" in rendered
+
+
+# --- The model gate (the owner's "best available" rule) -----------------------------------
+
+class TestModelGate:
+    """Deleting the API client deleted the one place a model was pinned. These tests hold
+    the replacement: the model is read from the harness rather than asked of the agent,
+    it is recorded on every artifact, and an unapproved one is refused at both gates."""
+
+    def _real(self, monkeypatch):
+        """Drop the module-wide model pin: these tests are about the real resolution,
+        not about the isolation the rest of the suite runs under."""
+        monkeypatch.undo()
+
+    def _transcript(self, tmp_path, *models):
+        path = tmp_path / "session.jsonl"
+        path.write_text("\n".join(
+            json.dumps({"type": "assistant", "message": {"model": m, "content": []}})
+            for m in models), encoding="utf-8")
+        return path
+
+    def test_the_model_is_read_from_the_harness_not_asked_of_the_agent(self, tmp_path,
+                                                                       monkeypatch):
+        self._real(monkeypatch)
+        path = self._transcript(tmp_path, "claude-haiku-4-5-20251001", APPROVED)
+        assert deskwork.observed_model(path) == APPROVED
+
+    def test_synthetic_turns_are_not_mistaken_for_a_model(self, tmp_path, monkeypatch):
+        """Harness-generated turns carry no model; reading one as the answer would let a
+        cancellation notice stand in for the thing that did the work."""
+        self._real(monkeypatch)
+        path = self._transcript(tmp_path, APPROVED, "<synthetic>")
+        assert deskwork.observed_model(path) == APPROVED
+
+    def test_no_transcript_is_not_an_approval(self, tmp_path, monkeypatch):
+        self._real(monkeypatch)
+        assert deskwork.observed_model(tmp_path / "nope.jsonl") is None
+        info, problems = deskwork.resolve_model(None, transcript=tmp_path / "nope.jsonl")
+        assert info["approved"] is False
+        assert any("no model recorded" in p for p in problems)
+
+    def test_an_unapproved_model_is_refused(self, tmp_path, monkeypatch):
+        self._real(monkeypatch)
+        path = self._transcript(tmp_path, "claude-haiku-4-5-20251001")
+        info, problems = deskwork.resolve_model(transcript=path)
+        assert info["id"] == "claude-haiku-4-5-20251001" and info["approved"] is False
+        assert any("best available" in p for p in problems)
+
+    def test_a_declaration_contradicting_the_harness_is_refused(self, tmp_path,
+                                                                monkeypatch):
+        """The declaration is only worth anything because it is cross-checked: an agent
+        that could name its own model would be trusted for part of the contract."""
+        self._real(monkeypatch)
+        path = self._transcript(tmp_path, "claude-haiku-4-5-20251001")
+        _, problems = deskwork.resolve_model(APPROVED, transcript=path)
+        assert any("mismatch" in p for p in problems)
+
+    def test_a_declaration_stands_alone_but_says_it_is_unverified(self, tmp_path,
+                                                                  monkeypatch):
+        """OpenClaw and bare shells keep no transcript. The declaration is then all there
+        is — allowed, but never dressed up as verified."""
+        self._real(monkeypatch)
+        info, problems = deskwork.resolve_model(APPROVED,
+                                                transcript=tmp_path / "nope.jsonl")
+        assert problems == [] and info["provenance"] == "declared"
+        assert "NOT independently verified" in deskwork.model_note(info)
+
+
+class TestModelGateAtTheSeams:
+    def _agent_writes(self, tmp_path, symbol="AAA"):
+        out = tmp_path / "drafts" / symbol
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "report.md").write_text("# Report\nlong analysis")
+        (out / "summary.md").write_text(f"{thesis.SUMMARY_HEADING}\nplain words")
+        (out / "thesis.json").write_text(json.dumps(draft(symbol)))
+        return out
+
+    def test_record_stamps_the_model_onto_the_draft(self, tmp_path):
+        self._agent_writes(tmp_path)
+        doc = thesis.record("AAA", theses_dir=tmp_path)
+        assert doc["agent"] == {"id": APPROVED, "provenance": "observed",
+                                "approved": True}
+
+    def test_record_refuses_an_unapproved_model_and_says_why_on_disk(self, tmp_path,
+                                                                     monkeypatch):
+        """A refusal that leaves no trace is the failure mode this seam exists to stop:
+        the record must still be written, carrying the reason."""
+        monkeypatch.setattr(deskwork, "observed_model",
+                            lambda transcript=None: "claude-haiku-4-5-20251001")
+        self._agent_writes(tmp_path)
+        with pytest.raises(deskwork.OrderError, match="best available"):
+            thesis.record("AAA", theses_dir=tmp_path)
+        saved = json.loads((tmp_path / "drafts" / "AAA" / "record.json").read_text())
+        assert saved["agent"]["approved"] is False
+        assert any("best available" in p for p in saved["validation_problems"])
+
+    def test_the_gate_re_checks_the_model_rather_than_trusting_the_record(self, tmp_path):
+        """record.json is an ordinary file on disk. If the Gate trusted its `approved`
+        flag, hand-editing one line would launder a thesis written by any model at all."""
+        out = tmp_path / "drafts" / "AAA"
+        out.mkdir(parents=True)
+        (out / "record.json").write_text(json.dumps(
+            {"symbol": "AAA", "status": "draft", "thesis": draft(),
+             "agent": agent_block("claude-haiku-4-5-20251001")}))
+        with pytest.raises(ValueError, match="not approved"):
+            thesis.ratify("AAA", theses_dir=tmp_path, ask=lambda _: "high")
+
+    def test_the_monitor_refuses_verdicts_from_an_unapproved_model(self, tmp_path,
+                                                                   monkeypatch):
+        monkeypatch.setattr(deskwork, "observed_model",
+                            lambda transcript=None: "claude-haiku-4-5-20251001")
+        committed = tmp_path / "theses" / "committed"
+        committed.mkdir(parents=True)
+        (committed / "AAA.json").write_text(json.dumps(
+            committed_doc(triggers=[question_trigger()])))
+        with pytest.raises(deskwork.OrderError, match="best available"):
+            monitor.run(theses_dir=tmp_path / "theses", bundles_by_symbol={},
+                        verdicts={"AAA": {"T2": {"tripped": True,
+                                                 "confidence": "high"}}},
+                        as_of="2026-08-08", reports_dir=tmp_path / "reports")
+
+    def test_a_metric_only_run_needs_no_model_at_all(self, tmp_path, monkeypatch):
+        """The gate binds JUDGEMENT, not arithmetic. Blocking a metric-only sweep because
+        no agent was involved would turn a safety rule into an outage."""
+        monkeypatch.setattr(deskwork, "observed_model", lambda transcript=None: None)
+        committed = tmp_path / "theses" / "committed"
+        committed.mkdir(parents=True)
+        (committed / "AAA.json").write_text(json.dumps(
+            committed_doc(triggers=[metric_trigger(checks=1)])))
+        monkeypatch.setattr(monitor.scoring, "evaluate",
+                            lambda bundle: {"ofcf_margin": 8.0})
+        report = monitor.run(theses_dir=tmp_path / "theses",
+                             bundles_by_symbol={"AAA": {"symbol": "AAA"}},
+                             as_of="2026-08-08", reports_dir=tmp_path / "reports")
+        assert report[0]["status"] == "broken"
+        rendered = (tmp_path / "reports" / "monitor-2026-08-08.md").read_text()
+        assert "no agent judgement was used" in rendered
+
+    def test_the_report_names_the_model_that_answered_the_questions(self, tmp_path):
+        committed = tmp_path / "theses" / "committed"
+        committed.mkdir(parents=True)
+        (committed / "AAA.json").write_text(json.dumps(
+            committed_doc(triggers=[question_trigger()])))
+        monitor.run(theses_dir=tmp_path / "theses", bundles_by_symbol={},
+                    verdicts={"AAA": {"T2": {"tripped": False, "confidence": "high",
+                                             "evidence": "nothing found"}}},
+                    as_of="2026-08-08", reports_dir=tmp_path / "reports")
+        rendered = (tmp_path / "reports" / "monitor-2026-08-08.md").read_text()
+        assert APPROVED in rendered and "harness transcript" in rendered
