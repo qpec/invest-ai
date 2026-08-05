@@ -1,0 +1,15 @@
+[Unit]
+Description=scout weekly monitor brief (work order for the judgement lane)
+OnFailure=agentcy-fail@%n.service
+
+[Service]
+Type=oneshot
+User=agentcy
+TimeoutStartSec=10min
+EnvironmentFile=/etc/stock-agentcy/scout.env
+WorkingDirectory=/opt/stock-agentcy/stock-scout
+ExecStart=/opt/stock-agentcy/deploy/scout/brief.sh
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/stock-agentcy/scout
+PrivateTmp=true

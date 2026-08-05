@@ -1,16 +1,19 @@
 # Deploys docs/ (the desk site rendered by stock-scout/webapp.py) to GitHub Pages.
 #
+# The deploy branch is `bot/site` — the branch the box's fine-grained
+# contents-only PAT pushes after every Saturday rebuild (distributed-desk plan
+# §2: a compromised box can vandalise the site branch at worst, never main or
+# the workflows; this file rides on bot/site unchanged from its seeding, which
+# is exactly why a contents-only PAT can keep pushing there). A manual
+# workflow_dispatch deploys main's docs/ snapshot as the fallback.
+#
 # `enablement: true` lets the first run CREATE the Pages site, so no manual
 # Settings -> Pages step is needed as long as Actions may use the pages scopes.
-# Every later push to main that touches docs/** redeploys automatically — the
-# desk rebuild command is:
-#   python webapp.py --sec-data <dir> --prices <dir> --enrich-cache enrich_cache \
-#       --theses-dir theses --out-dir ../docs
 name: Deploy the desk site to GitHub Pages
 
 on:
   push:
-    branches: [main]
+    branches: ["bot/site"]
     paths: ["docs/**"]
   workflow_dispatch:
 

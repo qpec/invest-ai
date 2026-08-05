@@ -1,0 +1,9 @@
+[Unit]
+Description=scout enrichment refresh (Sat 06:00 Amsterdam)
+
+[Timer]
+OnCalendar=Sat 06:00 Europe/Amsterdam
+Persistent=true
+
+[Install]
+WantedBy=timers.target

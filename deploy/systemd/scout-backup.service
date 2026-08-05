@@ -1,0 +1,15 @@
+[Unit]
+Description=scout nightly mirror (enrich_cache + theses + reports -> second disk)
+OnFailure=agentcy-fail@%n.service
+
+[Service]
+Type=oneshot
+User=agentcy
+TimeoutStartSec=30min
+EnvironmentFile=/etc/stock-agentcy/scout.env
+ExecStart=/opt/stock-agentcy/deploy/scout/backup.sh
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/stock-agentcy/scout
+ReadWritePaths=/mnt/agentcy-backup
+PrivateTmp=true

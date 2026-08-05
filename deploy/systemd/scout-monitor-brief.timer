@@ -1,0 +1,9 @@
+[Unit]
+Description=scout monitor brief (Sat 07:00 Amsterdam)
+
+[Timer]
+OnCalendar=Sat 07:00 Europe/Amsterdam
+Persistent=true
+
+[Install]
+WantedBy=timers.target
