@@ -1,0 +1,106 @@
+# Quickstart — a working desk on your own machine
+
+> **Not investment advice.** See the [README disclaimer](README.md) — it applies
+> to everything this produces, including everything you build with it.
+
+This gets you from clone to a running local desk in a few minutes, on a bundled
+sample dataset (13 well-known US filers, real as-filed SEC data). Every command
+below is tested against exactly this repo. The same pipeline scales to the full
+~1,900-name universe when you bring the full data; the always-on box deployment
+is the last section.
+
+## 0. What you need
+
+- [uv](https://docs.astral.sh/uv/) and git. Everything runs offline on the
+  sample data; the enrichment tier needs plain internet (SEC EDGAR, no key).
+- For the judgement steps only: an agent harness — **Claude Code or OpenClaw**
+  with a Claude subscription. There is **no API key** anywhere in this system,
+  by design: the agent *is* the runtime, and plain Python validates everything
+  it hands back.
+
+## 1. Install and prove it works
+
+```bash
+git clone https://github.com/qpec/invest-ai.git && cd invest-ai
+uv sync --locked
+uv run pytest -q                              # root suite — fully offline
+cd stock-scout && uv run pytest -q            # scout suite
+```
+
+## 2. Run the Scout on the sample data
+
+```bash
+cd stock-scout
+uv run python picks.py   --sec-data sample-data/secdata --prices sample-data/prices \
+    --universe sample-data/universe.csv --as-of 2026-08-01
+uv run python webapp.py  --sec-data sample-data/secdata --prices sample-data/prices \
+    --universe sample-data/universe.csv --as-of 2026-08-01 --out-dir /tmp/desk-site
+```
+
+Open `/tmp/desk-site/index.html`: the three-tab desk — ① Scout (every name,
+graded twice: the Owner's Scorecard and the Inversion Layer, never merged),
+② Thesis Desk, ③ Monitor. `reports/picks-<date>.html` is the audit-grade picks
+report. On the sample, expect 2 picks of 13 screened.
+
+## 3. The judgement beats (Claude Code / OpenClaw)
+
+Every LLM-facing task runs in three beats — Python writes a work order, the
+agent researches with its own tools and writes files, Python re-validates
+mechanically and **exits non-zero if it refuses the work**:
+
+```bash
+# 1. brief — write the work order for a candidate
+uv run python thesis.py brief CROX --sec-data sample-data/secdata \
+    --prices sample-data/prices --universe sample-data/universe.csv --as-of 2026-08-01
+
+# 2. work — open this repo in Claude Code (or point OpenClaw at it) and ask it
+#    to execute theses/drafts/CROX/WORK-ORDER.md. The order is self-contained:
+#    research steps, schema, rules, and the file to write.
+
+# 3. record — mechanical validation; refuses untestable triggers, forbidden
+#    fields, and any model not on the best-available list
+uv run python thesis.py record CROX
+```
+
+A draft becomes real only at the Gate — `uv run python thesis.py ratify CROX` —
+where conviction and circle-of-competence are asked of a **human,
+interactively**. No agent can answer them; machine-written drafts don't even
+have the fields (FR9). The weekly monitor is the same shape:
+`monitor.py brief` → agent answers the pre-committed questions →
+`monitor.py run` evaluates every trigger (an unanswered question is reported
+UNCHECKED, loudly — never guessed).
+
+## 4. Bring the full universe
+
+The sample is a subset of three inputs you can grow independently:
+
+| Input | Sample | Full |
+|---|---|---|
+| `universe.csv` | 13 names | `uv run python universe.py` builds ~2,900 candidates from FinanceDatabase |
+| SEC export dir | `sample-data/secdata/` | the same two CSV shapes for any symbols (`secsv.py` documents them); a full 2026-08-01 snapshot lives in the owner's private state archive as `batches/` |
+| price grids | `sample-data/prices/` | `populate.py` walks them from public sources, politely paced |
+
+Missing data never scores zero and never blocks: absence shrinks the
+denominator and is labelled (R7). `enrich.py` is the tiered gap-filler — tier 2
+fetches as-filed EDGAR companyfacts straight from the SEC (cached, no key) for
+whatever symbols you point it at.
+
+## 5. Make it yours
+
+- **The constitution** (`CLAUDE.md`, top section) encodes the investment
+  framework *and this owner's* circle of competence — replace the owner
+  context with your own; the Buffett/Munger/Naval machinery is generic.
+- **The universe** is pre-committed by design (FR14): edit `universe.csv` /
+  `universe.py` filters to your own hunting ground.
+- **The model gate** (`stock-scout/deskwork.py` → `APPROVED_MODELS`) pins which
+  model may do desk work. Widening it is a deliberate code change, on purpose.
+
+## 6. Going always-on (the box)
+
+One small VPS runs the whole weekly loop unattended — mechanical lane (systemd
+timers: scrape → brief → monitor → publish) and judgement lane (an `openclaw`
+user whose filesystem permissions ARE the guardrails), with GitHub as the only
+seam: code pulled from `main`, the site pushed to `bot/site` (GitHub Pages),
+private state archived to its own repo. `deploy/digitalocean/README.md` is the
+step-by-step; `docs/plans/2026-08-04-distributed-desk-architecture.md` is the
+full design with its security model.

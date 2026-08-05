@@ -7,6 +7,8 @@ progress.json
 failures.log
 data/equities.bz2
 universe.csv
+# the bundled quickstart sample IS meant to ship (public SEC data, 13 names)
+!sample-data/universe.csv
 
 # thesis engine — theses are portfolio data (NFR2); state never lives in the code repo
 theses/

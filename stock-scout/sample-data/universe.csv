@@ -1,0 +1,14 @@
+symbol,name,sector,industry,country,market_cap,exchange,currency
+AAPL,Apple Inc.,Information Technology,"Electronic Equipment, Instruments & Components",United States,Mega Cap,NMS,USD
+ADBE,Adobe Inc.,Information Technology,Software,United States,Large Cap,NMS,USD
+CAT,Caterpillar Inc.,Industrials,Machinery,United States,Mega Cap,NYQ,USD
+COST,Costco Wholesale Corporation,Consumer Staples,Household Products,United States,Mega Cap,NMS,USD
+CRM,"Salesforce, Inc.",Information Technology,Software,United States,Large Cap,NYQ,USD
+CROX,"Crocs, Inc.",Consumer Discretionary,"Textiles, Apparel & Luxury Goods",United States,Mid Cap,NMS,USD
+DECK,Deckers Outdoor Corporation,Consumer Discretionary,"Textiles, Apparel & Luxury Goods",United States,Large Cap,NYQ,USD
+ISRG,"Intuitive Surgical, Inc.",Health Care,Health Care Equipment & Supplies,United States,Large Cap,NMS,USD
+MSFT,Microsoft Corporation,Information Technology,Software,United States,Mega Cap,NMS,USD
+NKE,"Nike, Inc.",Consumer Discretionary,"Textiles, Apparel & Luxury Goods",United States,Large Cap,NYQ,USD
+NVDA,NVIDIA Corporation,Information Technology,Semiconductors & Semiconductor Equipment,United States,Mega Cap,NMS,USD
+UNH,UnitedHealth Group Incorporated,Health Care,Health Care Providers & Services,United States,Mega Cap,NYQ,USD
+WM,"Waste Management, Inc.",Industrials,Transportation Infrastructure,United States,Large Cap,NYQ,USD

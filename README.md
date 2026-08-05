@@ -1,9 +1,23 @@
 # Invest AI
 
+> **Not investment advice.** This is a research and educational tool. Nothing it
+> produces — scores, theses, triggers, reports, the public site — is a
+> recommendation to buy or sell any security, and none of it should be the sole
+> basis for an investment decision. Output can be wrong, stale, or incomplete.
+> Do your own research and consult a licensed financial advisor before
+> investing. The system never executes trades.
+
 **An AI-operated investment desk: it finds wonderful businesses, writes the
 argument for owning them, and then checks that argument every week — mechanically,
 against rules committed in advance. It advises and monitors. It never executes a
 trade.**
+
+**See it live:** the desk publishes itself every Saturday —
+[the public site](https://qpec.github.io/invest-ai/) shows the whole screened
+universe, the draft theses, and the monitor state. **Run it yourself:**
+[QUICKSTART.md](QUICKSTART.md) goes from clone to a working local desk on a
+bundled sample dataset in a few minutes, with Claude Code or OpenClaw as the
+judgement runtime.
 
 The core object is not the stock but the **investment thesis**: a written,
 machine-checkable document stating why we would own a business and — more
