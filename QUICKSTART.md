@@ -76,7 +76,7 @@ The sample is a subset of three inputs you can grow independently:
 
 | Input | Sample | Full |
 |---|---|---|
-| `universe.csv` | 13 names | `uv run python universe.py` builds ~2,900 candidates from FinanceDatabase |
+| `universe.csv` | 13 names | `uv run python universe.py` builds ~2,900 candidates from FinanceDatabase; `--sec-merge` extends any universe with every NYSE/Nasdaq/NYSE-American filer straight from the SEC's own map (~7,000 total, stdlib only) |
 | SEC export dir | `sample-data/secdata/` | the same two CSV shapes for any symbols (`secsv.py` documents them); a full 2026-08-01 snapshot lives in the owner's private state archive as `batches/` |
 | price grids | `sample-data/prices/` | `populate.py` walks them from public sources, politely paced |
 

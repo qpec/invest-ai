@@ -13,6 +13,17 @@
 set -euo pipefail
 . /opt/stock-agentcy/deploy/scout/lib.sh
 
+# Monitored names must be the most recently updated thing on the box when their
+# triggers are tested (owner rule, 2026-08-05). The nightly and 06:00 sweeps
+# already lead with them; this last pass closes the remaining gap — and its
+# failure is loud but never blocking (the run is cache-first by design).
+SYMS="$(thesis_symbols)"
+if [ -n "$SYMS" ]; then
+    timeout 900 "$PY" "$SCOUT_DIR/enrich.py" --force-refresh --symbols "$SYMS" \
+        --cache "$SCOUT/enrich_cache" \
+        || echo "pre-monitor refresh failed — monitoring on the existing cache"
+fi
+
 VERDICTS="$SCOUT/theses/monitor-$AS_OF/verdicts.json"
 EXTRA=()
 if [ -f "$VERDICTS" ]; then

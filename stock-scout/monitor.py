@@ -398,7 +398,15 @@ def main(argv=None) -> int:
             import enrich
             try:
                 ciks = enrich.cik_map_cached(Path(args.enrich_cache))
-                enrich.enrich_payloads(facts, [s for s in symbols if s in facts],
+                # A committed thesis on a name the export never carried (the expanded
+                # universe) monitors from its cached companyfacts — cache_only keeps
+                # the weekly run network-free; the 12:00 pre-refresh already fetched
+                # the monitored names minutes earlier.
+                enrich.bootstrap_payloads(facts, [s for s in symbols if s not in facts],
+                                          cache_dir=Path(args.enrich_cache), ciks=ciks,
+                                          cache_only=True)
+                enrich.enrich_payloads(facts, [s for s in symbols if s in facts
+                                               and enrich.ENRICHMENT_KEY not in facts[s]],
                                        cache_dir=Path(args.enrich_cache), ciks=ciks)
             except Exception as error:  # noqa: BLE001 — enrichment is a bonus, never a gate
                 print(f"enrichment unavailable ({type(error).__name__}: {error}) — "

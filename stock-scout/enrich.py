@@ -102,18 +102,23 @@ def cik_map_cached(cache_dir: Path, transport=_edgar_get) -> dict[str, int]:
 
 
 def fetch_companyfacts(cik: int, *, transport=_edgar_get,
-                       cache_dir: Path | None = None) -> dict:
-    """One symbol's full companyfacts payload, disk-cached so a re-run costs nothing.
+                       cache_dir: Path | None = None, refresh: bool = False) -> dict:
+    """One symbol's companyfacts payload, disk-cached so a re-run costs nothing.
 
     The cache is per-CIK and dated inside the payload (`_fetched`); staleness is the
     caller's policy, not this function's — filings do not un-file, so an old cache is
-    incomplete at worst, never wrong."""
+    incomplete at worst, never wrong. `refresh=True` is that policy's lever: skip the
+    cache read and refetch now (the rolling-freshness jobs). What lands on disk is the
+    PRUNED payload — the tag selection the pipeline can actually read — because a full
+    companyfacts document runs 2–8 MB and a universe of thousands would outgrow both
+    the box's memory and its backup volume for tags no consumer can reach."""
     if cache_dir is not None:
         cached = Path(cache_dir) / f"CIK{cik:010d}.json"
-        if cached.exists():
+        if cached.exists() and not refresh:
             return json.loads(cached.read_text(encoding="utf-8"))
     payload = json.loads(transport(FACTS_URL.format(cik=cik)))
     payload["_fetched"] = _dt.date.today().isoformat()
+    payload = prune_payload(payload)
     if cache_dir is not None:
         Path(cache_dir).mkdir(parents=True, exist_ok=True)
         tmp = cached.with_suffix(".json.tmp")
@@ -121,6 +126,100 @@ def fetch_companyfacts(cik: int, *, transport=_edgar_get,
         import os
         os.replace(tmp, cached)
     return payload
+
+
+# --- the consumed-tag selection (what a payload is allowed to weigh) ------------------
+
+def consumed_tags() -> dict[str, frozenset[str]]:
+    """Every (namespace, tag) the PIT layer can ever read — introspected from pit's own
+    concept tables (plus secsv's documented inline-read extras), not copied, so a new
+    concept chain widens this set automatically. Nothing outside it is reachable by any
+    consumer: pit resolves tags exclusively through these chains, and scoring/registry
+    read bundles, never facts."""
+    import secsv
+    us_gaap: set[str] = set()
+    for table in (pit._INCOME_CONCEPTS, pit._CASHFLOW_CONCEPTS, pit._BALANCE_CONCEPTS,
+                  pit._SUPPLEMENT_FLOW_CONCEPTS, pit._SUPPLEMENT_POINT_CONCEPTS,
+                  pit._DISCLOSURE_CONCEPTS):
+        for chain in table.values():
+            us_gaap.update(chain)
+    us_gaap.update(secsv._PIT_EXTRA_INSTANT_TAGS)
+    return {"us-gaap": frozenset(us_gaap), "dei": frozenset({pit._SHARES_TAG})}
+
+
+# History horizons for pruned payloads. Tag selection alone is not enough at scale:
+# a consumed tag still drags two decades of quarterly entries (~850 KB/name measured),
+# and thousands of bootstrapped names would not fit the box's memory at site-build
+# time. Annual filings keep long depth — the 10-year CAGR and 5-year MAD windows need
+# it; everything else (10-Q chains feed the TTM derivation and persistence streaks)
+# only needs the recent years. Long-history metrics always come from annual series,
+# so the cut is invisible to every consumer.
+ANNUAL_HORIZON_YEARS = 13
+QUARTERLY_HORIZON_YEARS = 5
+_ANNUAL_FORMS = ("10-K", "20-F", "40-F")
+
+
+def prune_payload(payload: dict) -> dict:
+    """A companyfacts payload cut to the consumed-tag selection and history horizons —
+    the same idea the bulk export always was: a curated SELECTION, not the whole
+    taxonomy. Non-facts keys (cik, entityName, _fetched, symbol, enrichment) pass
+    through untouched."""
+    keep = consumed_tags()
+    today = _dt.date.today()
+    annual_cutoff = f"{today.year - ANNUAL_HORIZON_YEARS}-01-01"
+    quarterly_cutoff = f"{today.year - QUARTERLY_HORIZON_YEARS}-01-01"
+
+    def keep_entry(entry: dict) -> dict | None:
+        # Minimal-entry normalization: exactly the five fields pit reads (and the
+        # export loader emits) — accn/fy/fp/frame are dead weight at this scale.
+        end = entry.get("end") or ""
+        form = str(entry.get("form") or "")
+        cutoff = annual_cutoff if form.startswith(_ANNUAL_FORMS) else quarterly_cutoff
+        if end < cutoff or entry.get("val") is None or not entry.get("filed"):
+            return None
+        slim = {"end": end, "filed": entry["filed"], "form": form,
+                "val": entry["val"]}
+        if entry.get("start"):
+            slim["start"] = entry["start"]
+        return slim
+
+    pruned = {k: v for k, v in payload.items() if k != "facts"}
+    facts: dict = {}
+    for namespace, tags in (payload.get("facts") or {}).items():
+        wanted = keep.get(namespace)
+        if not wanted:
+            continue
+        kept = {}
+        for tag, concept in tags.items():
+            if tag not in wanted:
+                continue
+            # One entry per period, the latest-filed: companyfacts re-report every
+            # comparative in every later filing, and _latest_filed picks max(filed)
+            # ≤ as_of anyway — for the box's forward-only as_of (always ≥ the fetch
+            # date) keeping only that winner is exactly equivalent. A pruned payload
+            # is therefore valid for as_of ≥ its fetch date, which is the only way
+            # the box ever reads it; historical rebuilds use the export.
+            units = {}
+            for unit, entries in (concept.get("units") or {}).items():
+                by_period: dict = {}
+                for raw in entries:
+                    slim = keep_entry(raw)
+                    if slim is None:
+                        continue
+                    key = (slim.get("start"), slim["end"])
+                    best = by_period.get(key)
+                    if best is None or slim["filed"] > best["filed"]:
+                        by_period[key] = slim
+                if by_period:
+                    units[unit] = sorted(by_period.values(),
+                                         key=lambda e: (e["end"], e["filed"]))
+            if units:
+                kept[tag] = {**{k: v for k, v in concept.items() if k != "units"},
+                             "units": units}
+        if kept:
+            facts[namespace] = kept
+    pruned["facts"] = facts
+    return pruned
 
 
 def merge_payload(base: dict, extra: dict, *, source: str = TIER_EDGAR) -> list[str]:
@@ -184,6 +283,118 @@ def enrich_payloads(facts: dict[str, dict], symbols: list[str], *,
     return added_by_symbol
 
 
+# --- cache bootstrap + rolling freshness (2026-08-05, owner-directed expansion) -------
+#
+# The export is a snapshot; the universe is not. A symbol the export has never heard of
+# can still be scored honestly: a cached companyfacts payload IS the payload shape the
+# whole pipeline reads (secsv.load_facts documents the equivalence), every tag it
+# carries is stamped edgar-live in the provenance ledger, and PIT discipline survives
+# because companyfacts entries carry their own `filed` dates. Bootstrap is ADDITIVE
+# ONLY: a symbol the export already knows is never touched, so the frozen decision
+# layer stays bit-identical for the original universe.
+
+def bootstrap_payloads(facts: dict[str, dict], symbols, *, cache_dir: Path,
+                       ciks: dict[str, int] | None = None, transport=_edgar_get,
+                       cache_only: bool = False, log=print) -> dict[str, int]:
+    """Create payloads for symbols absent from the export. Returns {symbol: tag count}.
+
+    `cache_only=True` is the offline consumers' mode (weekly monitor, site build):
+    the cache is read, the network never — a name with no cache entry yet simply
+    stays absent until a refresh job has fetched it, and the caller reports how many
+    are still pending. Never merges into an existing payload."""
+    ciks = ciks if ciks is not None else cik_map_cached(Path(cache_dir), transport)
+    made: dict[str, int] = {}
+    for symbol in symbols:
+        sym = str(symbol).upper()
+        if sym in facts:                      # additive only — the export stays frozen
+            continue
+        cik = ciks.get(sym)
+        if cik is None:
+            continue                          # not an SEC filer — nothing to bootstrap
+        if cache_only and not (Path(cache_dir) / f"CIK{cik:010d}.json").exists():
+            continue                          # pending a refresh job; caller counts it
+        try:
+            payload = fetch_companyfacts(cik, transport=transport, cache_dir=cache_dir)
+        except Exception as error:  # noqa: BLE001 — one dead fetch must not kill a sweep
+            log(f"{sym}: EDGAR fetch failed ({type(error).__name__}: {error}) — "
+                f"stays absent and says so")
+            continue
+        payload = prune_payload(payload)      # older caches may still hold full payloads
+        ledger = {f"{namespace}:{tag}": TIER_EDGAR
+                  for namespace, tags in (payload.get("facts") or {}).items()
+                  for tag in tags}
+        if not ledger:
+            continue                          # a filer with zero readable tags: unscoreable
+        payload["symbol"] = sym
+        payload[ENRICHMENT_KEY] = ledger
+        facts[sym] = payload
+        made[sym] = len(ledger)
+    return made
+
+
+def thesis_symbols(theses_dir: Path) -> list[str]:
+    """Committed first, then drafts — the freshness priority order. Tolerates both
+    artifact shapes (committed/<SYM>.json files, drafts/<SYM>/ directories)."""
+    ordered: list[str] = []
+    for sub in ("committed", "drafts"):
+        base = Path(theses_dir) / sub
+        if not base.exists():
+            continue
+        for path in sorted(base.iterdir()):
+            if path.name.startswith("monitor-"):
+                continue                      # the weekly spool lives beside the drafts
+            if path.is_dir() or path.suffix == ".json":
+                sym = (path.stem if path.suffix else path.name).upper()
+                if sym not in ordered:
+                    ordered.append(sym)
+    return ordered
+
+
+def rolling_refresh(cache_dir: Path, universe_symbols, *, priority=(),
+                    budget: int = 1500, transport=_edgar_get, log=print) -> dict:
+    """The freshness sweep: priority names are ALWAYS refetched first (monitored
+    theses must be the newest thing on disk before any monitor run), then the stalest
+    cache entries fill the remaining budget. Staleness = cache-file mtime; a symbol
+    with no cache file at all is infinitely stale and leads the queue, which is what
+    makes a universe expansion converge to full coverage over a few nights."""
+    import os
+    cache_dir = Path(cache_dir)
+    ciks = cik_map_cached(cache_dir, transport)
+
+    def mtime(sym: str) -> float:
+        path = cache_dir / f"CIK{ciks[sym]:010d}.json"
+        try:
+            return os.path.getmtime(path)
+        except OSError:
+            return float("-inf")
+
+    head = [s.upper() for s in priority if s.upper() in ciks]
+    seen = set(head)
+    rest = sorted((s for s in (str(u).upper() for u in universe_symbols)
+                   if s in ciks and s not in seen), key=mtime)
+    unknown = sum(1 for u in universe_symbols if str(u).upper() not in ciks)
+    plan = head + rest[:max(0, budget - len(head))]
+    ok = failed = 0
+    for sym in plan:
+        try:
+            fetch_companyfacts(ciks[sym], transport=transport,
+                               cache_dir=cache_dir, refresh=True)
+            ok += 1
+        except Exception as error:  # noqa: BLE001
+            failed += 1
+            log(f"{sym}: refresh failed ({type(error).__name__}: {error})")
+    return {"refreshed": ok, "failed": failed, "planned": len(plan),
+            "priority": len(head), "universe": len(list(universe_symbols)),
+            "not_sec_filers": unknown}
+
+
+def universe_symbols_csv(path: Path) -> list[str]:
+    """The symbol column of a universe.csv, order preserved."""
+    import csv
+    with Path(path).open(newline="", encoding="utf-8") as fh:
+        return [row["symbol"].upper() for row in csv.DictReader(fh) if row.get("symbol")]
+
+
 VENDOR_FILE = "vendor.json"
 
 
@@ -243,18 +454,61 @@ def load_vendor(cache_dir: Path) -> dict[str, dict]:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--sec-data", required=True)
+    parser.add_argument("--sec-data", help="bulk export dir (gap-fill mode only)")
     parser.add_argument("--symbols", help="comma-separated; default: every name with a "
                                           "registry-metric gap")
     parser.add_argument("--as-of", default=_dt.date.today().isoformat())
     parser.add_argument("--universe", default="universe.csv")
     parser.add_argument("--prices")
     parser.add_argument("--cache", default="enrich_cache")
+    parser.add_argument("--theses-dir", help="theses/ — its names lead every refresh")
+    parser.add_argument("--rolling", type=int, metavar="BUDGET",
+                        help="freshness-sweep mode: refetch thesis names first, then "
+                             "the stalest cache entries, up to BUDGET fetches")
+    parser.add_argument("--force-refresh", action="store_true",
+                        help="with --symbols: refetch those names NOW, cache or not — "
+                             "the pre-monitor freshness pass")
     parser.add_argument("--out", help="write enriched bundles JSONL here")
     parser.add_argument("--vendor", action="store_true",
                         help="tier 3: fetch vendor display values for metrics still "
                              "n/a after tier 2 (never scored; needs yfinance)")
     args = parser.parse_args(argv)
+
+    if args.rolling is not None:
+        priority = thesis_symbols(Path(args.theses_dir)) if args.theses_dir else []
+        summary = rolling_refresh(
+            Path(args.cache), universe_symbols_csv(Path(args.universe)),
+            priority=priority, budget=args.rolling)
+        print(f"rolling refresh: {summary['refreshed']} refreshed "
+              f"({summary['priority']} priority-first), {summary['failed']} failed, "
+              f"planned {summary['planned']} of {summary['universe']} universe names "
+              f"({summary['not_sec_filers']} not SEC filers)")
+        # A completely dry run (nothing refreshed, something failed) must alert; a
+        # partially failed sweep is tomorrow night's problem, not a dead unit.
+        return 1 if (summary["failed"] and not summary["refreshed"]) else 0
+
+    if args.force_refresh:
+        if not args.symbols:
+            parser.error("--force-refresh needs --symbols")
+        wanted = [w.strip().upper() for w in args.symbols.split(",") if w.strip()]
+        ciks = cik_map_cached(Path(args.cache))
+        ok = 0
+        for sym in wanted:
+            cik = ciks.get(sym)
+            if cik is None:
+                print(f"{sym}: not in the SEC ticker map — skipped, not guessed")
+                continue
+            try:
+                fetch_companyfacts(cik, cache_dir=Path(args.cache), refresh=True)
+                ok += 1
+                print(f"{sym}: refreshed")
+            except Exception as error:  # noqa: BLE001
+                print(f"{sym}: refresh failed ({type(error).__name__}: {error})")
+        print(f"force refresh: {ok} of {len(wanted)}")
+        return 0 if ok or not wanted else 1
+
+    if not args.sec_data:
+        parser.error("--sec-data is required (unless --rolling or --force-refresh)")
 
     import picks
     import secsv

@@ -1,28 +1,19 @@
 #!/usr/bin/env bash
-# Sat 06:00 — refresh the tier-2 EDGAR enrichment cache for every name the desk
-# holds or is drafting (fill-only-missing, paced, cache-first: enrich.py's own
-# discipline). NFR1: if this fails, the 12:00 monitor still runs on the last
-# good cache and the report says what is stale — a failed scrape alerts but
-# never blocks Saturday.
+# Sat 06:00 — Saturday's final freshness pass, same engine as the nightly rolling
+# refresh: thesis names (committed first, then drafts) are ALWAYS refetched at the
+# head of the plan, so the names the 12:00 monitor will test are the newest data on
+# the box; the remaining budget tops up the stalest of the rest before the sweep.
+# NFR1: if this fails, the 12:00 monitor still runs on the cache and the report
+# says what is stale — a failed scrape alerts but never blocks Saturday.
 #
 # Deliberately NOT here: the bulk SEC export regen and the universe refresh are
-# the quarterly desk ritual (the export is republished quarterly; there is no
-# downloader in this repo, on purpose — the box only refreshes what the weekly
-# monitor actually tests).
+# desk rituals (universe.py --sec-merge / the quarterly export), not box jobs.
 set -euo pipefail
 . /opt/stock-agentcy/deploy/scout/lib.sh
 
-SYMBOLS="$(thesis_symbols)"
-if [ -z "$SYMBOLS" ]; then
-    echo "no committed or draft theses — nothing to refresh"
-    exit 0
-fi
-
 cd "$SCOUT_DIR"
 exec "$PY" enrich.py \
-    --sec-data "$SCOUT/secdata" \
-    --symbols "$SYMBOLS" \
-    --cache "$SCOUT/enrich_cache" \
+    --rolling "${SCOUT_SCRAPE_BUDGET:-800}" \
     --universe "$SCOUT/universe.csv" \
-    ${SCOUT_PRICES:+--prices "$SCOUT_PRICES"} \
-    --as-of "$AS_OF"
+    --cache "$SCOUT/enrich_cache" \
+    --theses-dir "$SCOUT/theses"

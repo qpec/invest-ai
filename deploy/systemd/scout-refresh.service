@@ -1,0 +1,17 @@
+[Unit]
+Description=scout nightly rolling data refresh (thesis names first, then stalest)
+Wants=network-online.target
+After=network-online.target
+OnFailure=agentcy-fail@%n.service
+
+[Service]
+Type=oneshot
+User=agentcy
+TimeoutStartSec=2h
+EnvironmentFile=/etc/stock-agentcy/scout.env
+WorkingDirectory=/opt/stock-agentcy/stock-scout
+ExecStart=/opt/stock-agentcy/deploy/scout/refresh.sh
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/stock-agentcy/scout
+PrivateTmp=true

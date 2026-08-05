@@ -34,6 +34,7 @@ data/equities.bz2; ``--equities-file`` accepts a local copy.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import urllib.error
@@ -191,13 +192,86 @@ def download_equities(dest: Path) -> None:
     os.replace(tmp, dest)
 
 
+# --- SEC exchange merge (2026-08-05, owner-directed expansion) ------------------------
+
+SEC_EXCHANGE_URL = "https://www.sec.gov/files/company_tickers_exchange.json"
+_SEC_KEEP_EXCHANGES = {"NYSE", "Nasdaq", "NYSE American"}   # listing venues; Arca/BATS/
+                                                            # CBOE are ETF venues (ETFs
+                                                            # are outside-framework) and
+                                                            # OTC is out by design
+_SEC_TICKER_RE = None  # compiled lazily below
+
+
+def sec_merge(base_csv: Path, out_csv: Path, *, transport=None) -> dict:
+    """Extend an existing universe.csv with every NYSE/Nasdaq/NYSE American filer from
+    the SEC's own ticker+exchange map. stdlib fetch (enrich's paced EDGAR GET), no
+    FinanceDatabase, no pandas — this is the box-compatible expansion path.
+
+    Existing rows pass through untouched (their curated sector/market-cap metadata is
+    better than anything the SEC map carries). New rows fill only what the SEC actually
+    states — name and exchange; sector/industry/country/market_cap stay EMPTY rather
+    than guessed (refuse-never-guess applies to metadata too). One row per CIK: the
+    map lists share classes separately (GOOG/GOOGL) and the first listed line wins —
+    a second class is the same business twice and would double-count every statistic."""
+    import csv
+    import re
+    from enrich import _edgar_get
+    global _SEC_TICKER_RE
+    if _SEC_TICKER_RE is None:
+        # share classes like BRK-B pass; longer suffixes (warrants -WS, units -UN) fail
+        _SEC_TICKER_RE = re.compile(r"[A-Z0-9]{1,6}(?:-[A-Z])?\Z")
+    data = json.loads((transport or _edgar_get)(SEC_EXCHANGE_URL))
+    listed = [dict(zip(data["fields"], row)) for row in data["data"]]
+
+    with Path(base_csv).open(newline="", encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        columns = list(reader.fieldnames or [])
+        existing = list(reader)
+    have = {row["symbol"].upper() for row in existing if row.get("symbol")}
+
+    seen_cik: set[int] = set()
+    added = []
+    for row in listed:
+        ticker = str(row.get("ticker") or "").upper()
+        exchange = row.get("exchange")
+        cik = row.get("cik")
+        if exchange not in _SEC_KEEP_EXCHANGES or not _SEC_TICKER_RE.match(ticker):
+            continue
+        if ticker in have or cik in seen_cik:
+            seen_cik.add(cik)
+            continue
+        seen_cik.add(cik)
+        new = {column: "" for column in columns}
+        new["symbol"] = ticker
+        new["name"] = row.get("name") or ""
+        new["exchange"] = exchange
+        added.append(new)
+    with Path(out_csv).open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=columns)
+        writer.writeheader()
+        writer.writerows(existing)
+        writer.writerows(added)
+    return {"existing": len(existing), "added": len(added),
+            "total": len(existing) + len(added)}
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Build universe.csv from FinanceDatabase (§5.1).")
     ap.add_argument("--broad", action="store_true",
                     help="all sectors except Financials/Real Estate, Small Cap included (msg 64)")
     ap.add_argument("--out", default="universe.csv", help="output CSV path")
     ap.add_argument("--equities-file", default=None, help="local equities.bz2 copy (skips download)")
+    ap.add_argument("--sec-merge", metavar="BASE_CSV",
+                    help="extension mode: append every NYSE/Nasdaq/NYSE American SEC "
+                         "filer missing from BASE_CSV and write --out (stdlib only, "
+                         "no FinanceDatabase download)")
     args = ap.parse_args(argv)
+
+    if args.sec_merge:
+        summary = sec_merge(Path(args.sec_merge), Path(args.out))
+        print(f"sec merge: {summary['existing']} existing + {summary['added']} new "
+              f"-> {summary['total']} names in {args.out}")
+        return 0
 
     if args.equities_file:
         eq_path = Path(args.equities_file)

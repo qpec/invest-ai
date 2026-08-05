@@ -660,16 +660,39 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prices", help="directory of weekly price files")
     parser.add_argument("--universe", default="universe.csv")
     parser.add_argument("--as-of", default=_dt.date.today().isoformat())
+    parser.add_argument("--enrich-cache", help="tier-2 companyfacts cache: gap-fill for "
+                                               "export names, cache-only bootstrap for "
+                                               "universe names beyond the export")
     parser.add_argument("--out", help="output path (default reports/picks-<as-of>.html)")
     args = parser.parse_args(argv)
 
     if not args.sec_data:
         parser.error("--sec-data is required (the yfinance-cache path runs through grade.py)")
 
+    import pit
     import secsv
     meta = _load_meta(Path(args.universe))
     prices = _load_prices(Path(args.prices) if args.prices else None)
-    bundles = secsv.bundles(args.sec_data, args.as_of, meta=meta, prices=prices)
+    facts = secsv.load_facts(args.sec_data)
+    secsv.merge_tag_index(facts, args.sec_data)
+    if args.enrich_cache and Path(args.enrich_cache).exists():
+        import enrich
+        try:
+            ciks = enrich.cik_map_cached(Path(args.enrich_cache))
+            made = enrich.bootstrap_payloads(
+                facts, [s for s in meta if s not in facts],
+                cache_dir=Path(args.enrich_cache), ciks=ciks, cache_only=True)
+            enrich.enrich_payloads(
+                facts, sorted(t for t, c in ciks.items()
+                              if t in facts and t not in made
+                              and (Path(args.enrich_cache) / f"CIK{c:010d}.json").exists()),
+                cache_dir=Path(args.enrich_cache), ciks=ciks)
+        except Exception as error:  # noqa: BLE001 — enrichment is a bonus, never a gate
+            print(f"enrichment unavailable ({type(error).__name__}: {error}) — "
+                  f"screening on export facts only")
+    bundles = [b for b in (pit.as_of_bundle(facts[s], s, meta.get(s), args.as_of,
+                                            prices or {})
+                           for s in sorted(facts)) if b is not None]
     rows = build_rows(bundles, prices=prices, meta=meta)
 
     out = Path(args.out) if args.out else Path("reports") / f"picks-{args.as_of}.html"

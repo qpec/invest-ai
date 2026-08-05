@@ -52,13 +52,15 @@ ssh root@<ip> 'systemctl --no-pager status "agentcy-*" ; systemctl list-timers "
 
 | Time | Unit | Lane |
 |---|---|---|
-| 06:00 | `scout-scrape` — EDGAR enrichment refresh for thesis + shortlist names | mechanical |
+| 06:00 | `scout-scrape` — Saturday's final freshness pass (thesis names first, then stalest) | mechanical |
 | 07:00 | `scout-monitor-brief` — work order into the spool, opened to the judgement lane | mechanical |
-| 07:30 | OpenClaw job — researches the pre-committed questions → `verdicts.json` | judgement |
-| 12:00 | `scout-monitor-run` — trigger arithmetic + verdict ingestion (missing ⇒ UNCHECKED, loud) | mechanical |
+| 07:30 | `scout-verdicts` — claude researches the pre-committed questions → `verdicts.json` | judgement |
+| 12:00 | `scout-monitor-run` — force-refresh of monitored names, then trigger arithmetic + verdict ingestion (missing ⇒ UNCHECKED, loud) | mechanical |
 | 12:30 | `scout-site` — site rebuild → push `bot/site` (Pages deploys) + private state push | mechanical |
 
-Nightly: `agentcy-populate` 01:30, `agentcy-backup` 03:30, `scout-backup` 03:45.
+Nightly: `agentcy-populate` 01:30, `scout-refresh` 02:15 (rolling EDGAR sweep —
+thesis names always first, then the stalest of the whole universe, budgeted via
+`SCOUT_REFRESH_BUDGET`), `agentcy-backup` 03:30, `scout-backup` 03:45.
 Full design: `docs/plans/2026-08-04-distributed-desk-architecture.md`.
 
 ## First-run reality

@@ -22,8 +22,13 @@ fi
 
 DEST=/mnt/agentcy-backup/scout
 install -d -m 0700 "$DEST"
-for d in enrich_cache theses reports; do
+# enrich_cache is deliberately NOT mirrored (2026-08-05): every entry is a pruned
+# EDGAR companyfacts fetch, refetchable in minutes, and at expanded-universe scale
+# it would outgrow the 10 GiB volume — crowding out the irreplaceable dirs below.
+for d in theses reports; do
     [ -d "$SCOUT/$d" ] || continue
     rsync -a --delete --chmod=D700,F600 "$SCOUT/$d/" "$DEST/$d/"
 done
+# a stale cache mirror from before this policy must not masquerade as current
+rm -rf "$DEST/enrich_cache"
 echo "scout backup -> $DEST ($(date -Is))"

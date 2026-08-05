@@ -166,3 +166,119 @@ class TestEnrichPayloads:
         assert len(transport.calls) == 1
         # and the rewrite healed the cache
         assert enrich.cik_map_cached(tmp_path, fake_transport({})) == {"AAA": 7}
+
+
+class TestConsumedTagsAndPrune:
+    def test_consumed_tags_cover_every_pit_table(self):
+        """Introspection, not a copy: every chain in every pit concept table must be in
+        the selection — a new chain that is not would be silently unfetchable."""
+        import secsv
+        keep = enrich.consumed_tags()
+        for table in (pit._INCOME_CONCEPTS, pit._CASHFLOW_CONCEPTS,
+                      pit._BALANCE_CONCEPTS, pit._SUPPLEMENT_FLOW_CONCEPTS,
+                      pit._SUPPLEMENT_POINT_CONCEPTS, pit._DISCLOSURE_CONCEPTS):
+            for chain in table.values():
+                for tag in chain:
+                    assert tag in keep["us-gaap"], tag
+        for tag in secsv._PIT_EXTRA_INSTANT_TAGS:
+            assert tag in keep["us-gaap"], tag
+        assert pit._SHARES_TAG in keep["dei"]
+
+    def test_prune_keeps_consumed_drops_the_rest(self):
+        raw = {"cik": 99, "entityName": "Alpha", "_fetched": "2026-08-05",
+               "facts": {"us-gaap": {"Revenues": concept(entry("2025-12-31",
+                                                               "2026-02-01", 1.0)),
+                                     "SomeExoticFootnoteTag": concept(
+                                         entry("2025-12-31", "2026-02-01", 2.0))},
+                         "dei": {pit._SHARES_TAG: concept(
+                             entry("2025-12-31", "2026-02-01", 10.0), unit="shares")},
+                         "ifrs-full": {"Revenue": concept(
+                             entry("2025-12-31", "2026-02-01", 3.0))}}}
+        pruned = enrich.prune_payload(raw)
+        assert pruned["cik"] == 99 and pruned["_fetched"] == "2026-08-05"
+        assert "Revenues" in pruned["facts"]["us-gaap"]
+        assert "SomeExoticFootnoteTag" not in pruned["facts"]["us-gaap"]
+        assert "ifrs-full" not in pruned["facts"]          # pit never reads it
+        assert pit._SHARES_TAG in pruned["facts"]["dei"]
+
+
+class TestBootstrap:
+    def _cached_facts(self, tmp_path, cik=7):
+        raw = {"cik": cik, "entityName": "Alpha",
+               "facts": {"us-gaap": {"Revenues": concept(
+                   entry("2025-12-31", "2026-02-01", 100.0, start="2025-01-01"))}}}
+        (tmp_path / f"CIK{cik:010d}.json").write_text(json.dumps(raw))
+        return raw
+
+    def test_bootstrap_creates_payload_with_full_edgar_ledger(self, tmp_path):
+        self._cached_facts(tmp_path)
+        facts = {}
+        made = enrich.bootstrap_payloads(facts, ["aaa"], cache_dir=tmp_path,
+                                         ciks={"AAA": 7}, cache_only=True)
+        assert made == {"AAA": 1}
+        assert facts["AAA"][pit.SYMBOL_KEY] == "AAA"
+        assert facts["AAA"][enrich.ENRICHMENT_KEY] == {
+            "us-gaap:Revenues": enrich.TIER_EDGAR}
+
+    def test_bootstrap_is_additive_only(self, tmp_path):
+        """The frozen decision layer: a symbol the export knows is NEVER touched."""
+        self._cached_facts(tmp_path)
+        original = payload("AAA", tags={"Revenues": concept(
+            entry("2025-12-31", "2026-02-01", 555.0, start="2025-01-01"))})
+        facts = {"AAA": original}
+        before = json.dumps(original, sort_keys=True)
+        made = enrich.bootstrap_payloads(facts, ["AAA"], cache_dir=tmp_path,
+                                         ciks={"AAA": 7}, cache_only=True)
+        assert made == {}
+        assert json.dumps(facts["AAA"], sort_keys=True) == before
+
+    def test_cache_only_never_touches_the_network(self, tmp_path):
+        def exploding_transport(url):
+            raise AssertionError(f"network touched: {url}")
+        facts = {}
+        made = enrich.bootstrap_payloads(facts, ["BBB"], cache_dir=tmp_path,
+                                         ciks={"BBB": 8}, cache_only=True,
+                                         transport=exploding_transport)
+        assert made == {} and facts == {}   # pending, not guessed
+
+    def test_unknown_symbol_is_skipped_not_guessed(self, tmp_path):
+        facts = {}
+        made = enrich.bootstrap_payloads(facts, ["ZZZ"], cache_dir=tmp_path,
+                                         ciks={}, cache_only=True)
+        assert made == {} and facts == {}
+
+
+class TestRollingRefresh:
+    def test_priority_first_then_stalest_and_budget_never_cuts_priority(self, tmp_path):
+        import os
+        import time as _time
+        ciks = {"CRX": 1, "OLD": 2, "NEW": 3, "MID": 4}
+        # OLD has the oldest cache file, MID newer, NEW has none (infinitely stale)
+        for sym, age_days in (("OLD", 30), ("MID", 1)):
+            path = tmp_path / f"CIK{ciks[sym]:010d}.json"
+            path.write_text("{}")
+            stamp = _time.time() - age_days * 86400
+            os.utime(path, (stamp, stamp))
+        (tmp_path / "_tickers.json").write_text(json.dumps(ciks))
+        fetched = []
+
+        def transport(url):
+            fetched.append(url)
+            return json.dumps({"cik": 0, "facts": {}}).encode()
+
+        summary = enrich.rolling_refresh(
+            tmp_path, ["OLD", "NEW", "MID", "CRX", "NOPE"],
+            priority=["CRX"], budget=3, transport=transport)
+        # plan: CRX (priority) + NEW (no file) + OLD (oldest) — MID over budget,
+        # NOPE not a filer
+        assert summary["planned"] == 3 and summary["priority"] == 1
+        assert summary["not_sec_filers"] == 1
+        order = [int(u.split("CIK")[1][:10]) for u in fetched]
+        assert order == [ciks["CRX"], ciks["NEW"], ciks["OLD"]]
+
+    def test_thesis_symbols_reads_both_artifact_shapes(self, tmp_path):
+        (tmp_path / "committed").mkdir()
+        (tmp_path / "committed" / "aaa.json").write_text("{}")
+        (tmp_path / "drafts" / "BBB").mkdir(parents=True)
+        (tmp_path / "drafts" / "monitor-2026-08-09").mkdir()   # the spool, not a thesis
+        assert enrich.thesis_symbols(tmp_path) == ["AAA", "BBB"]
