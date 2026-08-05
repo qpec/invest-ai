@@ -18,11 +18,19 @@ id openclaw >/dev/null 2>&1 || \
     useradd --system --create-home --home-dir /home/openclaw \
             --shell /usr/sbin/nologin openclaw
 usermod -aG scoutwork openclaw
+# The daemon installs as a systemd USER service; without lingering a system
+# account has no user manager, no /run/user/<uid>, no session bus — onboarding
+# would fail and nothing would start at boot. enable-linger also starts
+# user@<uid> right now, so the bus exists for the onboarding step below.
+loginctl enable-linger openclaw
 
 # --- 2. node 22 + the two CLIs ----------------------------------------------
+# First-boot apt races the image's own apt-daily/unattended-upgrades; a held
+# dpkg lock must wait, not instantly fail the whole judgement lane.
+printf 'DPkg::Lock::Timeout "600";\n' > /etc/apt/apt.conf.d/90lock-timeout
 if ! command -v node >/dev/null || [ "$(node -e 'console.log(+process.versions.node.split(".")[0])')" -lt 22 ]; then
     curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-    apt-get install -y nodejs
+    apt-get install -y -o DPkg::Lock::Timeout=600 nodejs
 fi
 npm install -g openclaw @anthropic-ai/claude-code
 
@@ -34,6 +42,9 @@ if [ ! -f /home/openclaw/.openclaw/SETUP.md ]; then
 fi
 
 # --- 4. assert the seam (§4) — the Gate as a filesystem fact ------------------
+# Every denial check first asserts (as root) that its target EXISTS: a check
+# against a file that is not there passes for the wrong reason, and a seam that
+# was never exercised is a seam assumed, not asserted.
 fail=0
 check() { # check <expect: ok|no> <description> <cmd...>
     local expect="$1" desc="$2"; shift 2
@@ -44,25 +55,40 @@ check() { # check <expect: ok|no> <description> <cmd...>
         echo "  seam FAIL $desc (expected $expect, got $got)"; fail=1
     fi
 }
+exists() { # exists <path> — a missing target makes the matching denial vacuous
+    [ -e "$1" ] || { echo "  seam FAIL $1 absent — cannot assert against it"; fail=1; return 1; }
+}
 tmp="$SCOUT/theses/drafts/.seamcheck-$$"
 check ok "can write theses/drafts/"            touch "$tmp"
 rm -f "$tmp"
 check no "cannot write theses/committed/"      touch "$SCOUT/theses/committed/.seamcheck-$$"
 rm -f "$SCOUT/theses/committed/.seamcheck-$$" 2>/dev/null || true
+check no "cannot list theses/committed/ (FR9)" ls "$SCOUT/theses/committed"
 check ok "can read the enrichment cache"       ls "$SCOUT/enrich_cache"
-check no "cannot read scout.env (the PAT)"     cat /etc/stock-agentcy/scout.env
-check no "cannot read agentcy.env (bot token)" cat /etc/stock-agentcy/agentcy.env
-for db in /var/lib/stock-agentcy/*.db; do
-    [ -e "$db" ] || continue
-    check no "cannot read $(basename "$db")"   cat "$db"
+check ok "can read reports/"                   ls "$SCOUT/reports"
+exists /etc/stock-agentcy/scout.env && \
+    check no "cannot read scout.env (the PAT)"     cat /etc/stock-agentcy/scout.env
+exists /etc/stock-agentcy/agentcy.env && \
+    check no "cannot read agentcy.env (bot token)" cat /etc/stock-agentcy/agentcy.env
+for db in agentcy.db benchmark.db; do   # by name: a zero-match glob asserts nothing
+    exists "/var/lib/stock-agentcy/$db" && \
+        check no "cannot read $db"             cat "/var/lib/stock-agentcy/$db"
+done
+for clone in site-repo state-repo; do   # state-repo holds FR9 after ratification
+    exists "$SCOUT/$clone" && \
+        check no "cannot list $clone/"         ls "$SCOUT/$clone"
 done
 [ "$fail" -eq 0 ] || { echo ">>> SEAM BROKEN — fix permissions before going live."; exit 1; }
 
-cat <<'EOF'
+cat <<EOF
 >>> judgement lane installed and the seam holds. Two interactive steps remain
-    (as the openclaw user; see /home/openclaw/.openclaw/SETUP.md):
+    (as the openclaw user; see /home/openclaw/.openclaw/SETUP.md). The daemon
+    is a systemd USER service, so point the commands at openclaw's own user
+    bus (lingering is already enabled):
       1. sudo -u openclaw claude login          # owner subscription, no API key
-      2. sudo -u openclaw openclaw onboard --install-daemon
+      2. sudo -u openclaw XDG_RUNTIME_DIR=/run/user/$(id -u openclaw) \\
+           DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u openclaw)/bus \\
+           openclaw onboard --install-daemon
     Then configure per SETUP.md: model pin, Telegram binding, loopback-only
     gateway, and the Saturday 07:30 verdicts job.
 EOF

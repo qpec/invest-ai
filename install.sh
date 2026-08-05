@@ -99,12 +99,19 @@ sudo -u agentcy git -C /var/lib/stock-agentcy/archive rev-parse >/dev/null 2>&1 
   sudo -u agentcy git -C /var/lib/stock-agentcy/archive config user.name agentcy
   sudo -u agentcy git -C /var/lib/stock-agentcy/archive config user.email agentcy@localhost
 }
-mkdir -p /mnt/agentcy-backup/archive.git
-git init --bare /mnt/agentcy-backup/archive.git 2>/dev/null || true
-chown -R agentcy:agentcy /mnt/agentcy-backup
-cd /var/lib/stock-agentcy/archive
-sudo -u agentcy git remote add backup /mnt/agentcy-backup/archive.git 2>/dev/null || true
-cd "$CODE"
+if mountpoint -q /mnt/agentcy-backup; then
+  mkdir -p /mnt/agentcy-backup/archive.git
+  git init --bare /mnt/agentcy-backup/archive.git 2>/dev/null || true
+  chown -R agentcy:agentcy /mnt/agentcy-backup
+  cd /var/lib/stock-agentcy/archive
+  sudo -u agentcy git remote add backup /mnt/agentcy-backup/archive.git 2>/dev/null || true
+  cd "$CODE"
+else
+  # Writing the mirror onto the ROOT disk would report protection that does not
+  # exist. The nightly backup job now degrades loudly on an unmounted disk too.
+  echo ">>> WARN: /mnt/agentcy-backup is not a mountpoint — second-disk mirror SKIPPED."
+  echo ">>>       Mount the backup volume, then re-run this installer."
+fi
 
 # --- 9. install + verify units, enable timers and the daemon (§1, §12.4 step 5)-
 install -m 0644 "$CODE"/deploy/systemd/*.service "$CODE"/deploy/systemd/*.timer "$CODE"/deploy/systemd/*.path /etc/systemd/system/

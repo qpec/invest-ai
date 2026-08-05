@@ -6,7 +6,9 @@ contract: series_eur importable only from jobs.quarterly; backup_to/integrity_ch
 importable additionally from jobs.backup (data-free, return no rows)."""
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import os
 import sqlite3
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -31,6 +33,10 @@ def _connect() -> sqlite3.Connection:
     """A direct connection to the SEPARATE benchmark.db file — never db.open_db (which opens
     agentcy.db and must never open this one). Same PRAGMAs as the main door."""
     conn = sqlite3.connect(_benchmark_path())
+    # Same born-group-only rule as db.open_db: the quarantined store must never be
+    # readable by the box's judgement-lane user (distributed-desk §4).
+    with contextlib.suppress(OSError):
+        os.chmod(_benchmark_path(), 0o640)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=30000")

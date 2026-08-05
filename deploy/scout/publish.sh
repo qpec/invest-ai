@@ -11,6 +11,11 @@
 set -euo pipefail
 . /opt/stock-agentcy/deploy/scout/lib.sh
 
+# Everything this script writes locally (site build, both clones — the state
+# clone holds FR9 material) stays private to the agentcy user; the dirs are
+# 0700 from install, this covers the files.
+umask 077
+
 SITE_REPO_URL="${SCOUT_SITE_REPO:-https://x-access-token@github.com/qpec/invest-ai.git}"
 STATE_REPO_URL="${SCOUT_STATE_REPO:-https://x-access-token@github.com/qpec/invest-ai-state.git}"
 SITE_BRANCH="${SCOUT_SITE_BRANCH:-bot/site}"
@@ -21,18 +26,24 @@ cd "$SCOUT_DIR"
     --sec-data "$SCOUT/secdata" \
     --enrich-cache "$SCOUT/enrich_cache" \
     --theses-dir "$SCOUT/theses" \
-    --universe universe.csv \
+    --universe "$SCOUT/universe.csv" \
     ${SCOUT_PRICES:+--prices "$SCOUT_PRICES"} \
     --as-of "$AS_OF" \
     --out-dir "$SCOUT/site-build"
 
 # --- 2. site -> bot/site ----------------------------------------------------
+# Clone WITHOUT --branch: if bot/site was never seeded, --branch is fatal, while
+# a default clone + checkout -B from origin/HEAD seeds the branch from main's
+# real history — the only new commit then touches docs/ only, which the box's
+# contents-only PAT can push (a rootless orphan commit would re-add the workflow
+# files and be rejected).
 if [ ! -d "$SCOUT/site-repo/.git" ]; then
-    git clone --branch "$SITE_BRANCH" --single-branch "$SITE_REPO_URL" "$SCOUT/site-repo"
+    git clone "$SITE_REPO_URL" "$SCOUT/site-repo"
 fi
 cd "$SCOUT/site-repo"
-git fetch origin "$SITE_BRANCH"
-git checkout -B "$SITE_BRANCH" "origin/$SITE_BRANCH"
+git fetch origin
+git checkout -B "$SITE_BRANCH" "origin/$SITE_BRANCH" 2>/dev/null \
+    || git checkout -B "$SITE_BRANCH" origin/HEAD
 install -m 644 "$SCOUT/site-build/index.html" docs/index.html
 if [ -d "$SCOUT/site-build/data" ]; then
     rsync -a --delete "$SCOUT/site-build/data/" docs/data/
@@ -53,7 +64,14 @@ if [ ! -d "$SCOUT/state-repo/.git" ]; then
     git clone "$STATE_REPO_URL" "$SCOUT/state-repo"
 fi
 cd "$SCOUT/state-repo"
-git fetch origin && git checkout -B main origin/main
+# The architecture plan seeds the state repo FROM the box, so an empty remote
+# (unborn main) is a legitimate first-run state, not an error.
+git fetch origin
+if git show-ref -q refs/remotes/origin/main; then
+    git checkout -B main origin/main
+else
+    git checkout -B main
+fi
 mkdir -p state
 rsync -a --delete --exclude '*.tmp' "$SCOUT/theses/"  state/theses/
 rsync -a --delete --exclude '*.tmp' "$SCOUT/reports/" state/reports/
@@ -61,7 +79,7 @@ if git status --porcelain | grep -q .; then
     git add state
     git -c user.name=scout-box -c user.email=scout@localhost \
         commit -m "monitor state $AS_OF"
-    push_with_retry origin main
+    push_with_retry -u origin main
 else
     echo "state archive unchanged"
 fi

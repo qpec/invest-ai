@@ -23,6 +23,6 @@ exec "$PY" enrich.py \
     --sec-data "$SCOUT/secdata" \
     --symbols "$SYMBOLS" \
     --cache "$SCOUT/enrich_cache" \
-    --universe universe.csv \
+    --universe "$SCOUT/universe.csv" \
     ${SCOUT_PRICES:+--prices "$SCOUT_PRICES"} \
     --as-of "$AS_OF"

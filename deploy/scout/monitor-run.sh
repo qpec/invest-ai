@@ -27,7 +27,7 @@ exec "$PY" monitor.py run \
     --theses-dir "$SCOUT/theses" \
     --reports-dir "$SCOUT/reports" \
     --enrich-cache "$SCOUT/enrich_cache" \
-    --universe universe.csv \
+    --universe "$SCOUT/universe.csv" \
     ${SCOUT_PRICES:+--prices "$SCOUT_PRICES"} \
     --as-of "$AS_OF" \
     "${EXTRA[@]}"

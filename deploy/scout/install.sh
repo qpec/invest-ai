@@ -17,18 +17,41 @@ id -nG agentcy | grep -qw scoutwork || usermod -aG scoutwork agentcy
 # --- 2. state tree + the §4 permission seam ----------------------------------
 # Writable by the judgement lane: theses/drafts and the per-week monitor spool
 # (opened by brief.sh). Readable only: caches and reports. Invisible: the two
-# repo clones (state-repo holds FR9 material) and everything credentialed.
+# repo clones AND theses/committed (both hold FR9 material after ratification),
+# the DB backups, and everything credentialed.
 mkdir -p "$SCOUT"/{secdata,prices,enrich_cache,reports,site-build} \
          "$SCOUT"/theses/{drafts,committed}
 chown -R agentcy:agentcy "$SCOUT"
 chmod 755 "$SCOUT" "$SCOUT"/secdata "$SCOUT"/prices "$SCOUT"/enrich_cache \
-          "$SCOUT"/reports "$SCOUT"/theses "$SCOUT"/theses/committed
+          "$SCOUT"/reports "$SCOUT"/theses
+chmod 750 "$SCOUT"/theses/committed
 chown agentcy:scoutwork "$SCOUT"/theses/drafts
 chmod 2775 "$SCOUT"/theses/drafts
 chmod 750 "$SCOUT"/site-build
-# The SQLite files are the agentcy runtime's alone — the judgement lane gets
-# no read on them (§4: "no access to the SQLite files").
+# install -d resets mode+owner on existing dirs (mkdir -p would not), and git
+# clones into an existing empty dir keep it — so the FR9-bearing clones are
+# unreadable to the judgement lane from birth, on fresh and re-run installs.
+install -d -m 0700 -o agentcy -g agentcy "$SCOUT"/site-repo "$SCOUT"/state-repo
+# Re-run safety: the recursive chown above (and root install.sh's over $STATE)
+# strips the scoutwork group from any LIVE weekly spool — re-open them exactly
+# as brief.sh does, or a mid-Saturday re-deploy silently breaks the 07:30 job.
+for spool in "$SCOUT"/theses/monitor-*; do
+    [ -d "$spool" ] || continue
+    chgrp -R scoutwork "$spool"
+    chmod 2775 "$spool"
+    chmod g+rw "$spool"/* 2>/dev/null || true
+done
+# The SQLite files are the agentcy runtime's alone (§4: "no access"). The
+# runtime now creates them 0640 itself; pre-creating them here (an empty file
+# IS a valid SQLite DB, and WAL/SHM sidecars inherit its mode) makes the
+# openclaw seam assertions non-vacuous on a first boot where no timer has run.
+for f in agentcy.db benchmark.db; do
+    [ -f "/var/lib/stock-agentcy/$f" ] || \
+        install -m 0640 -o agentcy -g agentcy /dev/null "/var/lib/stock-agentcy/$f"
+done
 chmod o-rwx /var/lib/stock-agentcy/*.db* 2>/dev/null || true
+# DB backup copies carry the same data as the DBs — same denial.
+[ -d /var/lib/stock-agentcy/backups ] && chmod 700 /var/lib/stock-agentcy/backups
 
 # --- 3. secrets: 0640 root:agentcy — agentcy units read it, openclaw cannot --
 if [ ! -f "$ETC/scout.env" ]; then
@@ -55,6 +78,12 @@ if [ -z "$(ls -A "$SCOUT/secdata" 2>/dev/null)" ]; then
     export from the desk. The monitor refuses to guess: until seeded, runs
     report every metric trigger UNCHECKED.
 EOF
+fi
+if [ ! -f "$SCOUT/universe.csv" ]; then
+    # universe.csv is deliberately NOT in the code repo (state never lives
+    # there), so a fresh clone cannot supply it — the weekly units read it
+    # from the state tree and fail loudly without it.
+    echo ">>> universe.csv missing at $SCOUT/universe.csv — seed it with the data."
 fi
 
 echo ">>> scout lane installed. Verify: systemctl list-timers 'scout-*'"

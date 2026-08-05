@@ -21,6 +21,7 @@ SSH=(ssh -o StrictHostKeyChecking=accept-new "root@$IP")
 echo ">>> [1/6] prerequisites + 2GB swapfile (the memory insurance, plan §3)"
 "${SSH[@]}" 'set -e
   export DEBIAN_FRONTEND=noninteractive
+  printf "DPkg::Lock::Timeout \"600\";\n" > /etc/apt/apt.conf.d/90lock-timeout
   apt-get update -q && apt-get install -y -q git rsync curl
   command -v uv >/dev/null || (curl -LsSf https://astral.sh/uv/install.sh | sh)
   ln -sf ~/.local/bin/uv /usr/local/bin/uv 2>/dev/null || true
@@ -39,18 +40,24 @@ echo ">>> [2/6] code: clone/pull $REPO_URL -> /opt/stock-agentcy (GitHub is the 
   fi"
 
 echo ">>> [3/6] secrets (0600/0640; written before install so nothing runs on REPLACE_ME)"
-"${SSH[@]}" "set -e
+# The secrets travel on stdin and are handled remote-side by shell BUILTINS
+# (read/printf) only — nothing secret ever appears in argv, where any local
+# user could read it out of /proc/*/cmdline during the deploy.
+printf '%s\n%s\n%s\n' "$BOT_TOKEN" "$CHAT_ID" "$GH_PAT" | "${SSH[@]}" '
+  set -e
+  IFS= read -r bot; IFS= read -r chat; IFS= read -r pat
   mkdir -p /etc/stock-agentcy
+  umask 077
   if [ ! -f /etc/stock-agentcy/agentcy.env ] || grep -q REPLACE_ME /etc/stock-agentcy/agentcy.env; then
-    printf 'AGENTCY_BOT_TOKEN=%s\nAGENTCY_OWNER_CHAT_ID=%s\nAGENTCY_ETORO_API_KEY=\nAGENTCY_ETORO_USER_KEY=\n' \
-      '$BOT_TOKEN' '$CHAT_ID' > /etc/stock-agentcy/agentcy.env
+    printf "AGENTCY_BOT_TOKEN=%s\nAGENTCY_OWNER_CHAT_ID=%s\nAGENTCY_ETORO_API_KEY=\nAGENTCY_ETORO_USER_KEY=\n" \
+      "$bot" "$chat" > /etc/stock-agentcy/agentcy.env
   fi
   chmod 600 /etc/stock-agentcy/agentcy.env
   if [ ! -f /etc/stock-agentcy/scout.env ] || grep -q REPLACE_ME /etc/stock-agentcy/scout.env; then
-    cp /opt/stock-agentcy/deploy/scout/scout.env.example /etc/stock-agentcy/scout.env
-    sed -i 's|^GH_PAT=.*|GH_PAT=$GH_PAT|' /etc/stock-agentcy/scout.env
+    { grep -v "^GH_PAT=" /opt/stock-agentcy/deploy/scout/scout.env.example
+      printf "GH_PAT=%s\n" "$pat"; } > /etc/stock-agentcy/scout.env
   fi
-  chmod 640 /etc/stock-agentcy/scout.env"
+  chmod 640 /etc/stock-agentcy/scout.env'
 # group-owner fix happens after install.sh creates the agentcy user (step 4).
 
 echo ">>> [4/6] agentcy runtime (repo-root install.sh: user, venv, DBs, 12 units)"

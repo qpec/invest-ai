@@ -1,6 +1,7 @@
 """THE sqlite door for agentcy.db (contracts §3.1). Never opens the benchmark database."""
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 import re
@@ -39,6 +40,12 @@ def open_db(dir: Path | None = None) -> sqlite3.Connection:
     base = Path(dir) if dir is not None else state_dir()
     base.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(base / "agentcy.db")
+    # Born group-only, not fixed up later: the box hosts a judgement-lane user
+    # (distributed-desk §4 "no access to the SQLite files"), and an installer-time
+    # chmod cannot cover a DB file first created by a later timer run. The WAL/SHM
+    # sidecars inherit this mode.
+    with contextlib.suppress(OSError):
+        os.chmod(base / "agentcy.db", 0o640)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=30000")

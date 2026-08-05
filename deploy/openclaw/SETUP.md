@@ -13,6 +13,10 @@ filesystem seam — and asserted the seam holds.
 sudo -u openclaw claude login
 ```
 
+(For any `openclaw …` daemon command, target the user bus — the account is a
+system user, so its manager only exists because install.sh enabled lingering:
+`sudo -u openclaw XDG_RUNTIME_DIR=/run/user/$(id -u openclaw) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u openclaw)/bus openclaw …`)
+
 The owner's subscription, through the `claude` binary OpenClaw drives as a
 subprocess. **No `ANTHROPIC_API_KEY` anywhere on this box** — if a config asks
 for one, leave it empty; API-key mode is the path the owner locked out

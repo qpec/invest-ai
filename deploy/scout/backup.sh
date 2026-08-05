@@ -10,10 +10,20 @@
 set -euo pipefail
 . /opt/stock-agentcy/deploy/scout/lib.sh
 
+# The volume must actually be there, or rsync "succeeds" onto the root disk and
+# reports protection that does not exist. mountpoint(1) cannot be trusted here:
+# ProtectSystem=strict + ReadWritePaths bind-mounts the path inside this unit's
+# namespace, so it reads as a mountpoint even when the disk is absent. Comparing
+# st_dev with the parent is namespace-safe: equal devices = root-fs decoy.
+if [ "$(stat -c %d /mnt/agentcy-backup)" -eq "$(stat -c %d /mnt)" ]; then
+    echo "backup volume not mounted at /mnt/agentcy-backup — refusing the decoy" >&2
+    exit 1
+fi
+
 DEST=/mnt/agentcy-backup/scout
-mkdir -p "$DEST"
+install -d -m 0700 "$DEST"
 for d in enrich_cache theses reports; do
     [ -d "$SCOUT/$d" ] || continue
-    rsync -a --delete "$SCOUT/$d/" "$DEST/$d/"
+    rsync -a --delete --chmod=D700,F600 "$SCOUT/$d/" "$DEST/$d/"
 done
 echo "scout backup -> $DEST ($(date -Is))"

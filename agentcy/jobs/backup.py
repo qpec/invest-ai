@@ -12,6 +12,7 @@ path and NEVER SELECTs benchmark_series (import-graph + source-scan tests, §13)
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -69,6 +70,10 @@ def prune_retention(dir_: Path, *, keep: int) -> None:
 def rsync_second_disk(src: Path, dest: Path) -> dict:
     """rsync -a the backup tree + toolchain to the second disk (§11.6). Best-effort: a missing
     mount degrades the run, never crashes it (the caller catches and degrades to a notice)."""
+    if dest.is_relative_to(SECOND_DISK) and not os.path.ismount(SECOND_DISK):
+        # Without this, mkdir happily creates the tree on the ROOT disk and the "backup"
+        # reports ok while protecting nothing — the exact silent failure §11.6 exists for.
+        raise RuntimeError(f"second disk {SECOND_DISK} is not mounted")
     dest.mkdir(parents=True, exist_ok=True)
     subprocess.run(["rsync", "-a", "--delete", f"{src}/", f"{dest}/"], check=True)
     return {"synced": str(src), "dest": str(dest)}
