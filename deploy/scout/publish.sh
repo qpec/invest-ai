@@ -75,6 +75,21 @@ fi
 mkdir -p state
 rsync -a --delete --exclude '*.tmp' "$SCOUT/theses/"  state/theses/
 rsync -a --delete --exclude '*.tmp' "$SCOUT/reports/" state/reports/
+# The owner elected to keep the state repo PUBLIC (2026-08-05). FR9 still
+# binds: conviction and circle-of-competence are the owner's alone and never
+# reach a public surface — same rule, same fields as webapp.strip_owner_fields
+# on the site. The archived copies here are redacted; the full-fidelity
+# committed theses live on the box and its nightly backup volume.
+"$PY" - state/theses/committed <<'STRIP'
+import json, pathlib, sys
+OWNER_ONLY = ("conviction", "circle_of_competence")
+for p in pathlib.Path(sys.argv[1]).glob("*.json"):
+    doc = json.loads(p.read_text(encoding="utf-8"))
+    if any(k in doc for k in OWNER_ONLY):
+        for k in OWNER_ONLY:
+            doc.pop(k, None)
+        p.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+STRIP
 if git status --porcelain | grep -q .; then
     git add state
     git -c user.name=scout-box -c user.email=scout@localhost \
