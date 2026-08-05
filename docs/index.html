@@ -66,6 +66,9 @@ header.top{position:sticky;top:0;z-index:30;background:var(--page);
 .masthead{display:flex;align-items:center;gap:14px;padding:12px 20px 8px;
   max-width:1280px;margin:0 auto}
 .masthead h1{font-size:15px;font-weight:600;margin:0;letter-spacing:.01em}
+.notice{padding:5px 20px;font-size:11.5px;color:var(--text2);
+  border-top:1px solid var(--border);background:var(--bg2)}
+.notice b{color:var(--text)}
 .masthead .sub{color:var(--text2);font-size:12px}
 .masthead .right{margin-left:auto;display:flex;gap:8px;align-items:center}
 .btn{border:1px solid var(--border);background:var(--surface);color:var(--text2);
@@ -324,6 +327,9 @@ footer{margin-top:40px;color:var(--faint);font-size:12px;line-height:1.7}
     <button class="step" data-tab="monitor"><span class="circ">3</span>
       <span><span class="lbl">The Monitor</span><span class="cnt" id="cMonitor"></span></span></button>
   </nav>
+  <div class="notice"><b>Research tool — not investment advice.</b> Nothing on this page
+  is a recommendation to buy or sell any security, and none of it should be the sole
+  basis for an investment decision. Output can be wrong or stale — do your own research.</div>
 </header>
 
 <div class="wrap">
@@ -452,6 +458,8 @@ python monitor.py run --sec-data &lt;dir&gt; --prices &lt;dir&gt; \
 </section>
 
 <footer>
+  <b>Not investment advice — research and education only; consult a licensed advisor
+  before investing.</b> ·
   <b>The system advises and monitors. It never executes trades.</b> (FR11) · Conviction and
   circle-of-competence never appear on this page — they are the owner's, asked at the Gate
   (FR9) · Data: bulk SEC export + live EDGAR companyfacts (tier 2, as-filed) · generated
