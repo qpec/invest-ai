@@ -301,33 +301,32 @@ def assemble(*, sec_data: str, prices_dir: str | None, universe: str, as_of: str
             log(f"enrichment unavailable ({type(error).__name__}: {error}) — "
                 f"building on export facts only")
             enrich_cache = None
-    bootstrapped: dict[str, int] = {}
+    bootstrap_bundles: list[dict] = []
     if enrich_cache and Path(enrich_cache).exists():
-        # Cache bootstrap first (additive only): universe names the export never carried
-        # join from their cached companyfacts — cache_only, so a site build still needs
-        # zero network; a name no refresh job has fetched yet stays absent and is
-        # counted, not guessed. Every metric of a bootstrapped name is edgar-live, which
-        # the all-None pre_registry below makes the provenance labels say.
+        # Cache bootstrap (additive only, STREAMING): universe names the export never
+        # carried become bundles straight from their cached companyfacts — one payload
+        # in memory at a time, because thousands of parsed payloads (~370 KB resident
+        # each) must never coexist with the export on the box. cache-only: a site
+        # build needs zero network, and a name no refresh job has fetched yet stays
+        # absent and is counted, not guessed. Every metric of a bootstrapped name is
+        # edgar-live, which the all-None pre_registry makes the provenance labels say.
         missing = [s for s in meta if s not in facts]
-        bootstrapped = enrich.bootstrap_payloads(
-            facts, missing, cache_dir=Path(enrich_cache), ciks=ciks, cache_only=True)
-        pending = sum(1 for s in missing
-                      if s.upper() not in bootstrapped and s.upper() in ciks)
-        if bootstrapped or pending:
-            log(f"bootstrap: {len(bootstrapped)} cache-only name(s) joined the "
+        bootstrap_bundles, pending = enrich.bootstrap_bundles(
+            missing, cache_dir=Path(enrich_cache), ciks=ciks, as_of=as_of,
+            meta=meta, prices=prices, log=log)
+        if bootstrap_bundles or pending:
+            log(f"bootstrap: {len(bootstrap_bundles)} cache-only name(s) joined the "
                 f"universe; {pending} awaiting their first refresh fetch")
-        for sym in bootstrapped:
-            pre_registry[sym] = {name: None for name in thesis_mod.METRICS}
+        for bundle in bootstrap_bundles:
+            pre_registry[bundle["symbol"]] = {name: None for name in thesis_mod.METRICS}
     if enrich_cache and Path(enrich_cache).exists():
         # Ticker-first, not CIK-first: share classes (FOX/FOXA) map two tickers onto one
         # CIK, and a cik->ticker dict would keep only the dict-race winner and silently
         # un-enrich the other. Every ticker in the export with a cached payload gets the
         # merge; two classes of one filer share the same facts, which is correct.
-        # Bootstrapped names are excluded: their payload IS the cache already, and
-        # re-capturing pre_registry here would relabel their provenance as export.
+        # (Bootstrapped names never enter `facts`, so this targets export names only.)
         symbols = sorted(t for t, c in ciks.items()
-                         if t in facts and t not in bootstrapped
-                         and f"CIK{c:010d}.json" in cached)
+                         if t in facts and f"CIK{c:010d}.json" in cached)
         log(f"enrichment: tier 2 from cache for {len(symbols)} name(s)")
         for symbol in symbols:
             bundle = build(symbol)
@@ -337,7 +336,8 @@ def assemble(*, sec_data: str, prices_dir: str | None, universe: str, as_of: str
                                           cache_dir=Path(enrich_cache), ciks=ciks)
 
     log("rows: scoring + scorecard + inversion over the universe …")
-    bundles = [b for b in (build(s) for s in sorted(facts)) if b is not None]
+    bundles = ([b for b in (build(s) for s in sorted(facts)) if b is not None]
+               + bootstrap_bundles)
     rows = picks.build_rows(bundles, prices=prices, meta=meta)
     by_symbol = {row["symbol"]: row for row in rows}
     bundle_by_symbol = {b["symbol"]: b for b in bundles}

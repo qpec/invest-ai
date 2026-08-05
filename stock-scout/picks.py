@@ -675,24 +675,31 @@ def main(argv: list[str] | None = None) -> int:
     prices = _load_prices(Path(args.prices) if args.prices else None)
     facts = secsv.load_facts(args.sec_data)
     secsv.merge_tag_index(facts, args.sec_data)
+    boot_bundles: list[dict] = []
     if args.enrich_cache and Path(args.enrich_cache).exists():
         import enrich
         try:
             ciks = enrich.cik_map_cached(Path(args.enrich_cache))
-            made = enrich.bootstrap_payloads(
-                facts, [s for s in meta if s not in facts],
-                cache_dir=Path(args.enrich_cache), ciks=ciks, cache_only=True)
             enrich.enrich_payloads(
                 facts, sorted(t for t, c in ciks.items()
-                              if t in facts and t not in made
+                              if t in facts
                               and (Path(args.enrich_cache) / f"CIK{c:010d}.json").exists()),
                 cache_dir=Path(args.enrich_cache), ciks=ciks)
+            # Streaming, never payload-resident: thousands of bootstrapped names
+            # must not coexist with the export in memory (see enrich.bootstrap_bundles).
+            boot_bundles, pending = enrich.bootstrap_bundles(
+                [s for s in meta if s not in facts],
+                cache_dir=Path(args.enrich_cache), ciks=ciks, as_of=args.as_of,
+                meta=meta, prices=prices)
+            if boot_bundles or pending:
+                print(f"bootstrap: {len(boot_bundles)} cache-only name(s); "
+                      f"{pending} awaiting their first refresh fetch")
         except Exception as error:  # noqa: BLE001 — enrichment is a bonus, never a gate
             print(f"enrichment unavailable ({type(error).__name__}: {error}) — "
                   f"screening on export facts only")
     bundles = [b for b in (pit.as_of_bundle(facts[s], s, meta.get(s), args.as_of,
                                             prices or {})
-                           for s in sorted(facts)) if b is not None]
+                           for s in sorted(facts)) if b is not None] + boot_bundles
     rows = build_rows(bundles, prices=prices, meta=meta)
 
     out = Path(args.out) if args.out else Path("reports") / f"picks-{args.as_of}.html"

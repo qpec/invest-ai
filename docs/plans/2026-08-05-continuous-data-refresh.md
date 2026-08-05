@@ -28,7 +28,14 @@ companyfacts run 2–8 MB; thousands would out-grow the box's memory and its bac
 volume for tags nothing can read. `consumed_tags()` introspects pit's own concept
 tables (all six chains + secsv's documented inline extras + the dei share tag) —
 introspected, not copied, so a new concept chain widens the selection
-automatically. The cache stores the selection, exactly what the export always was.
+automatically. Within a tag: latest-filed winner per period FIRST, across all
+forms (restatements ride 8-Ks — the preflight review reproduced GOOG's FY2013 OCF
+regressing to a superseded value when forms were filtered first), THEN a
+sub-annual 5-year horizon chosen by period span; annual series keep full depth
+(the growth anchors read the oldest point), and the dei share tag is exempt from
+both horizon and dedupe (shares_series detects inconsistent filings from the raw
+per-filed groups). Whole-universe consumers stream payload→bundle one name at a
+time (`bootstrap_bundles`) — thousands of parsed payloads never coexist.
 Consequence: `enrich_cache` leaves the backup-volume mirror (refetchable in
 minutes; the volume keeps the irreplaceable theses + reports).
 

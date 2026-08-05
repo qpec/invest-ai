@@ -282,3 +282,121 @@ class TestRollingRefresh:
         (tmp_path / "drafts" / "BBB").mkdir(parents=True)
         (tmp_path / "drafts" / "monitor-2026-08-09").mkdir()   # the spool, not a thesis
         assert enrich.thesis_symbols(tmp_path) == ["AAA", "BBB"]
+
+
+class TestPruneReviewRegressions:
+    """Preflight review 2026-08-05: the three ways the first prune changed numbers."""
+
+    def test_restatement_on_a_non_annual_form_survives(self):
+        """GOOG FY2013 OCF (reproduced live): the 8-K restatement is the latest-filed
+        winner and must not lose to a form-filtered 10-K value."""
+        raw = {"facts": {"us-gaap": {"NetCashProvidedByUsedInOperatingActivities": {
+            "units": {"USD": [
+                entry("2013-12-31", "2016-02-11", 18659.0, start="2013-01-01",
+                      form="10-K"),
+                entry("2013-12-31", "2016-05-03", 19140.0, start="2013-01-01",
+                      form="8-K"),
+            ]}}}}}
+        got = enrich.prune_payload(raw)["facts"]["us-gaap"][
+            "NetCashProvidedByUsedInOperatingActivities"]["units"]["USD"]
+        assert [e["val"] for e in got] == [19140.0]
+
+    def test_annual_series_keep_full_depth(self):
+        """The growth anchors read the OLDEST annual point — no annual horizon."""
+        raw = {"facts": {"us-gaap": {"Revenues": {"units": {"USD": [
+            entry("2009-12-31", "2010-02-11", 1.0, start="2009-01-01", form="10-K"),
+            entry("2024-12-31", "2025-02-11", 9.0, start="2024-01-01", form="10-K"),
+        ]}}}}}
+        got = enrich.prune_payload(raw)["facts"]["us-gaap"]["Revenues"]["units"]["USD"]
+        assert [e["end"] for e in got] == ["2009-12-31", "2024-12-31"]
+
+    def test_old_quarterlies_are_cut_but_old_annual_instants_kept(self):
+        raw = {"facts": {"us-gaap": {"Assets": {"units": {"USD": [
+            entry("2012-12-31", "2013-02-11", 5.0, form="10-K"),      # annual instant
+            entry("2012-03-31", "2012-05-01", 4.0, form="10-Q"),      # ancient quarterly
+        ]}}}}}
+        got = enrich.prune_payload(raw)["facts"]["us-gaap"]["Assets"]["units"]["USD"]
+        assert [e["end"] for e in got] == ["2012-12-31"]
+
+    def test_equal_filed_tie_matches_latest_filed(self):
+        """>= tie-break: among equal filed dates the LATER list entry wins, exactly as
+        pit._latest_filed resolves it."""
+        raw = {"facts": {"us-gaap": {"Revenues": {"units": {"USD": [
+            entry("2024-12-31", "2025-02-11", 1.0, start="2024-01-01", form="10-K"),
+            entry("2024-12-31", "2025-02-11", 2.0, start="2024-01-01", form="10-K/A"),
+        ]}}}}}
+        got = enrich.prune_payload(raw)["facts"]["us-gaap"]["Revenues"]["units"]["USD"]
+        assert [e["val"] for e in got] == [2.0]
+
+    def test_dei_shares_exempt_from_horizon_and_dedupe(self):
+        """shares_series groups raw entries per filed date to DETECT inconsistent
+        filings (AAPL's 2010-01-25 double report) and shares_fallback needs the last
+        observation however old (BRK) — the tag is slimmed, never cut."""
+        raw = {"facts": {"dei": {pit._SHARES_TAG: {"units": {"shares": [
+            entry("2009-10-16", "2010-01-25", 900.0, form="10-K/A"),
+            entry("2010-01-15", "2010-01-25", 906.0, form="10-Q"),
+        ]}}}}}
+        got = enrich.prune_payload(raw)["facts"]["dei"][pit._SHARES_TAG]["units"]["shares"]
+        assert [e["val"] for e in got] == [900.0, 906.0]
+
+
+class TestBootstrapBundles:
+    def test_streaming_bundle_and_pending_count(self, tmp_path):
+        raw = {"cik": 7, "facts": {"us-gaap": {
+            "Revenues": {"units": {"USD": [
+                entry("2024-12-31", "2025-02-11", 100.0, start="2024-01-01",
+                      form="10-K")]}},
+            "Assets": {"units": {"USD": [
+                entry("2024-12-31", "2025-02-11", 500.0, form="10-K")]}},
+            "NetCashProvidedByUsedInOperatingActivities": {"units": {"USD": [
+                entry("2024-12-31", "2025-02-11", 30.0, start="2024-01-01",
+                      form="10-K")]}},
+        }}}
+        (tmp_path / "CIK0000000007.json").write_text(json.dumps(raw))
+        bundles, pending = enrich.bootstrap_bundles(
+            ["AAA", "BBB", "NOPE"], cache_dir=tmp_path,
+            ciks={"AAA": 7, "BBB": 8}, as_of="2026-08-05")
+        assert pending == 1                      # BBB awaits a fetch; NOPE not a filer
+        assert [b["symbol"] for b in bundles] == ["AAA"]
+        assert bundles[0]["annual"]["income"]["2024-12-31"]["Total Revenue"] == 100.0
+
+
+class TestSecMerge:
+    def _run(self, tmp_path, listed_rows, existing_rows):
+        import csv
+        base = tmp_path / "base.csv"
+        cols = ["symbol", "name", "sector", "industry", "country", "market_cap",
+                "exchange", "currency"]
+        with base.open("w", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=cols)
+            w.writeheader()
+            for sym in existing_rows:
+                w.writerow({**{c: "" for c in cols}, "symbol": sym})
+        import universe
+        out = tmp_path / "out.csv"
+        payload = {"fields": ["cik", "name", "ticker", "exchange"],
+                   "data": listed_rows}
+        universe.sec_merge(base, out,
+                           transport=lambda url: json.dumps(payload).encode())
+        with out.open(newline="") as fh:
+            return [r["symbol"] for r in csv.DictReader(fh)]
+
+    def test_sibling_class_of_a_curated_business_is_blocked(self, tmp_path):
+        got = self._run(tmp_path,
+                        [[1652044, "Alphabet", "GOOGL", "Nasdaq"],
+                         [1652044, "Alphabet", "GOOG", "Nasdaq"]],
+                        existing_rows=["GOOG"])
+        assert got == ["GOOG"]                   # GOOGL never doubles the business
+
+    def test_canonical_prefers_plain_shortest_line(self, tmp_path):
+        got = self._run(tmp_path,
+                        [[10, "OABI Co Warrant", "OABIW", "Nasdaq"],
+                         [10, "OABI Co", "OABI", "Nasdaq"],
+                         [11, "Brown-Forman A", "BF-A", "NYSE"],
+                         [11, "Brown-Forman B", "BF-B", "NYSE"],
+                         [12, "Entergy Texas Pref", "ETI-P", "NYSE"],
+                         [13, "ETF Thing", "ZZZ", "NYSE Arca"]],
+                        existing_rows=[])
+        # OABI over its warrant; a class line (BF-A, first in file) when no plain
+        # line exists; the preferred-only filer and the ETF venue dropped whole.
+        assert got == ["OABI", "BF-A"]

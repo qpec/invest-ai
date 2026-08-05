@@ -222,6 +222,8 @@ def sec_merge(base_csv: Path, out_csv: Path, *, transport=None) -> dict:
         _SEC_TICKER_RE = re.compile(r"[A-Z0-9]{1,6}(?:-[A-Z])?\Z")
     data = json.loads((transport or _edgar_get)(SEC_EXCHANGE_URL))
     listed = [dict(zip(data["fields"], row)) for row in data["data"]]
+    for row in listed:
+        row["ticker"] = str(row.get("ticker") or "").upper()
 
     with Path(base_csv).open(newline="", encoding="utf-8") as fh:
         reader = csv.DictReader(fh)
@@ -229,22 +231,49 @@ def sec_merge(base_csv: Path, out_csv: Path, *, transport=None) -> dict:
         existing = list(reader)
     have = {row["symbol"].upper() for row in existing if row.get("symbol")}
 
-    seen_cik: set[int] = set()
+    # A business already in the curated universe blocks its WHOLE CIK, whatever share
+    # class or venue the curated row uses — resolved against the UNFILTERED map, or a
+    # sibling class listed first in the SEC file would double-count the business
+    # (GOOGL beside a curated GOOG was real; preflight review 2026-08-05).
+    cik_by_ticker = {row["ticker"]: row.get("cik") for row in listed if row["ticker"]}
+    seen_cik: set = {cik_by_ticker[s] for s in have if s in cik_by_ticker}
+
+    # One CANONICAL line per remaining CIK, chosen per filer rather than
+    # first-in-file: dash-free tickers first (the common line), else single-letter
+    # class suffixes excluding the preferred/warrant/unit/right markers (BF-B is a
+    # class; ETI-P is a preferred) — shortest wins (OABI over OABIW), file order
+    # breaks ties. A filer with no such line (preferred-only shells, unit-only
+    # SPACs) is dropped whole, and a canonical line listed off the kept venues
+    # drops its filer too — falling back to a lesser line would admit exactly the
+    # instruments the filter exists to keep out.
+    by_cik: dict = {}
+    for seq, row in enumerate(listed):
+        if row.get("cik") in seen_cik or not row["ticker"]:
+            continue
+        by_cik.setdefault(row["cik"], []).append((seq, row))
+
+    def canonical(rows):
+        plain = [(seq, r) for seq, r in rows
+                 if _SEC_TICKER_RE.match(r["ticker"]) and "-" not in r["ticker"]]
+        if not plain:
+            plain = [(seq, r) for seq, r in rows
+                     if _SEC_TICKER_RE.match(r["ticker"])
+                     and not r["ticker"].endswith(("-P", "-W", "-U", "-R"))]
+        if not plain:
+            return None
+        return min(plain, key=lambda item: (len(item[1]["ticker"]), item[0]))[1]
+
     added = []
-    for row in listed:
-        ticker = str(row.get("ticker") or "").upper()
-        exchange = row.get("exchange")
-        cik = row.get("cik")
-        if exchange not in _SEC_KEEP_EXCHANGES or not _SEC_TICKER_RE.match(ticker):
+    for cik, rows in by_cik.items():
+        row = canonical(rows)
+        if row is None or row.get("exchange") not in _SEC_KEEP_EXCHANGES:
             continue
-        if ticker in have or cik in seen_cik:
-            seen_cik.add(cik)
+        if row["ticker"] in have:
             continue
-        seen_cik.add(cik)
         new = {column: "" for column in columns}
-        new["symbol"] = ticker
+        new["symbol"] = row["ticker"]
         new["name"] = row.get("name") or ""
-        new["exchange"] = exchange
+        new["exchange"] = row["exchange"]
         added.append(new)
     with Path(out_csv).open("w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=columns)
