@@ -1,123 +1,151 @@
 # Invest AI
 
-*(repository `qpec/invest-ai`; the engine inside retains its working name
-`stock-agentcy` — the 2026-08-05 rebrand renames the public face, not the
-internals, so module paths and design-doc history stay true.)*
+**An AI-operated investment desk: it finds wonderful businesses, writes the
+argument for owning them, and then checks that argument every week — mechanically,
+against rules committed in advance. It advises and monitors. It never executes a
+trade.**
 
-A daily/weekly iterating financial-analysis system for portfolio oversight.
-The core object is the **investment thesis**, not the stock. **The system
-advises and monitors. It never executes trades.**
+The core object is not the stock but the **investment thesis**: a written,
+machine-checkable document stating why we would own a business and — more
+importantly — the pre-committed conditions under which we would leave. Research is
+done by an AI agent; every number and every rule is validated by plain Python; the
+buy decision belongs to a human, always.
 
-Binding design docs live under `docs/plans/` (functional baseline,
-architecture elaboration, technology architecture, Telegram interaction spec).
+The judgement framework is a constitution the code enforces rather than hopes for:
+**Buffett** (what to buy: moats, owner earnings, the 10-year test), **Munger**
+(what to avoid: inversion, the Hell-No filter, psychology traps), **Naval** (keep
+upgrading: the system itself is leverage — software that works while you sleep).
+
+---
+
+## The three components
+
+```mermaid
+flowchart LR
+    A["① The Scout<br/>1,900+ US filers screened<br/>from as-filed SEC data"]
+    B["② The Thesis Desk<br/>top 1% → researched draft<br/>→ the owner ratifies (the Gate)"]
+    C["③ The Monitor<br/>every committed thesis re-tested<br/>weekly against its own triggers"]
+    A -->|"the best 1%"| B -->|"committed theses"| C
+    C -->|"intact · under review · broken"| R["report + Telegram letter<br/>broken ⇒ standing sell advice"]
+```
+
+### ① The Scout — *what is worth a look?*
+
+Screens the whole universe from the SEC's own filings (point-in-time discipline:
+nothing is known before EDGAR knew it) and grades every name **twice,
+independently**: the *Owner's Scorecard* asks how good the business is; the
+*Inversion Layer* asks how it would lose your money. The two verdicts are never
+merged — a business can be Exceptional *and* Fragile, and that tension is the
+information. A tiered fetch chain (bulk export → live EDGAR → labelled vendor
+display values) keeps 26 registry metrics filled, each with its provenance.
+
+### ② The Thesis Desk — *why would we own this, and what would make us leave?*
+
+There is **no LLM API client in this repo**. An agent harness (Claude Code /
+OpenClaw) *is* the runtime: Python writes a work order, the agent researches with
+its own tools and writes the draft, and Python re-validates every rule
+mechanically — refusing the work if a trigger is untestable, a forbidden field
+appears, or the model used is not on the owner's best-available list. A draft
+becomes real only at **the Gate**, where the owner — a human, always — adds
+conviction and circle-of-competence and ratifies. The agent is trusted for
+research and prose, never for the contract.
+
+### ③ The Monitor — *is the argument still true?*
+
+Every Saturday, each committed thesis is re-tested against **its own pre-committed
+triggers** — never open-ended news scanning. Metric triggers are pure arithmetic
+on fresh filings; judgement questions go to the agent, and an unanswered one is
+reported **UNCHECKED**, loudly — silence is never safety. A tripped break trigger
+makes the thesis **broken**: standing sell advice that ignores cost basis, sticky
+until the owner acts. "No action needed" is the celebrated first-class outcome.
 
 ---
 
-## High-level design
+## Process & infrastructure
 
-New here? This section is the whole system in three tables. Everything in it is
-enforced in code, and the requirement IDs (FR/NFR) are the owner-approved ones
-from `docs/plans/2026-07-08-functional-design-baseline.md`.
+One VPS, two lanes that never swap jobs, and GitHub as the only seam between
+machines ([full plan](docs/plans/2026-08-04-distributed-desk-architecture.md)):
 
-### The idea in one paragraph
+```mermaid
+flowchart LR
+    subgraph BOX["DigitalOcean droplet (~$13/mo)"]
+        direction TB
+        M["Mechanical lane — systemd, no LLM<br/>scrape · enrich · monitor arithmetic · site build"]
+        J["Judgement lane — OpenClaw + Claude<br/>answers pre-committed questions<br/>drafts theses on demand"]
+        D[("SQLite + append-only caches<br/>no server database, on purpose")]
+        M --- D
+        J --- D
+    end
+    GH["GitHub<br/>code (public) · Pages site<br/>private state archive"]
+    O["Owner<br/>Telegram · the Gate (SSH)"]
+    BOX -->|"site + state pushes"| GH
+    GH -->|"pull on deploy"| BOX
+    O <--> J
+    O <--> GH
+```
 
-Every position carries a **written thesis** with a conviction level and
-pre-committed, testable invalidation triggers. The system monitors holdings
-against *those triggers only* — never open-ended news scanning — evaluates
-candidate buys through a fixed framework, and reports on portfolio balance.
-When the framework and a great-looking opportunity conflict, the framework wins.
-
-### The framework it applies
-
-| Pillar | Question | What it does here |
+| When (Sat) | What | Lane |
 |---|---|---|
-| **Buffett** | What to buy | Wonderful businesses at fair prices: circle of competence, a moat with evidence, owner earnings over reported EPS, the 10-year test |
-| **Munger** | What to avoid | Inversion. The Hell-No filter runs *first* and a single fail rejects, regardless of upside |
-| **Naval** | How to keep upgrading | Specific knowledge, the leverage stack (capital / labour / code / media), process judged separately from outcome |
+| 06:00 | refresh SEC data, enrichment cache, exports | mechanical |
+| 07:00 | write the week's monitor work order | mechanical |
+| 07:30 | agent researches the judgement questions → verdicts | judgement |
+| 12:00 | evaluate every thesis (missing verdicts ⇒ UNCHECKED, never blocked) | mechanical |
+| 12:30 | rebuild + publish the site, push the state archive, send the letter | mechanical |
 
-### The seven components
+Auth is the owner's Claude subscription via Claude-CLI reuse — no API key exists
+anywhere in the fleet. The agent's user cannot write where committed theses live,
+so nothing in the judgement lane can ratify, even if misled. Portfolio data
+(conviction, holdings) lives only in the **private** state repo, never here and
+never on the public site — enforced at the render layer, with tests.
 
-| # | Component | Owns | Runs |
-|---|---|---|---|
-| 1 | **Portfolio Mirror** | holdings, weights, balance, leverage tripwire | on snapshot |
-| 2 | **The Gate** | buy discipline: circle → Hell-No veto → Buffett dossier → owner judgement → thesis | human-triggered desk session |
-| 3 | **Thesis Register** | one living, versioned document per holding; goalpost guard | on change |
-| 4 | **The Watchdog** | tests the pre-committed triggers, nothing else | daily · weekly (Sat) · event · quarterly |
-| 5 | **Decision Journal** | every decision plus the reasoning of that moment | on decision |
-| 6 | **The Study** | the learning loop — weekly digest, mental models | weekly |
-| 7 | **The Scout** | idea generation from a pre-committed universe | human-triggered only (FR14) |
+## The interface
 
-`stock-scout/` is the Scout's screening pipeline and has [its own
-README](stock-scout/README.md) with the same treatment: an eight-stage pipeline
-table and fifteen key requirements of its own.
+- **The desk site** — Scout · Thesis · Monitor as three numbered tabs: the whole
+  screened universe with filters and per-name drill-down (all 26 metrics with
+  provenance badges, both verdicts side by side), draft theses in full with live
+  trigger safety-margins, and the weekly monitor state. Self-contained HTML,
+  light/dark, keyboard-first. Served by GitHub Pages from `docs/`.
+- **Telegram** — the daily/weekly letters, failure alerts, and the OpenClaw
+  channel for talking to the desk ("draft the new top-1%").
+- **The desk CLI** — `agentcy run {daily,weekly,quarterly,event}`, and the thesis
+  engine's three beats: `thesis.py brief → record → ratify`,
+  `monitor.py brief → run`.
 
-### Key requirements
+## Principles the code enforces (not a style guide — tested seams)
 
-The rules the system is not allowed to break. Full text in the functional
-baseline; this is what each one means in practice.
+- The two judgements are **never merged** into one score; composites (Piotroski,
+  Altman) are display-only and structurally unable to fire a trigger.
+- **No price-based triggers**: a falling quote with an intact thesis is an
+  opportunity, not an invalidation; recommendations ignore cost basis.
+- **Human judgement is sacred**: conviction and the buy decision have no field in
+  any machine-written schema; only the interactive Gate can commit a thesis.
+- **Best-available models only**, read from the harness transcript rather than
+  asked of the agent; a lesser or lying model is refused at validation.
+- **Refuse, never guess**: an uncomputable metric is reported absent — with its
+  provenance tier when present — and absent data can veto safety claims, never
+  certify them.
 
-| ID | Requirement | Why it exists |
-|---|---|---|
-| **FR1** | No thesis, no buy | An unwritten thesis cannot be tested, so it cannot be invalidated |
-| **FR3** | Hell-No first | Munger's veto runs *before* any Buffett analysis; one fail rejects whatever the upside |
-| **FR4** | "No action needed" is a first-class outcome | Counters action bias; a price drop with an intact thesis is an *opportunity*, not an alarm |
-| **FR7** | A broken thesis produces sell advice that ignores cost basis | The stock does not know what you paid — sunk cost is the trap |
-| **FR8** | Every decision is journalled with its reasoning | Process is judged separately from returns; a good outcome from a bad process catches up |
-| **FR9** | Human judgement is sacred | Conviction, trust in management and circle fit are *asked*, never invented |
-| **FR11** | Advice, never execution | There is no broker path in this repo, by construction |
-| **FR12** | Hidden-concentration check | "Are my 12 positions really 3 bets?" — correlation clustering, weekly |
-| **FR13** | Quarterly honesty check | One benchmark, quarterly only, never in daily output — "would an index fund beat my process?" |
-| **FR14** | Idea generation is human-triggered only | Automated loops never scan for candidates; screener output reaches the watchlist, not the portfolio |
-| **NFR1** | Robust to source failure | Keeps running on the last snapshot and *reports the staleness* |
-| **NFR4** | Auditable | Every analysis, report and thesis change is traceable in history |
-| **NFR5** | Low maintenance | Must run for months without tinkering |
-| **NFR7** | Dependency discipline | Permissive licences only — no GPL family; enforced by a gate, not by good intentions |
+## Deeper documentation
 
-### Runtime shape
+| Doc | What it covers |
+|---|---|
+| [`stock-scout/README.md`](stock-scout/README.md) | the pipeline in full: model, rules R1–R22, files |
+| [`stock-scout/docs/THESIS-DESIGN.md`](stock-scout/docs/THESIS-DESIGN.md) | the thesis engine and the agent-as-runtime seam |
+| [`stock-scout/docs/REGISTRY-DESIGN.md`](stock-scout/docs/REGISTRY-DESIGN.md) | the 26-metric registry: audit, sources, formulas |
+| [`stock-scout/docs/INVERSION-DESIGN.md`](stock-scout/docs/INVERSION-DESIGN.md) | the Munger layer's seven fragility probes |
+| [`docs/plans/`](docs/plans/) | binding design history: functional baseline → technology → distributed desk |
+| [`docs/runbook.md`](docs/runbook.md) | operating the box |
 
-Always-on Ubuntu box · systemd timers + oneshot jobs + one small synchronous
-daemon · stdlib spine (hand-rolled Telegram client) · two SQLite files with the
-benchmark physically quarantined · rendered-markdown archive in its own git
-repo · four runtime pip packages.
-
-**Architecture revision 2026-08-03** (journaled in
-`stock-scout/docs/THESIS-DESIGN.md` §1): the original "no LLM in the scheduled
-runtime" lock is lifted by owner decision. The Scout is now the starting
-engine; its top 1% feeds a thesis builder (deep research → draft thesis for
-the Gate), and a weekly monitor validates committed theses — metric triggers
-mechanically, judgement triggers by asking. FR9 and FR11 bind unchanged: the
-owner ratifies every thesis, and nothing executes trades.
-
-**The desk site.** `stock-scout/webapp.py` renders the whole flow as one
-interactive page — ① the Scout (1,904 names, filterable, per-name drill-down
-with metric provenance), ② the Thesis Desk (top 1%, drafts in full), ③ the
-Monitor (committed theses vs their own triggers) — into `docs/`, which GitHub
-Pages serves. Enable once: repo Settings → Pages → Deploy from a branch →
-`main` + `/docs`. Metric fetching behind it is hardened by `enrich.py`: the
-bulk export is tier 1, live EDGAR companyfacts fills its gaps (as-filed,
-point-in-time-safe, cache-first), and vendor numbers exist only as labelled
-display — they can never reach scoring or fire a trigger.
-
-**The LLM is the operator, not a dependency.** This repo contains no LLM API
-client. The thesis desk is driven by an agent harness — Claude Code, OpenClaw —
-which already has a model, web search and a shell; the Python writes a work
-order, the agent researches and writes files, and the Python re-checks every
-rule mechanically and exits non-zero if it refuses the work. Nothing downstream
-depends on the agent having behaved well, and the runtime dependency budget is
-unchanged at four packages.
-
-    agentcy run {daily,weekly,quarterly,event}
-    agentcy bot
-
----
+*(Repository renamed from `stock-agentcy` 2026-08-05; internal module names keep
+the working name so the design-doc history stays true.)*
 
 ## Development
 
-Requires [uv](https://docs.astral.sh/uv/); the interpreter is pinned in
-`.python-version` (uv-managed CPython, never system Python).
+```bash
+uv run pytest -q                      # root suite — fully offline; network in a test is a failure
+cd stock-scout && uv run pytest -q    # scout suite
+uv run python tools/license_gate.py   # permissive licences only — no GPL family, enforced
+```
 
-    uv sync --locked
-    uv run pytest -q          # fully offline — network access is a test failure
-
-License wall (NFR7): `uv run python tools/license_gate.py` — exits 1 on any
-violation; the audit table is committed at `docs/license-audit.txt`.
+Branch → adversarial review → merge; every load-bearing decision is journaled in
+`docs/plans/` with the evidence that produced it.
