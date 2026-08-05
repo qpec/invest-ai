@@ -1,0 +1,14 @@
+[Unit]
+Description=one-time judgement-lane auth exchange over Telegram (until it succeeds)
+Wants=network-online.target
+After=network-online.target agentcy-bot.service
+ConditionPathExists=!/var/lib/stock-agentcy/.openclaw-authed
+
+[Service]
+Type=exec
+User=root
+ExecStart=/opt/stock-agentcy/deploy/openclaw/bootstrap-auth.sh
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

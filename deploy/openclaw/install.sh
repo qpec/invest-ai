@@ -41,6 +41,22 @@ if [ ! -f /home/openclaw/.openclaw/SETUP.md ]; then
         "$(dirname "$0")/SETUP.md" /home/openclaw/.openclaw/SETUP.md
 fi
 
+# --- 3b. the two judgement-lane units ----------------------------------------
+# scout-verdicts: the Saturday 07:30 beat, driving claude directly — installed
+# unconditionally so the weekly loop never depends on OpenClaw onboarding.
+# openclaw-bootstrap: the one-time Telegram auth exchange; its unit condition
+# retires it the moment auth is verified.
+chmod 0755 /opt/stock-agentcy/deploy/openclaw/*.sh
+install -m 0644 /opt/stock-agentcy/deploy/systemd/scout-verdicts.service \
+                /opt/stock-agentcy/deploy/systemd/scout-verdicts.timer \
+                /opt/stock-agentcy/deploy/systemd/openclaw-bootstrap.service \
+                /etc/systemd/system/
+systemd-analyze verify /etc/systemd/system/scout-verdicts.service \
+                       /etc/systemd/system/openclaw-bootstrap.service
+systemctl daemon-reload
+systemctl enable --now scout-verdicts.timer
+systemctl enable openclaw-bootstrap.service   # started at the end, post-seam
+
 # --- 4. assert the seam (§4) — the Gate as a filesystem fact ------------------
 # Every denial check first asserts (as root) that its target EXISTS: a check
 # against a file that is not there passes for the wrong reason, and a seam that
@@ -80,15 +96,18 @@ for clone in site-repo state-repo; do   # state-repo holds FR9 after ratificatio
 done
 [ "$fail" -eq 0 ] || { echo ">>> SEAM BROKEN — fix permissions before going live."; exit 1; }
 
+# --- 5. start the auth exchange (needs the seam to be proven first) ----------
+systemctl start openclaw-bootstrap.service || true
+
 cat <<EOF
->>> judgement lane installed and the seam holds. Two interactive steps remain
-    (as the openclaw user; see /home/openclaw/.openclaw/SETUP.md). The daemon
-    is a systemd USER service, so point the commands at openclaw's own user
-    bus (lingering is already enabled):
+>>> judgement lane installed and the seam holds. Auth is being arranged over
+    Telegram (openclaw-bootstrap.service): the owner runs \`claude setup-token\`
+    on the desk and replies to the bot with the token — no SSH required.
+    Manual alternative (as the openclaw user; see /home/openclaw/.openclaw/SETUP.md):
       1. sudo -u openclaw claude login          # owner subscription, no API key
       2. sudo -u openclaw XDG_RUNTIME_DIR=/run/user/$(id -u openclaw) \\
            DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u openclaw)/bus \\
            openclaw onboard --install-daemon
-    Then configure per SETUP.md: model pin, Telegram binding, loopback-only
-    gateway, and the Saturday 07:30 verdicts job.
+    The Saturday 07:30 verdicts job (scout-verdicts.timer) is already live and
+    does not depend on OpenClaw onboarding.
 EOF

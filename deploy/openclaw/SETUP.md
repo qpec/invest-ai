@@ -9,6 +9,19 @@ filesystem seam — and asserted the seam holds.
 
 ## 1. Auth — Claude-CLI reuse, nothing else
 
+**The automated path (default):** `openclaw-bootstrap.service` runs at boot
+until auth succeeds. It messages the owner on Telegram: run `claude
+setup-token` on the desk, reply with the `sk-ant-…` token; the box deletes the
+message immediately, installs the token at `/etc/stock-agentcy/openclaw.env`
+(root:openclaw 0640 — read by `scout-verdicts.service` and the OpenClaw
+daemon's environment), verifies it with a real claude call, and only then
+reports success. Tokens are revocable at the Anthropic console; rotate by
+replying with a fresh one (the bootstrap can be re-run:
+`systemctl start openclaw-bootstrap`after removing
+`/var/lib/stock-agentcy/.openclaw-authed`).
+
+**The manual path** (equivalent, and what the bootstrap's 'done' reply checks):
+
 ```
 sudo -u openclaw claude login
 ```
@@ -44,8 +57,12 @@ config doesn't corrupt a thesis — it just wastes a Saturday.
 
 ## 4. The Saturday 07:30 verdicts job
 
-Schedule (OpenClaw cron) for **Saturday 07:30 Europe/Amsterdam**, after the
-07:00 brief and well before the 12:00 mechanical run. The job prompt:
+**Already live as `scout-verdicts.timer`** (Sat 07:30 Europe/Amsterdam,
+`User=openclaw`, driving `claude -p` directly via `deploy/openclaw/verdicts.sh`)
+— deliberately independent of OpenClaw, per the plan's §6 symmetry: a work
+order is a file, either harness can execute one. If you later prefer OpenClaw's
+own cron to run it, disable the timer and schedule the same prompt there —
+same beat, after the 07:00 brief and well before the 12:00 mechanical run:
 
 > Look for `/var/lib/stock-agentcy/scout/theses/monitor-<today's date>/WORK-ORDER.md`.
 > If it does not exist, reply "no work order this week" and stop.
