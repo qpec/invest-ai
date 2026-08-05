@@ -1,4 +1,8 @@
-# stock-agentcy
+# Invest AI
+
+*(repository `qpec/invest-ai`; the engine inside retains its working name
+`stock-agentcy` — the 2026-08-05 rebrand renames the public face, not the
+internals, so module paths and design-doc history stay true.)*
 
 A daily/weekly iterating financial-analysis system for portfolio oversight.
 The core object is the **investment thesis**, not the stock. **The system

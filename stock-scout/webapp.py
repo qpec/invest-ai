@@ -1333,13 +1333,13 @@ TEMPLATE = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%93%88%3C/text%3E%3C/svg%3E">
-<title>Stock Agentcy — Scout · Thesis · Monitor</title>
+<title>Invest AI — Scout · Thesis · Monitor</title>
 <style>__CSS__</style>
 </head>
 <body>
 <header class="top">
   <div class="masthead">
-    <h1>Stock Agentcy</h1>
+    <h1>Invest AI</h1>
     <span class="sub">the desk · as of <b id="asOf" class="num"></b></span>
     <div class="right">
       <span class="sub" id="srcNote"></span>

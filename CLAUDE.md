@@ -1,5 +1,10 @@
 # stock-agentcy
 
+> **Public rebrand 2026-08-05 (owner-directed):** the GitHub repository is
+> `qpec/invest-ai` and the repo is public; the private state archive is
+> `qpec/invest-ai-state`. Internal names (`agentcy`, `stock-scout`, this file)
+> deliberately keep the working name.
+
 A daily/weekly iterating financial-analysis system for portfolio oversight. The core object is the **investment thesis**, not the stock: every position carries a written thesis with a conviction level and pre-committed invalidation triggers. The system evaluates candidate buys through the framework below, monitors holdings against their triggers, and reports on portfolio balance.
 
 **The system advises and monitors. It never executes trades.**

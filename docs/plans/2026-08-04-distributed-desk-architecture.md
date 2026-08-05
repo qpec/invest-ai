@@ -81,9 +81,9 @@ Three principles carried over, now with a topology:
 
 | Repo / branch | Contents | Who writes | Who reads |
 |---|---|---|---|
-| `qpec/stock-agentcy` `main` (**protected**) | code | Claude Code sessions + owner only | the box pulls on deploy |
-| `qpec/stock-agentcy` `bot/site` | the rendered `docs/` site | the box | the Pages workflow deploys it |
-| `qpec/stock-agentcy-state` (new, **private**) | `theses/` (drafts + committed) · `reports/` · decision journal · `verdicts/` | the box (after each monitor run / ratification) | the owner anywhere; Claude Code sessions when asked to review |
+| `qpec/invest-ai` `main` (**protected**) | code | Claude Code sessions + owner only | the box pulls on deploy |
+| `qpec/invest-ai` `bot/site` | the rendered `docs/` site | the box | the Pages workflow deploys it |
+| `qpec/invest-ai-state` (new, **private**) | `theses/` (drafts + committed) · `reports/` · decision journal · `verdicts/` | the box (after each monitor run / ratification) | the owner anywhere; Claude Code sessions when asked to review |
 
 Containment for the box's credential, in order of the protection doing the work:
 
@@ -190,7 +190,7 @@ insurance if OpenClaw's auth path ever breaks again the way setup-token did in A
    `deploy/systemd/scout-*.{service,timer}` (the four units above),
    `deploy/openclaw/` (install script, config template, the user/permission seam of
    §4), the `pages.yml` trigger switch to `bot/site`, and the backup-unit extension.
-5. Create `qpec/stock-agentcy-state` (private), seed from the box, wire the push into
+5. Create `qpec/invest-ai-state` (private), seed from the box, wire the push into
    `scout-monitor-run`/`scout-site`.
 6. First supervised Saturday: watch the relay end to end; then the dead-man ping owns
    the silence.
