@@ -9,16 +9,18 @@ filesystem seam — and asserted the seam holds.
 
 ## 1. Auth — Claude-CLI reuse, nothing else
 
-**The automated path (default):** `openclaw-bootstrap.service` runs at boot
-until auth succeeds. It messages the owner on Telegram: run `claude
-setup-token` on the desk, reply with the `sk-ant-…` token; the box deletes the
-message immediately, installs the token at `/etc/stock-agentcy/openclaw.env`
-(root:openclaw 0640 — read by `scout-verdicts.service` and the OpenClaw
-daemon's environment), verifies it with a real claude call, and only then
-reports success. Tokens are revocable at the Anthropic console; rotate by
-replying with a fresh one (the bootstrap can be re-run:
-`systemctl start openclaw-bootstrap`after removing
-`/var/lib/stock-agentcy/.openclaw-authed`).
+**The automated path (default):** `openclaw-bootstrap.timer` runs a 25-minute
+Telegram exchange slice every ~4h until auth succeeds (bounded slices because
+the exchange must pause the agentcy bot — getUpdates is exclusive — and the
+letters channel must never be down for long). The bot messages the owner: run
+`claude setup-token` on the desk, reply with the `sk-ant-…` token *within the
+slice*; the box deletes the message (and says so honestly if it could not),
+installs the token at `/etc/stock-agentcy/openclaw.env` (root:openclaw 0640 —
+read by `scout-verdicts.service`), verifies it with a real claude round-trip
+against a per-run nonce, and confirms the Telegram queue so the restarted bot
+can never re-read the credential. Tokens are revocable at the Anthropic
+console; rotate by removing `/var/lib/stock-agentcy/.openclaw-authed` and
+`systemctl start openclaw-bootstrap`, then replying with a fresh one.
 
 **The manual path** (equivalent, and what the bootstrap's 'done' reply checks):
 

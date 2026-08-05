@@ -1,5 +1,5 @@
 [Unit]
-Description=one-time judgement-lane auth exchange over Telegram (until it succeeds)
+Description=judgement-lane auth exchange slice over Telegram (timer re-arms until it succeeds)
 Wants=network-online.target
 After=network-online.target agentcy-bot.service
 ConditionPathExists=!/var/lib/stock-agentcy/.openclaw-authed
@@ -8,7 +8,8 @@ ConditionPathExists=!/var/lib/stock-agentcy/.openclaw-authed
 Type=exec
 User=root
 ExecStart=/opt/stock-agentcy/deploy/openclaw/bootstrap-auth.sh
+# The exchange pauses the agentcy bot (getUpdates is exclusive per token); the
+# bot must come back on EVERY termination path, including SIGKILL/OOM where a
+# bash trap never runs.
+ExecStopPost=/usr/bin/systemctl start agentcy-bot.service
 Restart=no
-
-[Install]
-WantedBy=multi-user.target

@@ -14,6 +14,12 @@ SCOUT=/var/lib/stock-agentcy/scout
 AS_OF="$(date +%F)"
 SPOOL="$SCOUT/theses/monitor-$AS_OF"
 
+# After= orders this unit behind the brief on a same-boot catch-up, but a slow
+# 07:00 brief on a normal Saturday still deserves a short grace, not a skip.
+for _ in $(seq 30); do
+    [ -f "$SPOOL/WORK-ORDER.md" ] && break
+    sleep 10
+done
 if [ ! -f "$SPOOL/WORK-ORDER.md" ]; then
     echo "no work order at $SPOOL — nothing to judge this week"
     exit 0
@@ -30,9 +36,12 @@ on this machine the mechanical lane validates your verdicts at 12:00, and your
 user cannot write where that command writes. Writing verdicts.json is the
 whole deliverable."
 
+# An explicit tool allowlist, never a blanket permission bypass: the work
+# order needs web research plus one JSON file — a shell or unscoped reads
+# would let a misled agent go fishing (its own credential file included).
 cd "$SCOUT"
 claude -p "$PROMPT" --model "${SCOUT_AGENT_MODEL:-claude-opus-5}" \
-    --permission-mode bypassPermissions
+    --allowedTools "WebSearch,WebFetch,Read(/var/lib/stock-agentcy/scout/**),Write(/var/lib/stock-agentcy/scout/theses/**)"
 
 if [ ! -f "$SPOOL/verdicts.json" ]; then
     echo "agent finished without writing verdicts.json — the monitor will say UNCHECKED" >&2

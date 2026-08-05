@@ -62,10 +62,19 @@ fi
 chown root:agentcy "$ETC/scout.env"; chmod 0640 "$ETC/scout.env"
 
 # --- 4. units ----------------------------------------------------------------
+# The five MECHANICAL-lane pairs, enumerated — not a scout-* glob: the
+# judgement lane's scout-verdicts unit shares the prefix but belongs to
+# deploy/openclaw/install.sh, which installs it after its own prerequisites
+# (the openclaw user, the script chmods) exist.
 chmod 0755 "$CODE"/deploy/scout/*.sh
-install -m 0644 "$CODE"/deploy/systemd/scout-*.service \
-                "$CODE"/deploy/systemd/scout-*.timer /etc/systemd/system/
-systemd-analyze verify /etc/systemd/system/scout-*.service /etc/systemd/system/scout-*.timer
+MECH_UNITS=(scout-scrape scout-monitor-brief scout-monitor-run scout-site scout-backup)
+MECH_FILES=()
+for u in "${MECH_UNITS[@]}"; do
+    install -m 0644 "$CODE/deploy/systemd/$u.service" "$CODE/deploy/systemd/$u.timer" \
+        /etc/systemd/system/
+    MECH_FILES+=("/etc/systemd/system/$u.service" "/etc/systemd/system/$u.timer")
+done
+systemd-analyze verify "${MECH_FILES[@]}"
 systemctl daemon-reload
 systemctl enable --now scout-scrape.timer scout-monitor-brief.timer \
                        scout-monitor-run.timer scout-site.timer scout-backup.timer
