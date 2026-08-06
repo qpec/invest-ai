@@ -293,7 +293,7 @@ def append_metric_observation(conn, row: Mapping) -> int:
 
 def append_metric_inputs(conn, metric_observation_id: int,
                          source_observation_ids: Sequence[int]) -> None:
-    """Attach exact source lineage to one derived observation."""
+    """Link exact source lineage to one derived observation."""
     for source_observation_id in source_observation_ids:
         _insert(conn, "metric_input", {
             "metric_observation_id": metric_observation_id,
