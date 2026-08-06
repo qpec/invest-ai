@@ -42,6 +42,26 @@ graded twice: the Owner's Scorecard and the Inversion Layer, never merged),
 ② Thesis Desk, ③ Monitor. `reports/picks-<date>.html` is the audit-grade picks
 report. On the sample, expect 2 picks of 13 screened.
 
+## 2b. Drive the desk from the page (`--serve`)
+
+```bash
+uv run python webapp.py --serve --sec-data sample-data/secdata \
+    --prices sample-data/prices --universe sample-data/universe.csv \
+    --enrich-cache enrich_cache --theses-dir theses --out-dir /tmp/desk-site
+# → http://127.0.0.1:8899/
+```
+
+Same page, with the **Desk actions** live: refresh a name's filings from EDGAR,
+draft a thesis, write the weekly work order, run the monitor, rebuild the page.
+The server binds loopback only and every call carries a per-run capability
+token, so nothing outside your machine can start a job — and on the
+[public site](https://qpec.github.io/invest-ai/) these same buttons render
+disabled, because running the desk spends the operator's own agent budget.
+
+**Ratifying is deliberately not a button.** `thesis.py ratify <SYM>` asks *you*
+for conviction and circle-of-competence; a browser click is the wrong door for
+the one irreversible step (FR9).
+
 ## 3. The judgement beats (Claude Code / OpenClaw)
 
 Every LLM-facing task runs in three beats — Python writes a work order, the

@@ -119,6 +119,12 @@ never on the public site — enforced at the render layer, with tests.
   provenance badges, both verdicts side by side), draft theses in full with live
   trigger safety-margins, and the weekly monitor state. Self-contained HTML,
   light/dark, keyboard-first. Served by GitHub Pages from `docs/`.
+  Run `python webapp.py --serve` locally and the page's **Desk actions** come
+  alive — refresh filings, draft a thesis, run the monitor, rebuild the page —
+  loopback-bound and token-gated. On the public mirror those same buttons are
+  disabled with "local setup required": the desk runs on *your* machine with
+  *your* agent, so no one spends anyone else's tokens or compute. Ratifying is
+  never a button (FR9).
 - **Telegram** — the daily/weekly letters, failure alerts, and the OpenClaw
   channel for talking to the desk ("draft the new top-1%").
 - **The desk CLI** — `agentcy run {daily,weekly,quarterly,event}`, and the thesis

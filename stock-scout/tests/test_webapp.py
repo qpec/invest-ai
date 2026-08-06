@@ -227,3 +227,59 @@ class TestReviewRegressions:
         symbols = sorted(t for t, c in ciks.items()
                          if t in facts and f"CIK{c:010d}.json" in cached)
         assert symbols == ["FOX", "FOXA"]
+
+
+class TestDeskActions:
+    """The desk surface: inert when published, validated when served."""
+
+    class Args:
+        sec_data = "sd"; prices = "px"; universe = "u.csv"; as_of = "2026-08-05"
+        enrich_cache = "ec"; theses_dir = "th"; out_dir = "out"; no_shards = False
+
+    def test_published_build_carries_no_token(self):
+        """A published page must not be able to drive anyone's desk."""
+        payload = webapp._payload_json({"rows": [], "desk": {"enabled": False}}, {})
+        assert '"desk":{"enabled":false}' in payload
+        assert "token" not in payload
+        # and the served build is the one that carries a capability
+        served = webapp._payload_json(
+            {"rows": [], "desk": {"enabled": True, "token": "secret"}}, {})
+        assert '"enabled":true' in served
+
+    def test_unknown_action_and_symbol_are_refused(self):
+        args = self.Args()
+        argv, err = webapp.desk_command("nope", None, args, {"AAPL"})
+        assert argv is None and "unknown action" in err
+        argv, err = webapp.desk_command("refresh", "ZZZZ", args, {"AAPL"})
+        assert argv is None and err == "unknown symbol"
+        # an injection-shaped symbol is refused for the same reason: it is not screened
+        argv, err = webapp.desk_command("refresh", "; rm -rf /", args, {"AAPL"})
+        assert argv is None and err == "unknown symbol"
+
+    def test_symbol_actions_build_argv_without_a_shell(self):
+        argv, err = webapp.desk_command("refresh", "AAPL", self.Args(), {"AAPL"})
+        assert err is None
+        assert argv[1:] == ["enrich.py", "--force-refresh", "--symbols", "AAPL",
+                            "--cache", "ec"]
+        argv, err = webapp.desk_command("thesis", "AAPL", self.Args(), {"AAPL"})
+        assert err is None and argv[1:4] == ["thesis.py", "brief", "AAPL"]
+        assert "--theses-dir" in argv and "th" in argv
+
+    def test_refresh_needs_a_cache(self):
+        class NoCache(self.Args):
+            enrich_cache = None
+        argv, err = webapp.desk_command("refresh", "AAPL", NoCache(), {"AAPL"})
+        assert argv is None and "enrich-cache" in err
+
+    def test_ratify_is_not_reachable_from_the_web(self):
+        """FR9: conviction is asked of a human at the Gate, never clicked."""
+        assert "ratify" not in webapp.DESK_ACTIONS
+        for builder, _ in webapp.DESK_ACTIONS.values():
+            if builder is None:
+                continue
+            argv = builder(self.Args(), "AAPL")
+            assert "ratify" not in argv
+
+    def test_monitor_run_carries_the_enrichment_cache(self):
+        argv, err = webapp.desk_command("monitor-run", None, self.Args(), set())
+        assert err is None and "--enrich-cache" in argv and "ec" in argv

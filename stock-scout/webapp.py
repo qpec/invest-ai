@@ -302,6 +302,7 @@ def assemble(*, sec_data: str, prices_dir: str | None, universe: str, as_of: str
                 f"building on export facts only")
             enrich_cache = None
     bootstrap_bundles: list[dict] = []
+    pending = 0
     if enrich_cache and Path(enrich_cache).exists():
         # Cache bootstrap (additive only, STREAMING): universe names the export never
         # carried become bundles straight from their cached companyfacts — one payload
@@ -428,15 +429,27 @@ def assemble(*, sec_data: str, prices_dir: str | None, universe: str, as_of: str
                      else "no work order yet")}
                 for r in top_rows]
 
+    # Coverage is stated, not implied: a universe bigger than what has been fetched is
+    # the normal state while the nightly sweep converges, and a page that showed only
+    # the scored names would quietly read as "this is everything".
+    universe_size = len(meta) or len(bundles)
+    source = (f"SEC filings · {len(bundles)} filers scored"
+              + (f" of {universe_size} in the universe" if universe_size > len(bundles)
+                 else "")
+              + (f" · {len(bootstrap_bundles)} from live EDGAR" if bootstrap_bundles
+                 else "")
+              + (f" · {pending} awaiting first fetch" if pending else "")
+              + f" · prices for {len(prices)} names")
     return {
         "as_of": as_of,
         "generated": _dt.date.today().isoformat(),
-        "source": f"bulk SEC export · {len(bundles)} filers · prices for "
-                  f"{len(prices)} names",
+        "source": source,
         "counts": {"screened": len(compact), "picks": len(pick_set),
                    "top": len(top_rows), "drafts": len(theses["drafts"]),
                    "committed": len(theses["committed"]),
                    "enriched": len(pre_registry),
+                   "universe": universe_size,
+                   "bootstrapped": len(bootstrap_bundles), "pending": pending,
                    "enriched_filled": sum(1 for s in enriched.values() if s)},
         "rows": compact, "details": details,
         "charts": {"bands": bands, "verdicts": verdicts, "coverage": cov},
@@ -516,13 +529,32 @@ header.top{position:sticky;top:0;z-index:30;background:var(--page);
   max-width:1280px;margin:0 auto}
 .masthead h1{font-size:15px;font-weight:600;margin:0;letter-spacing:.01em}
 .notice{padding:5px 20px;font-size:11.5px;color:var(--text2);
-  border-top:1px solid var(--border);background:var(--bg2)}
+  border-top:1px solid var(--border);background:var(--page)}
 .notice b{color:var(--text)}
 .masthead .sub{color:var(--text2);font-size:12px}
 .masthead .right{margin-left:auto;display:flex;gap:8px;align-items:center}
 .btn{border:1px solid var(--border);background:var(--surface);color:var(--text2);
   border-radius:6px;padding:4px 10px;font-size:12px;cursor:pointer}
 .btn:hover{background:var(--raised);color:var(--text)}
+/* --- desk actions: live under `webapp.py --serve`, inert on the published site --- */
+.desk{margin:14px 0 4px;padding:10px 12px;border:1px solid var(--border);
+  border-radius:8px;background:var(--page)}
+.desk h4{margin:0 0 7px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--text2);font-weight:600}
+.desk .acts{display:flex;gap:7px;flex-wrap:wrap;align-items:center}
+.act{border:1px solid var(--border);background:var(--surface);color:var(--text);
+  border-radius:6px;padding:5px 11px;font:inherit;font-size:12px;cursor:pointer}
+.act:hover:not([disabled]){background:var(--raised);border-color:var(--accent)}
+.act[disabled]{opacity:.45;cursor:not-allowed}
+.act.busy{opacity:.7;cursor:progress}
+.desk .why{margin-top:7px;font-size:11.5px;color:var(--text2);line-height:1.55}
+.desk .why code{font-size:11px}
+.desklog{margin-top:9px;max-height:230px;overflow:auto;background:var(--surface);
+  border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:11.5px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;
+  line-height:1.5;color:var(--text2)}
+.desklog b{color:var(--text)}
+.desklog .bad{color:var(--crit)}
 .stepper{display:flex;align-items:stretch;gap:0;max-width:1280px;margin:0 auto;
   padding:0 12px;overflow-x:auto}
 .step{display:flex;align-items:center;gap:10px;padding:10px 14px 12px;cursor:pointer;
@@ -767,6 +799,7 @@ def _payload_json(model: dict, embed: dict) -> str:
 JS = r"""
 'use strict';
 const S = window.__SITE__;
+const DESK = S.desk || {enabled: false};
 const $ = (q, el) => (el || document).querySelector(q);
 const $$ = (q, el) => Array.from((el || document).querySelectorAll(q));
 const esc = s => String(s ?? '').replace(/[&<>"']/g,
@@ -1005,6 +1038,14 @@ function renderPanel(sym, row, d){
       ${pill('evidence: ' + (card.evidence || '—'), 'p-quiet')}
       ${d.mc != null ? pill(fmtMc(d.mc), 'p-quiet') : ''}
     </div>
+    ${deskBlock([
+      {id: 'refresh', symbol: sym, label: '↻ Refresh filings',
+       hint: 'refetch this name from EDGAR now'},
+      {id: 'thesis', symbol: sym, label: '✎ Draft thesis',
+       hint: 'work order → your agent researches → mechanical validation'},
+    ], `Drafting writes <code>theses/drafts/${esc(sym)}/</code>. Ratifying stays at the
+        Gate, on purpose: <code>python thesis.py ratify ${esc(sym)}</code> asks you for
+        conviction and circle-of-competence (FR9).`)}
     <h3>Registry metrics <span style="text-transform:none;letter-spacing:0">(what a thesis trigger may test)</span></h3>
     ${regRows}
     <h3>The Owner's Scorecard — ${card.score ?? '—'}/${card.available_max ?? '—'} = ${card.pct ?? '—'}%</h3>
@@ -1025,6 +1066,80 @@ function renderPanel(sym, row, d){
       · TTM ${esc((sc.ttm && sc.ttm.basis) || '—')} through ${esc((sc.ttm && sc.ttm.through) || '—')}
       ${sc.note ? `<div style="color:var(--text2);margin-top:4px">${esc(sc.note)}</div>` : ''}
     </div>`;
+  bindDeskActions($('#pBody'));
+}
+
+/* ---------- desk actions ----------
+   The published site is a READ-ONLY mirror: every action is rendered disabled with
+   the reason, because running the thesis desk spends the operator's own agent
+   budget and machine. `webapp.py --serve` builds the same page with DESK.enabled
+   and a per-run token, and there the buttons drive the real CLIs. Ratifying is
+   deliberately absent from the HTTP surface: conviction is asked of a human at the
+   Gate (FR9), and a browser button is exactly the wrong door for it. */
+function deskBlock(actions, note){
+  const acts = actions.map(a => `<button class="act" data-act="${esc(a.id)}"
+      ${a.symbol ? `data-symbol="${esc(a.symbol)}"` : ''}
+      ${DESK.enabled ? '' : 'disabled'}
+      title="${esc(DESK.enabled ? (a.hint || '') : 'local setup required')}">${esc(a.label)}</button>`).join('');
+  const why = DESK.enabled
+    ? (note || '')
+    : `<b>Local setup required.</b> These run the desk on your own machine with your
+       own agent (Claude Code or OpenClaw) — this public page is a read-only mirror,
+       so nobody spends anyone else's tokens or compute. To enable them:
+       <code>git clone</code> the repo, then
+       <code>python webapp.py --serve --sec-data … --enrich-cache … --theses-dir …</code>
+       — see <a href="https://github.com/qpec/invest-ai/blob/main/QUICKSTART.md"
+       target="_blank" rel="noopener">QUICKSTART.md</a>.`;
+  return `<div class="desk"><h4>Desk actions</h4><div class="acts">${acts}</div>
+    <div class="why">${why}</div><div class="desklog" style="display:none"></div></div>`;
+}
+
+function bindDeskActions(root){
+  $$('.act', root).forEach(btn => btn.addEventListener('click', () => {
+    if (!DESK.enabled || btn.disabled) return;
+    runAction(btn, btn.dataset.act, btn.dataset.symbol || null);
+  }));
+}
+
+async function runAction(btn, action, symbol){
+  const box = btn.closest('.desk'), log = $('.desklog', box);
+  const others = $$('.act', box);
+  others.forEach(b => { b.disabled = true; });
+  btn.classList.add('busy');
+  log.style.display = 'block';
+  log.innerHTML = `<b>${esc(action)}${symbol ? ' ' + esc(symbol) : ''}</b>\n`;
+  const write = (line, bad) => {
+    log.innerHTML += bad ? `<span class="bad">${esc(line)}</span>\n` : esc(line) + '\n';
+    log.scrollTop = log.scrollHeight;
+  };
+  try {
+    const started = await fetch('api/run', {
+      method: 'POST', headers: {'Content-Type': 'application/json',
+                                'X-Desk-Token': DESK.token},
+      body: JSON.stringify({action, symbol})});
+    const job = await started.json();
+    if (!started.ok || job.error){ write(job.error || 'refused', true); return; }
+    let seen = 0;
+    for (;;){
+      await new Promise(r => setTimeout(r, 900));
+      const res = await fetch(`api/job?id=${encodeURIComponent(job.id)}`,
+                              {headers: {'X-Desk-Token': DESK.token}});
+      const st = await res.json();
+      (st.lines || []).slice(seen).forEach(l => write(l));
+      seen = (st.lines || []).length;
+      if (st.done){
+        write(st.ok ? '— finished —' : `— exited ${st.code} —`, !st.ok);
+        if (st.ok && (action === 'refresh' || action === 'thesis'))
+          write('Rebuild the page (Rebuild site) to see the new numbers.');
+        break;
+      }
+    }
+  } catch (err){
+    write(String(err && err.message || err), true);
+  } finally {
+    btn.classList.remove('busy');
+    others.forEach(b => { b.disabled = !DESK.enabled; });
+  }
 }
 
 function compositesBlock(c){
@@ -1143,6 +1258,16 @@ function trigCard(t){
   </div>`;
 }
 function renderThesisTab(){
+  const deskHost = $('#thesisDesk');
+  if (deskHost){
+    deskHost.innerHTML = deskBlock([
+      {id: 'thesis-batch', label: '✎ Draft the top 1%',
+       hint: 'work orders for every top-1% name without one'},
+      {id: 'rebuild', label: '⟳ Rebuild site', hint: 'regenerate this page from disk'},
+    ], `A batch writes one work order per name; your agent executes them and
+        <code>record</code> refuses anything it cannot validate.`);
+    bindDeskActions(deskHost);
+  }
   const host = $('#thesisTop tbody');
   host.innerHTML = S.thesis.top.map(t => `
     <tr data-s="${esc(t.sym)}" tabindex="0">
@@ -1195,6 +1320,18 @@ const md_inline = s => {
   return out;
 };
 function renderMonitorTab(){
+  const deskHost = $('#monitorDesk');
+  if (deskHost){
+    deskHost.innerHTML = deskBlock([
+      {id: 'monitor-brief', label: '📝 Write the work order',
+       hint: 'the week\'s judgement questions from the committed theses'},
+      {id: 'monitor-run', label: '▶ Run the monitor',
+       hint: 'refresh monitored names, then evaluate every trigger'},
+    ], `The run refreshes each monitored name from EDGAR first, then tests only the
+        pre-committed triggers. A question your agent has not answered is reported
+        UNCHECKED — never guessed.`);
+    bindDeskActions(deskHost);
+  }
   const host = $('#committedHost');
   if (!S.monitor.committed.length){
     host.innerHTML = `<div class="empty"><b>No committed theses yet</b>
@@ -1454,6 +1591,7 @@ TEMPLATE = """<!DOCTYPE html>
   case, and at least three <i>pre-committed invalidation triggers</i>. Python re-checks
   every rule mechanically and refuses what it cannot verify. The draft then waits for the
   owner at the Gate: conviction and the buy decision are never generated (FR9).</p>
+  <div id="thesisDesk"></div>
   <div class="card">
     <div class="hd"><h2>The three-beat seam</h2><span class="muted">no LLM API client anywhere — the agent harness IS the runtime</span></div>
     <div class="beats">
@@ -1483,6 +1621,7 @@ TEMPLATE = """<!DOCTYPE html>
   unanswered one is reported <b>UNCHECKED</b>, loudly. A tripped break trigger means the
   standing advice is to sell, ignoring cost basis (FR7) — and nothing here ever executes
   a trade (FR11). “No action needed” is the celebrated outcome (FR4).</p>
+  <div id="monitorDesk"></div>
   <div class="kpis">
     <div class="kpi"><label>Committed theses</label><b>__KPI_COMMITTED__</b><div class="d">only the Gate puts them here</div></div>
     <div class="kpi"><label>Next weekly run</label><b class="num" style="font-size:18px" id="nextRun"></b><div class="d">Saturdays, with the Watchdog</div></div>
@@ -1579,6 +1718,184 @@ def write_site(model: dict, out_dir: Path, *, shard: bool = True) -> Path:
     return out
 
 
+# --- the desk server: the SAME page, with its actions live (owner-directed 2026-08-05) ---
+#
+# The published site is a read-only mirror on purpose — running the desk spends the
+# operator's own agent budget and machine, so a stranger's click must never start a
+# job. `--serve` is the other half: identical HTML, plus a capability token, bound to
+# loopback, driving the very CLIs the QUICKSTART documents.
+#
+# What this surface deliberately CANNOT do: ratify. Conviction and circle-of-competence
+# are asked of a human at the Gate (FR9), and a browser button — reachable by a stray
+# click or a cross-origin request — is the wrong door for the one irreversible step.
+
+DESK_ACTIONS = {
+    # id: (argv builder, needs a symbol)
+    "refresh": (lambda a, sym: [sys.executable, "enrich.py", "--force-refresh",
+                                "--symbols", sym, "--cache", a.enrich_cache or ""], True),
+    "thesis": (lambda a, sym: [sys.executable, "thesis.py", "brief", sym,
+                               "--sec-data", a.sec_data, "--universe", a.universe,
+                               "--as-of", a.as_of, "--theses-dir", a.theses_dir or "theses"]
+               + (["--prices", a.prices] if a.prices else []), True),
+    "thesis-batch": (lambda a, sym: [sys.executable, "thesis.py", "batch",
+                                     "--sec-data", a.sec_data, "--universe", a.universe,
+                                     "--as-of", a.as_of,
+                                     "--theses-dir", a.theses_dir or "theses"]
+                     + (["--prices", a.prices] if a.prices else []), False),
+    "monitor-brief": (lambda a, sym: [sys.executable, "monitor.py", "brief",
+                                      "--theses-dir", a.theses_dir or "theses",
+                                      "--as-of", a.as_of], False),
+    "monitor-run": (lambda a, sym: [sys.executable, "monitor.py", "run",
+                                    "--sec-data", a.sec_data, "--universe", a.universe,
+                                    "--as-of", a.as_of,
+                                    "--theses-dir", a.theses_dir or "theses"]
+                    + (["--prices", a.prices] if a.prices else [])
+                    + (["--enrich-cache", a.enrich_cache] if a.enrich_cache else []), False),
+    "rebuild": (None, False),          # handled in-process, no subprocess
+}
+
+
+def desk_command(action: str, symbol, args, known) -> tuple[list | None, str | None]:
+    """(argv, error) for one desk action — the whole validation surface, at module level
+    so it is testable without a socket. A symbol must be one THIS build screened: the
+    argv is executed without a shell, but an unvalidated string in an argument list is
+    still an unvalidated string, and 'refuse what you cannot check' is the house rule."""
+    spec = DESK_ACTIONS.get(action)
+    if spec is None:
+        return None, f"unknown action {action!r}"
+    builder, needs_symbol = spec
+    if needs_symbol and (not symbol or symbol not in known):
+        return None, "unknown symbol"
+    if action == "refresh" and not getattr(args, "enrich_cache", None):
+        return None, "--enrich-cache was not given to --serve"
+    if builder is None:
+        return None, None                      # in-process action (rebuild)
+    return builder(args, symbol), None
+
+
+def serve(args) -> int:
+    """Serve the desk locally with its actions enabled. Loopback only, token-gated."""
+    import http.server
+    import secrets
+    import subprocess
+    import threading
+    import urllib.parse
+
+    token = secrets.token_urlsafe(24)
+    out_dir = Path(args.out_dir)
+    jobs: dict[str, dict] = {}
+    lock = threading.Lock()
+    here = Path(__file__).resolve().parent
+
+    def build():
+        model = assemble(sec_data=args.sec_data, prices_dir=args.prices,
+                         universe=args.universe, as_of=args.as_of,
+                         enrich_cache=args.enrich_cache, theses_dir=args.theses_dir)
+        model["desk"] = {"enabled": True, "token": token}
+        write_site(model, out_dir, shard=not args.no_shards)
+        return model
+
+    model = build()
+    known = {row["s"] for row in model["rows"]}
+
+    def start(action: str, symbol: str | None) -> dict:
+        argv, error = desk_command(action, symbol, args, known)
+        if error:
+            return {"error": error}
+        job_id = secrets.token_urlsafe(8)
+        with lock:
+            jobs[job_id] = {"lines": [], "done": False, "ok": False, "code": None}
+
+        def run():
+            try:
+                if action == "rebuild":
+                    build()
+                    with lock:
+                        jobs[job_id].update(lines=["site rebuilt from disk"],
+                                            done=True, ok=True, code=0)
+                    return
+                with lock:
+                    jobs[job_id]["lines"].append("$ " + " ".join(
+                        Path(part).name if part == sys.executable else part
+                        for part in argv))
+                proc = subprocess.Popen(argv, cwd=here, stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT, text=True,
+                                        bufsize=1)
+                for line in proc.stdout:
+                    with lock:
+                        jobs[job_id]["lines"].append(line.rstrip())
+                code = proc.wait()
+                with lock:
+                    jobs[job_id].update(done=True, ok=(code == 0), code=code)
+            except Exception as error:  # noqa: BLE001 — a failed job must report, not vanish
+                with lock:
+                    jobs[job_id]["lines"].append(f"{type(error).__name__}: {error}")
+                    jobs[job_id].update(done=True, ok=False, code=-1)
+
+        threading.Thread(target=run, daemon=True).start()
+        return {"id": job_id}
+
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, directory=str(out_dir), **kw)
+
+        def log_message(self, fmt, *a):        # quiet: this is a desk tool, not a server
+            pass
+
+        def _json(self, payload, status=200):
+            body = json.dumps(payload).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _authorized(self) -> bool:
+            # Token + a Host allowlist: the token stops any other page on this machine
+            # from driving the desk, the Host check stops DNS rebinding from turning a
+            # visited website into a caller.
+            host = (self.headers.get("Host") or "").split(":")[0]
+            if host not in ("localhost", "127.0.0.1", "[::1]", "::1"):
+                return False
+            return secrets.compare_digest(self.headers.get("X-Desk-Token") or "", token)
+
+        def do_POST(self):
+            if self.path.split("?")[0].rstrip("/") != "/api/run":
+                return self._json({"error": "not found"}, 404)
+            if not self._authorized():
+                return self._json({"error": "not authorized"}, 403)
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                payload = json.loads(self.rfile.read(length) or b"{}")
+            except (ValueError, json.JSONDecodeError):
+                return self._json({"error": "bad request"}, 400)
+            result = start(str(payload.get("action") or ""),
+                           (payload.get("symbol") or None))
+            return self._json(result, 200 if "id" in result else 400)
+
+        def do_GET(self):
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path.rstrip("/") == "/api/job":
+                if not self._authorized():
+                    return self._json({"error": "not authorized"}, 403)
+                job_id = urllib.parse.parse_qs(parsed.query).get("id", [""])[0]
+                with lock:
+                    job = jobs.get(job_id)
+                    snapshot = dict(job, lines=list(job["lines"])) if job else None
+                return self._json(snapshot or {"error": "unknown job"},
+                                  200 if snapshot else 404)
+            return super().do_GET()
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", args.serve), Handler)
+    print(f"desk → http://127.0.0.1:{args.serve}/   (loopback only; actions are live)")
+    print("     ctrl-c to stop")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nstopped")
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--sec-data", required=True)
@@ -1590,11 +1907,22 @@ def main(argv=None) -> int:
     parser.add_argument("--out-dir", default="../docs")
     parser.add_argument("--no-shards", action="store_true",
                         help="single-file build: embed pick/top details only")
+    parser.add_argument("--serve", type=int, metavar="PORT", nargs="?", const=8899,
+                        help="run the desk locally on 127.0.0.1:PORT with its actions "
+                             "ENABLED (default 8899). Without this the build is a "
+                             "read-only mirror: every action renders disabled.")
     args = parser.parse_args(argv)
+
+    if args.serve:
+        return serve(args)
 
     model = assemble(sec_data=args.sec_data, prices_dir=args.prices,
                      universe=args.universe, as_of=args.as_of,
                      enrich_cache=args.enrich_cache, theses_dir=args.theses_dir)
+    # A published build never carries a capability token: the actions exist in the DOM
+    # so a reader can see what the desk does, and are inert because this page is a
+    # mirror of someone else's machine.
+    model["desk"] = {"enabled": False}
     out = write_site(model, Path(args.out_dir), shard=not args.no_shards)
     size = out.stat().st_size / 1024
     print(f"{out}  ({size:,.0f} KB; {model['counts']['screened']} names, "
