@@ -40,6 +40,12 @@ DEFAULT_SOURCE = "auto"
 # decides what may become a market cap, and they must be free to differ.
 DEFAULT_MAX_AGE_DAYS = 10.0
 DEFAULT_BUDGET = 800
+# A symbol no vendor will serve leaves no file, and "no file" is indistinguishable from
+# "never tried" -- so it sorts to the front of the plan every night, forever. The tombstone
+# is how the sweep remembers that it already asked. A month, because delistings and ticker
+# changes do get resolved, and a permanent exclusion would need someone to notice it.
+MISS_SUFFIX = ".miss"
+MISS_RETRY_DAYS = 30.0
 
 
 def _universe_symbols(path: Path) -> list[str]:
@@ -75,6 +81,15 @@ def newest_bar(path: Path) -> str | None:
     return max(bars) if bars else None
 
 
+def _miss_day(path: Path) -> str | None:
+    """The date a tombstone was written, or None when it is unreadable — an unreadable
+    tombstone must expire immediately rather than park a symbol on a corrupt file."""
+    try:
+        return path.read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
 def _age_days(day: str | None, today: str) -> float:
     if day is None:
         return float("inf")
@@ -101,11 +116,25 @@ def refresh(grid_dir: Path, universe_symbols, *, priority=(), budget: int = DEFA
 
     ages = {}
     for sym in {s.upper() for s in universe_symbols} | {p.upper() for p in priority}:
-        ages[sym] = _age_days(newest_bar(grid_dir / f"{sym}.json"), today)
+        age = _age_days(newest_bar(grid_dir / f"{sym}.json"), today)
+        if age == float("inf"):
+            # No file. That is two different facts wearing the same face: never tried (fetch
+            # it first), or NO VENDOR CAN SERVE IT. A failure writes nothing, so an
+            # unservable name stays infinitely stale and re-leads the plan every night
+            # FOREVER -- measured against the real universe, ~760-814 of the 7,033 symbols
+            # are permanently unfetchable (delisted, foreign listings, pink sheets) against
+            # a nightly budget of 800. The grid would spend most of every night re-failing
+            # the same dead names and never converge. A tombstone parks them for a month.
+            miss = grid_dir / f"{sym}{MISS_SUFFIX}"
+            if miss.exists() and _age_days(_miss_day(miss), today) <= MISS_RETRY_DAYS:
+                age = -1.0        # sorts last, and never passes the staleness filter below
+        ages[sym] = age
 
     head = [s.upper() for s in priority if s.upper() in ages]
     seen = set(head)
     # Stalest first; a symbol with no file at all is infinitely stale and leads the rest.
+    # Thesis names are in `head` and bypass this filter entirely -- a tombstone can never
+    # park a name the monitor grades.
     rest = sorted((s for s in ages if s not in seen), key=lambda s: -ages[s])
     plan = head + [s for s in rest if ages[s] > max_age_days][:max(0, budget - len(head))]
 
@@ -117,17 +146,31 @@ def refresh(grid_dir: Path, universe_symbols, *, priority=(), budget: int = DEFA
             if not bars:
                 raise pricesrc.FetchFailed("no bars")
             splits = vendor.splits(sym)
+            # WHO served, and in WHAT BASIS -- asked per symbol, never of the handle. A run
+            # is mixed by construction (the ladder steps down mid-run), so the handle's last
+            # answer describes some OTHER symbol. pricesrc names this attribute `basis`;
+            # asking for `price_basis` (as the first cut of this module did) returned None
+            # for every file written, which pit reads back as "raw" -- a split-adjusted
+            # close labelled as-traded, the one confusion this module exists to prevent.
+            #
+            # Inside the try on purpose: checked_basis RAISES on an unrecognised
+            # declaration, and refusing one symbol must never abort the sweep.
+            served = getattr(vendor, "basis_for", None)
+            basis = pit.checked_basis(
+                served(sym) if served else getattr(vendor, "basis", None))
+            who = getattr(getattr(vendor, "served", None), "name", None) or \
+                getattr(vendor, "name", source)
         except Exception as error:                      # noqa: BLE001 - vendor-agnostic
             failed += 1
             problems.append(f"{sym}: {type(error).__name__}: {error}")
+            (grid_dir / f"{sym}{MISS_SUFFIX}").write_text(today, encoding="utf-8")
             continue
         payload = {pit.SYMBOL_KEY: sym, pit.BARS_KEY: bars, "splits": splits,
-                   "source": getattr(vendor, "name", source),
-                   "price_basis": getattr(vendor, "price_basis", None),
-                   "fetched": today}
+                   "source": who, "price_basis": basis, "fetched": today}
         tmp = grid_dir / f"{sym}.json.tmp"
         tmp.write_text(json.dumps(payload), encoding="utf-8")
         os.replace(tmp, grid_dir / f"{sym}.json")       # the file is old or new, never half
+        (grid_dir / f"{sym}{MISS_SUFFIX}").unlink(missing_ok=True)   # it serves again
         fetched += 1
 
     after = [_age_days(newest_bar(p), today) for p in grid_dir.glob("*.json")]
@@ -183,8 +226,10 @@ def main(argv: list[str] | None = None) -> int:
     priority = thesis_symbols(Path(args.theses_dir) if args.theses_dir else None)
     out = refresh(grid, symbols, priority=priority, budget=args.budget,
                   max_age_days=args.max_age_days, source=args.source, today=args.as_of)
-    # A sweep that fetched nothing it planned to is a broken vendor, not a quiet success.
-    return 1 if out["planned"] and not out["fetched"] else 0
+    # A sweep that failed at least as much as it fetched is a grid that has stopped
+    # converging, and exit 0 would keep that invisible: systemd's OnFailure alert is the
+    # only channel that reaches an owner with no shell, so the exit code IS the alarm.
+    return 1 if out["planned"] and out["failed"] >= out["fetched"] else 0
 
 
 if __name__ == "__main__":
