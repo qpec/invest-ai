@@ -58,6 +58,33 @@ ssh root@<ip> 'systemctl --no-pager status "agentcy-*" ; systemctl list-timers "
 | 12:00 | `scout-monitor-run` — force-refresh of monitored names, then trigger arithmetic + verdict ingestion (missing ⇒ UNCHECKED, loud) | mechanical |
 | 12:30 | `scout-site` — site rebuild → push `bot/site` (Pages deploys) + private state push | mechanical |
 
+## Upgrading a live box (new code, no rebuild)
+
+The box is a **reader** of the GitHub seam: it clones `main` at deploy time and
+never pulls again on its own. So merging to `main` does not change the box — one
+command does:
+
+```bash
+ssh root@<box> 'bash /opt/stock-agentcy/deploy/digitalocean/update.sh'
+```
+
+It fetches `main`, prints the commits it is taking, hard-resets, re-runs all three
+installers (idempotent), and reports unit health. Re-running the installers is the
+point rather than a precaution: a systemd unit added in the new commits — like
+`scout-desk.service` — would otherwise sit on disk unknown to systemd. It touches
+no secret and needs no environment, so it is safe to run from a shell you did not
+prepare. Rebuilding the droplet also works (cloud-init re-runs from stored
+`user_data`) but wipes the caches for no reason; prefer `update.sh`.
+
+On a box deployed *before* this script existed there is nothing to invoke yet, so
+the first upgrade pulls it into place and then runs it:
+
+```bash
+ssh root@<box> 'git -C /opt/stock-agentcy fetch origin main \
+  && git -C /opt/stock-agentcy reset --hard origin/main \
+  && bash /opt/stock-agentcy/deploy/digitalocean/update.sh'
+```
+
 ## The production desk UI (real data, your machine's browser)
 
 `scout-desk.service` runs the same page the public demo shows, with its actions
