@@ -43,6 +43,7 @@ import re
 import sys
 from pathlib import Path
 
+import deskwork
 import inversion  # noqa: F401 — build_rows runs it via picks
 import picks
 import pit
@@ -560,6 +561,15 @@ header.top{position:sticky;top:0;z-index:30;background:var(--page);
   line-height:1.5;color:var(--text2)}
 .desklog b{color:var(--text)}
 .desklog .bad{color:var(--crit)}
+.edit textarea{width:100%;box-sizing:border-box;min-height:90px;resize:vertical;
+  background:var(--surface);color:var(--text);border:1px solid var(--border);
+  border-radius:6px;padding:8px 10px;font:inherit;font-size:12.5px;line-height:1.55}
+.edit textarea.code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:11.5px;min-height:260px}
+.edit .row{display:flex;gap:8px;align-items:center;margin-top:7px;flex-wrap:wrap}
+.edit .msg{font-size:11.5px;color:var(--text2)}
+.edit .msg.bad{color:var(--crit)}
+.edit .msg.good{color:var(--good)}
 .stepper{display:flex;align-items:stretch;gap:0;max-width:1280px;margin:0 auto;
   padding:0 12px;overflow-x:auto}
 .step{display:flex;align-items:center;gap:10px;padding:10px 14px 12px;cursor:pointer;
@@ -1051,6 +1061,9 @@ function renderPanel(sym, row, d){
     ], `Drafting writes <code>theses/drafts/${esc(sym)}/</code>. Ratifying stays at the
         Gate, on purpose: <code>python thesis.py ratify ${esc(sym)}</code> asks you for
         conviction and circle-of-competence (FR9).`)}
+    ${editBlock('note', sym, (S.notes || {})[sym] || '', {
+      title: 'Desk note', placeholder: 'why this name is on the desk…',
+      hint: 'yours; never scored, never published'})}
     <h3>Registry metrics <span style="text-transform:none;letter-spacing:0">(what a thesis trigger may test)</span></h3>
     ${regRows}
     <h3>The Owner's Scorecard — ${card.score ?? '—'}/${card.available_max ?? '—'} = ${card.pct ?? '—'}%</h3>
@@ -1072,6 +1085,73 @@ function renderPanel(sym, row, d){
       ${sc.note ? `<div style="color:var(--text2);margin-top:4px">${esc(sc.note)}</div>` : ''}
     </div>`;
   bindDeskActions($('#pBody'));
+  bindEdits($('#pBody'));
+}
+
+/* ---------- editing (production desk only) ----------
+   Desk CONTENT is editable — notes and draft prose/triggers — through the same
+   validation the CLIs use: `save_thesis_draft` runs thesis.validate and refuses an
+   untestable trigger from a human exactly as it does from an agent. Conviction and
+   ratification are not here, and cannot be: that is the Gate (FR9). */
+function editBlock(kind, symbol, value, opts){
+  const o = opts || {};
+  if (!DESK.enabled){
+    return DESK.demo
+      ? `<div class="edit"><h4 style="margin:14px 0 6px;font-size:11px;
+          letter-spacing:.08em;text-transform:uppercase;color:var(--text2)">${esc(o.title || 'Edit')}</h4>
+         <textarea class="${o.code ? 'code' : ''}" readonly>${esc(value || '')}</textarea>
+         <div class="row"><span class="msg">Read-only in the demo — editing writes to
+           your own desk's files.</span></div></div>`
+      : '';
+  }
+  return `<div class="edit" data-kind="${esc(kind)}" data-symbol="${esc(symbol)}">
+    <h4 style="margin:14px 0 6px;font-size:11px;letter-spacing:.08em;
+        text-transform:uppercase;color:var(--text2)">${esc(o.title || 'Edit')}</h4>
+    <textarea class="${o.code ? 'code' : ''}" placeholder="${esc(o.placeholder || '')}"
+      >${esc(value || '')}</textarea>
+    <div class="row"><button class="act" data-save="1">Save</button>
+      <span class="msg">${esc(o.hint || '')}</span></div></div>`;
+}
+
+function bindEdits(root){
+  $$('.edit[data-kind]', root).forEach(box => {
+    const btn = $('[data-save]', box), area = $('textarea', box), msg = $('.msg', box);
+    if (!btn) return;
+    btn.addEventListener('click', async () => {
+      const kind = box.dataset.kind, symbol = box.dataset.symbol;
+      let body = {kind, symbol};
+      if (kind === 'thesis'){
+        try { body.thesis = JSON.parse(area.value); }
+        catch (err){
+          msg.className = 'msg bad';
+          msg.textContent = 'not valid JSON: ' + err.message;
+          return;
+        }
+      } else {
+        body.text = area.value;
+      }
+      btn.disabled = true; msg.className = 'msg'; msg.textContent = 'saving…';
+      try {
+        const res = await fetch('api/edit', {
+          method: 'POST', headers: {'Content-Type': 'application/json',
+                                    'X-Desk-Token': DESK.token},
+          body: JSON.stringify(body)});
+        const out = await res.json().catch(() => ({error: `HTTP ${res.status}`}));
+        if (out.error){
+          msg.className = 'msg bad';
+          msg.textContent = (out.problems || []).length
+            ? 'refused: ' + out.problems.join(' · ') : out.error;
+        } else {
+          msg.className = 'msg good';
+          msg.textContent = kind === 'thesis'
+            ? `saved · ${out.triggers} trigger(s) validated · Rebuild site to re-render`
+            : `saved (${out.chars} chars)`;
+        }
+      } catch (err){
+        msg.className = 'msg bad'; msg.textContent = String(err.message || err);
+      } finally { btn.disabled = false; }
+    });
+  });
 }
 
 /* The demo replays a recording at reading speed. It is deliberately the SAME code path
@@ -1384,6 +1464,9 @@ function renderThesisTab(){
           <div class="fbody prose">${d.report_html}</div></details>
         <h3>Pre-committed invalidation triggers (${(d.triggers || []).length})</h3>
         ${(d.triggers || []).map(trigCard).join('')}
+        ${editBlock('thesis', d.symbol, JSON.stringify(th, null, 2), {
+          title: 'Edit this draft', code: true,
+          hint: 'validated on save — an untestable trigger is refused, conviction is the Gate\'s (FR9)'})}
         <h3>Sources</h3>
         <ul style="font-size:12px">${(th.sources || []).map(s =>
           /^https?:\/\//.test(s)
@@ -1392,6 +1475,7 @@ function renderThesisTab(){
       </div></div>`;
   }).join('') || `<div class="card"><div class="empty"><b>No drafts yet</b>
       Run the batch below; each work order lands in theses/drafts/&lt;SYM&gt;/.</div></div>`;
+  bindEdits(host2);
 }
 const md_inline = s => {
   let out = esc(s);
@@ -1879,6 +1963,59 @@ def desk_command(action: str, symbol, args, known) -> tuple[list | None, str | N
     return builder(args, symbol), None
 
 
+def load_notes(theses_dir: Path | None) -> dict[str, str]:
+    """Desk notes, {SYMBOL: text}. Loaded ONLY by the served build — a static build never
+    calls this, so owner prose cannot reach a published page by construction rather than
+    by a stripping step someone might forget (the same reasoning as FR9 fields, one
+    level stricter because notes have no schema to police them)."""
+    base = Path(theses_dir or "theses") / "notes"
+    if not base.exists():
+        return {}
+    out = {}
+    for path in sorted(base.glob("*.md")):
+        try:
+            out[path.stem.upper()] = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+    return out
+
+
+def save_note(theses_dir: Path, symbol: str, text: str) -> dict:
+    """A free-text note beside a name. Owner prose, never scored, never published: it
+    lives in the state tree with the theses and is exactly what a desk needs for
+    'why I keep looking at this'."""
+    path = Path(theses_dir) / "notes" / f"{symbol}.md"
+    deskwork.write_atomic(path, text.strip() + "\n" if text.strip() else "")
+    return {"saved": str(path), "chars": len(text.strip())}
+
+
+def save_thesis_draft(theses_dir: Path, symbol: str, payload: dict) -> dict:
+    """Edit a DRAFT thesis through the same gate the agent's work goes through.
+
+    The owner may rewrite prose and re-tune triggers — that is what a desk is for — but
+    the rules do not soften for a human: `thesis.validate` refuses an untestable
+    trigger, an unknown metric or a forbidden field exactly as it does for the agent,
+    and nothing here can touch `theses/committed/` (ratification stays the interactive
+    Gate, FR9). A refused edit is reported and NOT written."""
+    draft = Path(theses_dir) / "drafts" / symbol / "thesis.json"
+    if not draft.exists():
+        return {"error": f"no draft for {symbol}"}
+    if not isinstance(payload, dict):
+        return {"error": "the edited thesis must be a JSON object"}
+    forbidden = [k for k in ("conviction", "circle_of_competence") if k in payload]
+    if forbidden:
+        # The one thing a browser must never write (FR9), said plainly rather than
+        # silently dropped — a silent drop teaches the wrong lesson about the seam.
+        return {"error": f"{', '.join(forbidden)} is the owner's at the Gate, never an "
+                         f"edit: run `python thesis.py ratify {symbol}`"}
+    payload = {**payload, "symbol": symbol}
+    problems = thesis_mod.validate(payload, symbol=symbol)
+    if problems:
+        return {"error": "refused", "problems": problems}
+    deskwork.write_atomic(draft, json.dumps(payload, indent=2))
+    return {"saved": str(draft), "triggers": len(payload.get("triggers") or [])}
+
+
 def serve(args) -> int:
     """Serve the desk locally with its actions enabled. Loopback only, token-gated."""
     import http.server
@@ -1922,6 +2059,7 @@ def serve(args) -> int:
                          universe=args.universe, as_of=args.as_of,
                          enrich_cache=args.enrich_cache, theses_dir=args.theses_dir)
         model["desk"] = {"enabled": True, "token": token}
+        model["notes"] = load_notes(Path(args.theses_dir) if args.theses_dir else None)
         write_site(model, out_dir, shard=not args.no_shards)
         return model
 
@@ -2008,15 +2146,31 @@ def serve(args) -> int:
         def do_POST(self):
             if not self._host_ok():
                 return self._json({"error": "bad host"}, 421)
-            if self.path.split("?")[0].rstrip("/") != "/api/run":
+            route = self.path.split("?")[0].rstrip("/")
+            if route not in ("/api/run", "/api/edit"):
                 return self._json({"error": "not found"}, 404)
             if not self._authorized():
                 return self._json({"error": "not authorized"}, 403)
             try:
                 length = int(self.headers.get("Content-Length") or 0)
+                if length > 2 * 1024 * 1024:      # a thesis is prose, not a payload dump
+                    return self._json({"error": "too large"}, 413)
                 payload = json.loads(self.rfile.read(length) or b"{}")
             except (ValueError, json.JSONDecodeError):
                 return self._json({"error": "bad request"}, 400)
+            if route == "/api/edit":
+                symbol = payload.get("symbol")
+                if symbol not in known:
+                    return self._json({"error": "unknown symbol"}, 400)
+                theses = Path(args.theses_dir or "theses")
+                kind = payload.get("kind")
+                if kind == "note":
+                    result = save_note(theses, symbol, str(payload.get("text") or ""))
+                elif kind == "thesis":
+                    result = save_thesis_draft(theses, symbol, payload.get("thesis"))
+                else:
+                    result = {"error": f"unknown edit kind {kind!r}"}
+                return self._json(result, 400 if result.get("error") else 200)
             result = start(str(payload.get("action") or ""),
                            (payload.get("symbol") or None))
             return self._json(result, 200 if "id" in result else 400)
