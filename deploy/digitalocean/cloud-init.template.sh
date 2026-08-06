@@ -103,6 +103,15 @@ run "clone qpec/invest-ai@main -> /opt/stock-agentcy" \
     git clone --branch main https://github.com/qpec/invest-ai.git /opt/stock-agentcy
 
 # --- 6. the three installers, each reported separately -----------------------
+# deploy/scout/install.sh enables scout-desk.service the moment it runs -- which is BEFORE
+# the data seed below. webapp.py exits 1 with nothing to build, and Restart=always/
+# RestartSec=10 loops it through `failed` every ~13s, each pass firing
+# OnFailure=agentcy-fail@ -- dozens of "unit FAILED" Telegrams to the owner's phone while
+# apt, npm and a 418 MB extract are still running. Mute just that alert for the install
+# window; the unit is restarted on real data at the end, and the mute is removed with it.
+mkdir -p /etc/systemd/system/scout-desk.service.d
+printf '[Unit]\nOnFailure=\n' > /etc/systemd/system/scout-desk.service.d/10-deploy-quiet.conf
+
 run "agentcy runtime (install.sh)" bash -c \
     'bash /opt/stock-agentcy/install.sh </dev/null'
 chown root:agentcy /etc/stock-agentcy/agentcy.env /etc/stock-agentcy/scout.env 2>/dev/null || true
@@ -128,10 +137,29 @@ if git_pat clone --depth 1 https://x-access-token@github.com/qpec/invest-ai-stat
     seed_fail=0
     for t in secdata prices enrich_cache; do
         parts=(/root/stateseed/batches/*/"$t".tar.gz.part-*)
-        [ -e "${parts[0]}" ] || { echo "no batch parts for $t"; continue; }
+        # A MISSING stream is a failed restore, not a skipped one. Reporting "OK bulk data
+        # restored" for a partial archive is the worst outcome available: the box looks
+        # healthy and the desk is empty.
+        [ -e "${parts[0]}" ] || { echo "no batch parts for $t"; seed_fail=1; continue; }
         mkdir -p "$SCOUTD/$t"
         cat "${parts[@]}" | tar xzf - -C "$SCOUTD/$t" || seed_fail=1
+        # The archives are not packed uniformly: prices.tar.gz carries ./prices/ (plus its
+        # own progress/failures logs) while secdata and enrich_cache pack flat. Extracting
+        # the first into $SCOUTD/prices therefore lands the files at prices/prices/*.json,
+        # where picks._load_prices globs "*.json" and finds NOTHING -- a box that comes up
+        # active, scores ~1,900 companies, and shows a market cap for none of them.
+        # Conditional, so it is a no-op for the flat streams and stays correct if the
+        # packing is ever normalised.
+        if [ -d "$SCOUTD/$t/$t" ]; then
+            mv "$SCOUTD/$t/$t"/* "$SCOUTD/$t"/ && rmdir "$SCOUTD/$t/$t"
+        fi
     done
+    # Count what actually landed. "The tar exited 0" is not the same claim as "the desk has
+    # data", and only the second one is worth reporting outward.
+    np=$(ls "$SCOUTD"/prices/*.json 2>/dev/null | wc -l)
+    ns=$(ls "$SCOUTD"/secdata/*.csv 2>/dev/null | wc -l)
+    [ "$np" -gt 100 ] && [ "$ns" -ge 1 ] || seed_fail=1
+    note "seed counts: prices=$np secdata=$ns"
     [ -d /root/stateseed/state/theses/drafts ] && {
         mkdir -p "$SCOUTD/theses/drafts"
         cp -a /root/stateseed/state/theses/drafts/. "$SCOUTD/theses/drafts/" || true; }
@@ -144,13 +172,42 @@ else
     note "SEED PENDING: invest-ai-state unreachable — weekly jobs degraded until seeded"
 fi
 
+# The desk builds its page ONCE, at startup (webapp.serve calls build() a single time), so
+# the instance started before the seed is serving whatever existed then -- nothing. Restore
+# the failure alert and restart it on the data that now exists.
+rm -f /etc/systemd/system/scout-desk.service.d/10-deploy-quiet.conf
+rmdir /etc/systemd/system/scout-desk.service.d 2>/dev/null || true
+systemctl daemon-reload
+run "desk UI restarted on seeded data" systemctl restart scout-desk.service
+
 # --- 8. status collection (facts, no secrets) --------------------------------
+# scout-desk is Type=exec, which reports "active" the instant execve succeeds -- so
+# is-active alone would report a crash-looping desk as healthy, and the desk is the one
+# thing this deploy exists to deliver. Ask it for a page instead. It builds the whole
+# universe before it listens, so allow four minutes.
+DESK_CODE=000
+for _ in $(seq 1 24); do
+    DESK_CODE=$(curl -s -o /dev/null -w '%{http_code}' -m 5 http://127.0.0.1:8899/ || echo 000)
+    [ "$DESK_CODE" = "200" ] && break
+    sleep 10
+done
 {
     echo
-    echo "== desk UI: $(systemctl is-active scout-desk.service 2>&1) "\
-"(loopback :${SCOUT_DESK_PORT:-8899}, reach with ssh -N -L 8899:127.0.0.1:8899) =="
+    # First line, because Telegram truncates at 3300 chars and this box has a NEW address:
+    # without it the owner cannot open the tunnel at all.
+    echo "== box: $(curl -s -m 5 http://169.254.169.254/metadata/v1/interfaces/public/0/ipv4/address) =="
+    echo "== desk UI: $(systemctl is-active scout-desk.service 2>&1), HTTP $DESK_CODE, "\
+"restarts $(systemctl show scout-desk.service -p NRestarts --value 2>/dev/null) "\
+"(ssh -N -L 8899:127.0.0.1:8899) =="
     echo "== bot daemon: $(systemctl is-active agentcy-bot.service 2>&1) =="
-    echo "== judgement auth: $([ -s /etc/stock-agentcy/openclaw.env ] && echo 'token installed' || echo 'PENDING') =="
+    # The env file is written unconditionally by the heredoc above, so testing that it is
+    # non-empty tests nothing -- a placeholder would report "token installed". Test the
+    # token's SHAPE.
+    echo "== judgement auth: $(case "$(sed -n 's/^CLAUDE_CODE_OAUTH_TOKEN=//p' \
+        /etc/stock-agentcy/openclaw.env 2>/dev/null)" in
+        sk-ant-*) echo 'token installed';;
+        *) echo 'PENDING — the bot will ask for it over Telegram';;
+    esac) =="
     echo
     echo "== enabled timers =="
     systemctl list-timers 'agentcy-*' 'scout-*' --no-pager 2>&1
