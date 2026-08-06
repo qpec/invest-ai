@@ -235,6 +235,73 @@ def append_earnings_calendar(conn, *, yf_ticker: str, expected_date: str,
                                         "fetched_at": fetched_at, "run_id": run_id})
 
 
+# --- Metric Evidence Ledger -------------------------------------------------------------
+
+def append_metric_definition(conn, row: Mapping) -> int:
+    """Append a versioned metric definition, returning the existing id on exact replay."""
+    allowed = frozenset({"metric_key", "formula_version", "unit", "requirement",
+                         "freshness_policy", "active_from", "active_until", "created_at"})
+    values = _checked(row, allowed, "metric_definition")
+    conn.execute(
+        "INSERT OR IGNORE INTO metric_definition"
+        " (metric_key, formula_version, unit, requirement, freshness_policy, active_from,"
+        "  active_until, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        tuple(values.get(name) for name in (
+            "metric_key", "formula_version", "unit", "requirement", "freshness_policy",
+            "active_from", "active_until", "created_at")),
+    )
+    found = conn.execute(
+        "SELECT definition_id FROM metric_definition"
+        " WHERE metric_key=? AND formula_version=?",
+        (values["metric_key"], values["formula_version"]),
+    ).fetchone()
+    return int(found[0])
+
+
+def append_source_observation(conn, row: Mapping) -> int:
+    """Append an immutable source fact, returning the id on payload replay."""
+    allowed = frozenset({"ticker", "source", "source_key", "accession", "value", "unit",
+                         "currency", "period_start", "period_end", "filed_at", "fetched_at",
+                         "payload_hash", "refresh_run_id"})
+    values = _checked(row, allowed, "source_observation")
+    names = ("ticker", "source", "source_key", "accession", "value", "unit", "currency",
+             "period_start", "period_end", "filed_at", "fetched_at", "payload_hash",
+             "refresh_run_id")
+    conn.execute(
+        "INSERT OR IGNORE INTO source_observation"
+        " (ticker, source, source_key, accession, value, unit, currency, period_start,"
+        "  period_end, filed_at, fetched_at, payload_hash, refresh_run_id)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        tuple(values.get(name) for name in names),
+    )
+    found = conn.execute(
+        "SELECT observation_id FROM source_observation"
+        " WHERE ticker=? AND source=? AND source_key=? AND period_end=? AND payload_hash=?",
+        (values["ticker"], values["source"], values["source_key"], values["period_end"],
+         values["payload_hash"]),
+    ).fetchone()
+    return int(found[0])
+
+
+def append_metric_observation(conn, row: Mapping) -> int:
+    """Append one derived metric observation."""
+    allowed = frozenset({"metric_definition_id", "ticker", "value", "status", "confidence",
+                         "as_of", "calculated_at", "refresh_run_id", "source_policy_id"})
+    return _insert(conn, "metric_observation",
+                   _checked(row, allowed, "metric_observation"))
+
+
+def append_metric_inputs(conn, metric_observation_id: int,
+                         source_observation_ids: Sequence[int]) -> None:
+    """Attach exact source lineage to one derived observation."""
+    for source_observation_id in source_observation_ids:
+        _insert(conn, "metric_input", {
+            "metric_observation_id": metric_observation_id,
+            "source_observation_id": source_observation_id,
+            "input_role": "input",
+        })
+
+
 def append_thesis(conn, *, thesis_id: str, ticker: str, origin: str,
                   created_at: str) -> None:
     """Insert immutable thesis identity."""
