@@ -318,7 +318,11 @@ def _share_trend_pct(shares_series: list) -> float | None:
     prior (fallback: oldest), annualized by the actual span. None with <2 usable
     observations or a span under ~3 months (annualizing noise). Callers pass the
     SPLIT-ADJUSTED series (adjusted_shares_series) — a raw series reads a split as
-    dilution."""
+    dilution.
+
+    Freshness is NOT checked here: the series' age against `as_of` is knowable only to the
+    data layer, which stamps `shares_series_stale` on the bundle. `_evaluate` refuses on
+    that flag before calling this, so a decade-old series never reaches the arithmetic."""
     ser = sorted((d, v) for d, raw in shares_series or []
                  if (v := _num(raw)) is not None and v > 0)
     if len(ser) < 2:
@@ -563,7 +567,10 @@ def _evaluate(bundle: dict) -> dict:
     sbc_pct = (100.0 * ttm["sbc"] / rev
                if ttm["sbc"] is not None and rev is not None and rev > 0 else None)
 
-    share_trend = _share_trend_pct(shares_adj)
+    # A share series that stopped years ago describes a company that no longer exists in
+    # that shape; annualizing its last two points would report ancient dilution as current
+    # (pit.as_of_bundle sets the flag, and owns the threshold).
+    share_trend = None if bundle.get("shares_series_stale") else _share_trend_pct(shares_adj)
     accrual = (100.0 * (ttm["ni_incl_nci"] - ttm["ocf"]) / rev
                if None not in (ttm["ni_incl_nci"], ttm["ocf"])
                and rev is not None and rev > 0 else None)

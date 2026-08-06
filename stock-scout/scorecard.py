@@ -216,7 +216,8 @@ _MISSING_REASON = {
     "owner_fcf_yield": "no market cap, own EV <= 0, or no TTM owner-FCF",
     "net_debt_ebitda": "TTM EBITDA is 0 or missing, or debt/cash missing",
     "sbc": "no TTM SBC or revenue",
-    "share_count_trend": "no usable share-count series",
+    "share_count_trend": ("no usable share-count series — absent, inconsistent, or its "
+                          "newest observation too old to describe this year"),
     "accruals": "no TTM net income incl. NCI, OCF or revenue",
 }
 

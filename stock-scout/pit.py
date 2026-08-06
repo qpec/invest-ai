@@ -862,6 +862,16 @@ def as_of_bundle(facts: dict, symbol: str, meta: dict, as_of, prices: dict,
                            f"(cover page {shares_day}); market cap refused rather than "
                            f"built from a stale count")
             shares_day, shares, shares_basis = None, None, "stale-refused"
+    # The rule above protects the market CAP, which multiplies one share count by a fresh
+    # price. It does not protect the share-count TREND, which reads the same series and was
+    # left unguarded: a series that stops in 2016 yields a 2015->2016 trend reported as this
+    # year's dilution. Measured on the universe 2026-08-06: ANIP -80.9%/yr off a 4,907-day-
+    # old series, CMCSA +0.19%/yr off 6,062 days. That number is a scored criterion AND a
+    # legal thesis-trigger metric, so a stale one can carry a break trigger.
+    #
+    # The verdict travels rather than the age, so the threshold stays in this file only:
+    # freshness is the data layer's judgement, arithmetic is the decision layer's.
+    series_age = shares_age_days(series[-1][0] if series else None, as_of)
     market_cap, split_unadjusted = market_cap_at(
         shares_day, shares, px, basis, (splits or {}).get(symbol) or {}, as_of)
     meta = meta or {}
@@ -874,6 +884,8 @@ def as_of_bundle(facts: dict, symbol: str, meta: dict, as_of, prices: dict,
         "yahoo_ev": None, "price": px,
         "shares_series": series, "shares_basis": shares_basis,
         "shares_as_of": shares_day, "shares_age_days": age, "shares_note": shares_note,
+        "shares_series_age_days": series_age,
+        "shares_series_stale": series_age is not None and series_age > SHARES_MAX_AGE_DAYS,
         "splits": splits_as_of((splits or {}).get(symbol) or {}, as_of),
         "disclosures": disclosures(facts, as_of),
         "supplements": supplement,

@@ -203,6 +203,31 @@ def test_dilution_21_pct_hard_veto():
     assert "dilution veto" in row["veto"]["reason"]
 
 
+def test_a_stale_share_series_refuses_the_trend_rather_than_annualizing_it():
+    """§4.3 M reads the same dei series the market cap does, and until 2026-08-06 nothing
+    stopped it reading one that died years ago. A 21%/yr dilution veto sourced from
+    2015->2016 observations is a verdict about a company that no longer exists in that
+    shape; the data layer's `shares_series_stale` makes it absent instead."""
+    b = base_bundle()
+    b["shares_series"] = [["2024-12-31", 100e6], ["2025-12-31", 121e6]]
+    assert run_one(b)["grade"] == "VETOED"          # fresh: the veto is real (above)
+
+    b["shares_series_stale"] = True
+    row = run_one(b)
+    assert row["grade"] != "VETOED"
+    assert row["legs"]["m_shares"]["raw"] is None
+    assert "no usable share-count series" in row["legs"]["m_shares"]["note"]
+
+
+def test_a_bundle_without_the_freshness_flag_is_left_alone():
+    # Producers that predate the flag (the grade.py cache) must keep grading; a missing
+    # flag means "unknown", and unknown is not a licence to refuse every name.
+    b = base_bundle()
+    b["shares_series"] = [["2024-12-31", 100e6], ["2025-12-31", 121e6]]
+    b.pop("shares_series_stale", None)
+    assert run_one(b)["grade"] == "VETOED"
+
+
 def test_dilution_15_pct_penalty_not_veto():
     b = base_bundle()
     b["shares_series"] = [["2024-12-31", 100e6], ["2025-12-31", 115e6]]

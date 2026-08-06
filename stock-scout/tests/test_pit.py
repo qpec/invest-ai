@@ -730,3 +730,31 @@ class TestShareCountFreshness:
                               "form": "10-Q", "val": 5.0}])
         b = pit.as_of_bundle(facts, "X", None, "2026-08-01", {})
         assert b["shares_as_of"] == "2025-06-30" and b["shares_age_days"] == 397
+        assert b["shares_series_age_days"] == 397 and b["shares_series_stale"] is False
+
+    def test_a_repaired_market_cap_still_declares_the_series_stale(self):
+        """The guard the 2026-08-05 fix did NOT provide, and the one that matters most.
+
+        When the weighted-average count repairs the market cap, the name grades normally —
+        but the dei SERIES behind the share-count TREND is still years dead, and the trend
+        is both a scored criterion and a legal thesis-trigger metric. Measured on the real
+        universe: CMCSA's series is 6,062 days old and yielded +0.19%/yr, UPS 6,014 days
+        and +3.63%/yr — numbers about a company a decade ago, reported as this year's."""
+        facts = self._facts(
+            [{"end": "2010-02-17", "filed": "2010-02-26", "form": "10-K", "val": 713_924_267.0}],
+            weighted=[{"start": "2026-04-01", "end": "2026-06-30", "filed": "2026-07-30",
+                       "form": "10-Q", "val": 851_000_000.0}])
+        b = pit.as_of_bundle(facts, "UPS", None, "2026-08-01",
+                             {"UPS": {"2026-07-27": {"close": 100.0}}})
+        assert b["market_cap"] == pytest.approx(851_000_000.0 * 100.0)   # cap is fine
+        assert b["shares_age_days"] < pit.SHARES_MAX_AGE_DAYS            # the POINT is fresh
+        assert b["shares_series_stale"] is True                          # the SERIES is not
+        assert b["shares_series_age_days"] > 5000
+
+    def test_an_empty_series_reports_an_unknown_age_rather_than_stale(self):
+        # No observations at all is a different fact from observations that stopped, and
+        # the trend already reports absent for it. Calling it "stale" would invent a date.
+        facts = self._facts([])
+        b = pit.as_of_bundle(facts, "X", None, "2026-08-01", {})
+        assert b["shares_series_age_days"] is None
+        assert b["shares_series_stale"] is False
