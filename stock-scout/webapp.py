@@ -529,6 +529,10 @@ header.top{position:sticky;top:0;z-index:30;background:var(--page);
 .masthead{display:flex;align-items:center;gap:14px;padding:12px 20px 8px;
   max-width:1280px;margin:0 auto}
 .masthead h1{font-size:15px;font-weight:600;margin:0;letter-spacing:.01em}
+.demobar{padding:7px 20px;font-size:12px;background:var(--accent);color:#fff;
+  display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.demobar b{font-weight:600}
+.demobar a{color:#fff;text-decoration:underline}
 .notice{padding:5px 20px;font-size:11.5px;color:var(--text2);
   border-top:1px solid var(--border);background:var(--page)}
 .notice b{color:var(--text)}
@@ -1070,6 +1074,31 @@ function renderPanel(sym, row, d){
   bindDeskActions($('#pBody'));
 }
 
+/* The demo replays a recording at reading speed. It is deliberately the SAME code path
+   the live desk uses to paint output — a demo that renders differently from the thing
+   it demonstrates is a brochure, not a demo. */
+async function replayAction(btn, action, symbol){
+  const key = jobKey(action, symbol);
+  const lines = (DESK.playback || {})[action] || ['(nothing recorded for this action)'];
+  const others = $$('.act', btn.closest('.desk'));
+  others.forEach(b => { b.disabled = true; });
+  btn.classList.add('busy');
+  JOBLOG.set(key, {lines: [{text: `${action}${symbol ? ' ' + symbol : ''} · replay`}],
+                   live: true});
+  paintLog(key);
+  for (const line of lines){
+    await new Promise(r => setTimeout(r, 420));
+    JOBLOG.get(key).lines.push({text: line});
+    paintLog(key);
+  }
+  await new Promise(r => setTimeout(r, 300));
+  JOBLOG.get(key).lines.push({text: '— end of recording · nothing was executed —'});
+  JOBLOG.get(key).live = false;
+  paintLog(key);
+  btn.classList.remove('busy');
+  others.forEach(b => { b.disabled = false; });
+}
+
 /* ---------- desk actions ----------
    The published site is a READ-ONLY mirror: every action is rendered disabled with
    the reason, because running the thesis desk spends the operator's own agent
@@ -1078,18 +1107,27 @@ function renderPanel(sym, row, d){
    deliberately absent from the HTTP surface: conviction is asked of a human at the
    Gate (FR9), and a browser button is exactly the wrong door for it. */
 function deskBlock(actions, note){
+  const clickable = DESK.enabled || DESK.demo;
   const acts = actions.map(a => `<button class="act" data-act="${esc(a.id)}"
       ${a.symbol ? `data-symbol="${esc(a.symbol)}"` : ''}
-      ${DESK.enabled ? '' : 'disabled'}
-      title="${esc(DESK.enabled ? (a.hint || '') : 'local setup required')}">${esc(a.label)}</button>`).join('');
-  const why = DESK.enabled
+      ${clickable ? '' : 'disabled'}
+      title="${esc(clickable ? (DESK.demo ? 'replays a recording — nothing executes'
+                                          : (a.hint || ''))
+                             : 'local setup required')}">${esc(a.label)}</button>`).join('');
+  const why = DESK.demo
+    ? `<b>Visual demo — nothing is executing.</b> These buttons replay the real output
+       each action printed on this sample data${DESK.captured ? ' (recorded ' +
+       esc(DESK.captured) + ')' : ''}; a static page has nothing to run, and running the
+       desk spends its operator's own subscription and machine. To drive it for real,
+       set up your own in a few minutes — see
+       <a href="https://github.com/qpec/invest-ai/blob/main/QUICKSTART.md"
+       target="_blank" rel="noopener">QUICKSTART.md</a>.`
+    : DESK.enabled
     ? (note || '')
     : `<b>Local setup required.</b> These run the desk on your own machine with your
-       own agent (Claude Code or OpenClaw) — this public page is a read-only mirror,
-       so nobody spends anyone else's tokens or compute. To enable them:
-       <code>git clone</code> the repo, then
-       <code>python webapp.py --serve --sec-data … --enrich-cache … --theses-dir …</code>
-       — see <a href="https://github.com/qpec/invest-ai/blob/main/QUICKSTART.md"
+       own subscription agent (Claude Code / OpenClaw, or the Codex CLI) — this public
+       page is a read-only mirror, so nobody spends anyone else's tokens or compute.
+       See <a href="https://github.com/qpec/invest-ai/blob/main/QUICKSTART.md"
        target="_blank" rel="noopener">QUICKSTART.md</a>.`;
   // One log element per action, keyed so a job that outlives this render (the operator
   // opened another symbol) repaints into the new DOM instead of shouting into a
@@ -1109,8 +1147,11 @@ function bindDeskActions(root){
       if (entry.live){ btn.classList.add('busy'); btn.disabled = true; }
     }
     btn.addEventListener('click', () => {
-      if (!DESK.enabled || btn.disabled) return;
-      runAction(btn, btn.dataset.act, btn.dataset.symbol || null);
+      if (btn.disabled) return;
+      const symbol = btn.dataset.symbol || null;
+      if (DESK.demo) return replayAction(btn, btn.dataset.act, symbol);
+      if (!DESK.enabled) return;
+      runAction(btn, btn.dataset.act, symbol);
     });
   });
 }
@@ -1536,6 +1577,7 @@ TEMPLATE = """<!DOCTYPE html>
 </head>
 <body>
 <header class="top">
+  __DEMOBAR__
   <div class="masthead">
     <h1>Invest AI</h1>
     <span class="sub">the desk · as of <b id="asOf" class="num"></b></span>
@@ -1716,7 +1758,15 @@ python monitor.py run --sec-data &lt;dir&gt; --prices &lt;dir&gt; \\
 
 def render(model: dict, embed_details: dict) -> str:
     counts = model["counts"]
+    demo = (model.get("desk") or {}).get("demo")
+    demobar = ("" if not demo else
+               '<div class="demobar"><b>Visual demo — nothing here is executing.</b>'
+               '<span>Pregenerated sample data; the desk actions replay a recording of '
+               'their real output. Run it yourself for live numbers — '
+               '<a href="https://github.com/qpec/invest-ai/blob/main/QUICKSTART.md" '
+               'target="_blank" rel="noopener">QUICKSTART.md</a>.</span></div>')
     page = (TEMPLATE
+            .replace("__DEMOBAR__", demobar)
             .replace("__CSS__", CSS)
             .replace("__KPI_SCREENED__", f"{counts['screened']:,}")
             .replace("__KPI_PICKS__", str(counts["picks"]))
@@ -2010,6 +2060,10 @@ def main(argv=None) -> int:
                                           "--serve: a scratch dir unless given")
     parser.add_argument("--no-shards", action="store_true",
                         help="single-file build: embed pick/top details only")
+    parser.add_argument("--demo", action="store_true",
+                        help="public-demo build: a persistent 'nothing is executing' "
+                             "banner, and desk actions that REPLAY the recorded output "
+                             "in sample-data/demo-playback.json instead of running")
     parser.add_argument("--serve", type=int, metavar="PORT", nargs="?", const=8899,
                         help="run the desk locally on 127.0.0.1:PORT with its actions "
                              "ENABLED (default 8899). Without this the build is a "
@@ -2025,7 +2079,22 @@ def main(argv=None) -> int:
     # A published build never carries a capability token: the actions exist in the DOM
     # so a reader can see what the desk does, and are inert because this page is a
     # mirror of someone else's machine.
-    model["desk"] = {"enabled": False}
+    if args.demo:
+        # A recording, labelled as one. Missing/corrupt playback is not fatal: the demo
+        # still renders, and an action simply says nothing was recorded for it.
+        playback = {}
+        captured = None
+        book = Path(__file__).resolve().parent / "sample-data" / "demo-playback.json"
+        try:
+            loaded = json.loads(book.read_text(encoding="utf-8"))
+            playback, captured = loaded.get("actions") or {}, loaded.get("captured")
+        except (OSError, json.JSONDecodeError) as error:
+            print(f"no demo playback ({type(error).__name__}) — buttons will say so",
+                  file=sys.stderr)
+        model["desk"] = {"enabled": False, "demo": True,
+                         "playback": playback, "captured": captured}
+    else:
+        model["desk"] = {"enabled": False}
     out = write_site(model, Path(args.out_dir or "../docs"), shard=not args.no_shards)
     size = out.stat().st_size / 1024
     print(f"{out}  ({size:,.0f} KB; {model['counts']['screened']} names, "

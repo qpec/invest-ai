@@ -501,7 +501,7 @@ def ratify(symbol: str, *, theses_dir: Path = THESES_DIR, ask=input) -> dict:
         raise ValueError(
             f"the draft was written by {agent.get('id') or 'an unrecorded model'}, which "
             f"is not approved for desk work (best available only: "
-            f"{', '.join(deskwork.APPROVED_MODELS)}). Re-run the work order on an "
+            f"{', '.join(deskwork.approved_ids())}). Re-run the work order on an "
             f"approved model.")
     print(f"  {deskwork.model_note(agent)}")
 

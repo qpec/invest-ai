@@ -69,6 +69,8 @@ chown root:agentcy "$ETC/scout.env"; chmod 0640 "$ETC/scout.env"
 chmod 0755 "$CODE"/deploy/scout/*.sh
 MECH_UNITS=(scout-refresh scout-scrape scout-monitor-brief scout-monitor-run
             scout-site scout-backup)
+# The desk UI is a long-running service, not a timer: installed here, enabled below.
+install -m 0644 "$CODE/deploy/systemd/scout-desk.service" /etc/systemd/system/
 MECH_FILES=()
 for u in "${MECH_UNITS[@]}"; do
     install -m 0644 "$CODE/deploy/systemd/$u.service" "$CODE/deploy/systemd/$u.timer" \
@@ -80,6 +82,7 @@ systemctl daemon-reload
 systemctl enable --now scout-refresh.timer scout-scrape.timer \
                        scout-monitor-brief.timer scout-monitor-run.timer \
                        scout-site.timer scout-backup.timer
+systemctl enable --now scout-desk.service
 
 # --- 5. data seed check (the box needs the bulk export to score anything) ----
 if [ -z "$(ls -A "$SCOUT/secdata" 2>/dev/null)" ]; then

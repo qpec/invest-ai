@@ -38,7 +38,49 @@ ORDER_NAME = "WORK-ORDER.md"
 # There is deliberately NO override flag. An escape hatch on this gate would be operated by
 # the agent, and the agent is the thing being constrained. When a better model ships, the
 # owner edits this one constant — a code change, in a file under review, journalled by git.
-APPROVED_MODELS = ("claude-opus-5",)
+#
+# Two providers, because the runtime is a SUBSCRIPTION and the owner may hold either
+# (2026-08-05): Claude Pro/Max driven through Claude Code or OpenClaw, or ChatGPT
+# driven through the Codex CLI. Keyed by provider so "best available" stays a
+# per-provider judgement rather than one list that silently blesses a weak model from
+# the other vendor.
+#
+# An EMPTY tuple means "this provider has no approved model yet" and every artifact
+# from it is refused — refuse-never-guess applies to the gate itself. The owner fills
+# it in after checking what their own subscription's best model actually is; a wrong
+# guess here would quietly authorise second-rate work.
+APPROVED_MODELS = {
+    "anthropic": ("claude-opus-5",),
+    "openai": (),
+}
+
+# How a model id announces its provider. Checked longest-prefix-first so a future
+# "claude-…"-prefixed OpenAI model (or vice versa) cannot be mis-attributed silently.
+_MODEL_PREFIXES = (
+    ("claude-", "anthropic"),
+    ("gpt-", "openai"),
+    ("o1", "openai"),
+    ("o3", "openai"),
+    ("o4", "openai"),
+    ("codex", "openai"),
+)
+
+
+def provider_of(model_id: str | None) -> str | None:
+    """The provider a model id belongs to, or None when it announces nothing we know.
+    An unknown provider is never assumed to be the approved one."""
+    if not model_id:
+        return None
+    lowered = model_id.strip().lower()
+    for prefix, provider in _MODEL_PREFIXES:
+        if lowered.startswith(prefix):
+            return provider
+    return None
+
+
+def approved_ids() -> tuple[str, ...]:
+    """Every approved model across providers — for messages, never for matching."""
+    return tuple(m for models in APPROVED_MODELS.values() for m in models)
 
 # The harness transcript is a big append-only file; the model is on every assistant message,
 # so the last one is the model running right now.
@@ -113,29 +155,46 @@ def resolve_model(declared: str | None = None, *,
     model_id = seen or declared
     provenance = "observed" if seen else ("declared" if declared else None)
 
+    provider = provider_of(model_id)
+    approved_here = APPROVED_MODELS.get(provider or "", ())
+
     if model_id is None:
         problems.append(
             "no model recorded: this harness keeps no readable transcript, so pass "
             "`--model <your model id>`. A thesis whose author is unknown cannot be "
             "told apart from one written by the cheapest model available.")
-    elif model_id not in APPROVED_MODELS:
+    elif provider is None:
+        problems.append(
+            f"model {model_id!r} announces no provider this desk knows — it is neither "
+            f"an Anthropic nor an OpenAI id by prefix. Unknown provenance is refused, "
+            f"never assumed approved; the OWNER extends deskwork._MODEL_PREFIXES.")
+    elif not approved_here:
+        problems.append(
+            f"provider {provider!r} has no approved model yet, so {model_id!r} is "
+            f"refused. The owner's rule is best available only, and the OWNER (not you) "
+            f"fills deskwork.APPROVED_MODELS[{provider!r}] after checking what their "
+            f"subscription's best model actually is.")
+    elif model_id not in approved_here:
         problems.append(
             f"model {model_id!r} is not approved for desk work — the owner's rule is best "
-            f"available only, currently {', '.join(APPROVED_MODELS)}. Re-run this task on "
-            f"an approved model, or have the OWNER (not you) widen "
+            f"available only, currently {', '.join(approved_here)} for {provider}. Re-run "
+            f"this task on an approved model, or have the OWNER (not you) widen "
             f"deskwork.APPROVED_MODELS.")
 
-    return ({"id": model_id, "provenance": provenance,
-             "approved": bool(model_id) and model_id in APPROVED_MODELS}, problems)
+    return ({"id": model_id, "provider": provider, "provenance": provenance,
+             "approved": bool(model_id) and model_id in approved_here}, problems)
 
 
 def model_note(info: dict) -> str:
     """One line naming the model and how confidently, for a report a human will read."""
     if not info or not info.get("id"):
         return "model: UNRECORDED"
+    who = f"{info['id']}"
+    if info.get("provider"):
+        who += f" ({info['provider']})"
     if info.get("provenance") == "observed":
-        return f"model: {info['id']} (read from the harness transcript)"
-    return f"model: {info['id']} (declared by the agent, NOT independently verified)"
+        return f"model: {who} (read from the harness transcript)"
+    return f"model: {who} (declared by the agent, NOT independently verified)"
 
 
 def write_atomic(path: Path, text: str):

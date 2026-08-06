@@ -19,7 +19,7 @@ import scoring
 import thesis
 
 
-APPROVED = deskwork.APPROVED_MODELS[0]
+APPROVED = deskwork.APPROVED_MODELS["anthropic"][0]
 
 
 @pytest.fixture(autouse=True)
@@ -34,8 +34,9 @@ def _fixed_model(monkeypatch):
 
 def agent_block(model=None, provenance="observed"):
     model = APPROVED if model is None else model
-    return {"id": model, "provenance": provenance,
-            "approved": model in deskwork.APPROVED_MODELS}
+    return {"id": model, "provider": deskwork.provider_of(model),
+            "provenance": provenance,
+            "approved": model in deskwork.approved_ids()}
 
 
 # --- Fixture thesis material --------------------------------------------------------------
@@ -665,8 +666,8 @@ class TestModelGateAtTheSeams:
     def test_record_stamps_the_model_onto_the_draft(self, tmp_path):
         self._agent_writes(tmp_path)
         doc = thesis.record("AAA", theses_dir=tmp_path)
-        assert doc["agent"] == {"id": APPROVED, "provenance": "observed",
-                                "approved": True}
+        assert doc["agent"] == {"id": APPROVED, "provider": "anthropic",
+                                "provenance": "observed", "approved": True}
 
     def test_record_refuses_an_unapproved_model_and_says_why_on_disk(self, tmp_path,
                                                                      monkeypatch):
@@ -734,3 +735,49 @@ class TestModelGateAtTheSeams:
                     as_of="2026-08-08", reports_dir=tmp_path / "reports")
         rendered = (tmp_path / "reports" / "monitor-2026-08-08.md").read_text()
         assert APPROVED in rendered and "harness transcript" in rendered
+
+
+class TestTwoProviderModelGate:
+    """(the autouse fixture pins observed_model; these tests override it to None so the
+    DECLARED id is what the gate judges)"""
+
+    @pytest.fixture(autouse=True)
+    def _no_transcript(self, monkeypatch):
+        monkeypatch.setattr(deskwork, "observed_model", lambda transcript=None: None)
+
+    """The runtime is a SUBSCRIPTION (2026-08-05): Claude or ChatGPT, never an API key.
+    'Best available' therefore reads per provider — one flat list would let a weak model
+    from the other vendor inherit the approval of a strong one."""
+
+    def test_provider_is_read_from_the_id(self):
+        assert deskwork.provider_of("claude-opus-5") == "anthropic"
+        assert deskwork.provider_of("gpt-5.2") == "openai"
+        assert deskwork.provider_of("o3-pro") == "openai"
+        assert deskwork.provider_of("llama-3") is None      # unknown, never assumed
+
+    def test_unknown_provider_is_refused_not_assumed(self):
+        info, problems = deskwork.resolve_model("llama-3", transcript=None)
+        assert info["approved"] is False
+        assert any("announces no provider" in p for p in problems)
+
+    def test_a_provider_with_no_approved_list_is_refused_loudly(self, monkeypatch):
+        monkeypatch.setattr(deskwork, "APPROVED_MODELS",
+                            {"anthropic": ("claude-opus-5",), "openai": ()})
+        info, problems = deskwork.resolve_model("gpt-5.2", transcript=None)
+        assert info["approved"] is False and info["provider"] == "openai"
+        assert any("no approved model yet" in p for p in problems)
+
+    def test_an_approved_openai_model_passes_once_the_owner_lists_it(self, monkeypatch):
+        monkeypatch.setattr(deskwork, "APPROVED_MODELS",
+                            {"anthropic": ("claude-opus-5",), "openai": ("gpt-5.2",)})
+        info, problems = deskwork.resolve_model("gpt-5.2", transcript=None)
+        assert info["approved"] is True and info["provider"] == "openai"
+        assert problems == []
+        assert "openai" in deskwork.model_note(info)
+
+    def test_cross_provider_approval_does_not_leak(self, monkeypatch):
+        monkeypatch.setattr(deskwork, "APPROVED_MODELS",
+                            {"anthropic": ("claude-opus-5",), "openai": ("gpt-5.2",)})
+        info, problems = deskwork.resolve_model("claude-haiku-9", transcript=None)
+        assert info["approved"] is False
+        assert any("not approved" in p and "anthropic" in p for p in problems)

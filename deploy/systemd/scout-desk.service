@@ -1,0 +1,26 @@
+[Unit]
+Description=scout production desk UI (loopback only; reach it over an SSH tunnel)
+Wants=network-online.target
+After=network-online.target
+OnFailure=agentcy-fail@%n.service
+
+[Service]
+Type=exec
+User=agentcy
+EnvironmentFile=/etc/stock-agentcy/scout.env
+WorkingDirectory=/opt/stock-agentcy/stock-scout
+ExecStart=/opt/stock-agentcy/deploy/scout/desk.sh
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/stock-agentcy/scout
+PrivateTmp=false
+# Loopback only: the owner tunnels in (ssh -L 8899:127.0.0.1:8899). There is no public
+# port and therefore no authentication surface of our own to get wrong — SSH is the
+# authentication, and it is the one every other box operation already uses.
+IPAddressAllow=localhost
+IPAddressDeny=any
+
+[Install]
+WantedBy=multi-user.target

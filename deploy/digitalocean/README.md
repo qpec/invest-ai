@@ -58,6 +58,17 @@ ssh root@<ip> 'systemctl --no-pager status "agentcy-*" ; systemctl list-timers "
 | 12:00 | `scout-monitor-run` — force-refresh of monitored names, then trigger arithmetic + verdict ingestion (missing ⇒ UNCHECKED, loud) | mechanical |
 | 12:30 | `scout-site` — site rebuild → push `bot/site` (Pages deploys) + private state push | mechanical |
 
+## The production desk UI (real data, your machine's browser)
+
+`scout-desk.service` runs the same page the public demo shows, with its actions
+live, bound to loopback on the box. Reach it over an SSH tunnel — no public port,
+and SSH is the authentication:
+
+```bash
+ssh -N -L 8899:127.0.0.1:8899 root@<box>     # leave running
+# then open http://127.0.0.1:8899/ in your browser
+```
+
 Nightly: `agentcy-populate` 01:30, `scout-refresh` 02:15 (rolling EDGAR sweep —
 thesis names always first, then the stalest of the whole universe, budgeted via
 `SCOUT_REFRESH_BUDGET`), `agentcy-backup` 03:30, `scout-backup` 03:45.

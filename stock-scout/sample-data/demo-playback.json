@@ -1,0 +1,36 @@
+{
+ "captured": "2026-08-06",
+ "symbol": "CROX",
+ "note": "real output of each action on the bundled sample data",
+ "actions": {
+  "refresh": [
+   "$ python enrich.py --force-refresh --symbols CROX --cache \u2026/cache",
+   "CROX: refreshed",
+   "force refresh: 1 of 1"
+  ],
+  "thesis": [
+   "$ python thesis.py brief CROX --sec-data sample-data/secdata --prices sample-data/prices --universe sample-data/universe.csv --as-of 2026-08-06 --theses-dir \u2026/theses",
+   "CROX: work order -> \u2026/theses/drafts/CROX/WORK-ORDER.md",
+   "1 work order(s) written. Execute each one (read it, research, write the three artifacts), then `python thesis.py record <SYM>`."
+  ],
+  "thesis-batch": [
+   "$ python thesis.py batch --sec-data sample-data/secdata --prices sample-data/prices --universe sample-data/universe.csv --as-of 2026-08-06 --theses-dir \u2026/theses",
+   "top 1% of 13 screened = 1 names: CROX",
+   "CROX: work order -> \u2026/theses/drafts/CROX/WORK-ORDER.md",
+   "1 work order(s) written. Execute each one (read it, research, write the three artifacts), then `python thesis.py record <SYM>`."
+  ],
+  "monitor-brief": [
+   "$ python monitor.py brief --theses-dir \u2026/theses --as-of 2026-08-06",
+   "no judgement triggers among the committed theses \u2014 nothing to ask. Run `monitor.py run` for the mechanical checks."
+  ],
+  "monitor-run": [
+   "$ python monitor.py run --sec-data sample-data/secdata --prices sample-data/prices --universe sample-data/universe.csv --as-of 2026-08-06 --theses-dir \u2026/theses --reports-dir \u2026/reports",
+   "no verdicts supplied: event/narrative triggers will be UNCHECKED (`python monitor.py brief` writes the work order that produces them)",
+   "no committed theses \u2014 nothing to monitor"
+  ],
+  "rebuild": [
+   "$ webapp.py (in-process rebuild)",
+   "site rebuilt from disk"
+  ]
+ }
+}

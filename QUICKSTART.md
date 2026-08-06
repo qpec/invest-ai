@@ -13,10 +13,41 @@ is the last section.
 
 - [uv](https://docs.astral.sh/uv/) and git. Everything runs offline on the
   sample data; the enrichment tier needs plain internet (SEC EDGAR, no key).
-- For the judgement steps only: an agent harness — **Claude Code or OpenClaw**
-  with a Claude subscription. There is **no API key** anywhere in this system,
-  by design: the agent *is* the runtime, and plain Python validates everything
-  it hands back.
+- For the judgement steps: **a subscription-backed agent CLI** — see §0b. There
+  is **no API key** anywhere in this system, by design.
+
+## 0b. The subscription setup (do this once)
+
+The thesis desk is driven by an agent CLI you are **already paying a flat
+subscription for**, not by metered API calls. That is a deliberate cost
+decision: research and prose are the expensive part of this system, and a
+subscription makes them a fixed monthly cost instead of a per-token one.
+
+Pick one:
+
+| Subscription | CLI | One-time setup |
+|---|---|---|
+| **Claude** Pro / Max | [Claude Code](https://claude.com/claude-code) (or [OpenClaw](https://openclaw.ai) driving it) | `npm i -g @anthropic-ai/claude-code` → `claude login` |
+| **ChatGPT** Plus / Pro | [Codex CLI](https://developers.openai.com/codex/cli) | `npm i -g @openai/codex` → `codex login` (choose "Sign in with ChatGPT") |
+
+Then tell the desk which model did the work. The rule is **best available
+only**, enforced per provider in `stock-scout/deskwork.py`:
+
+```python
+APPROVED_MODELS = {
+    "anthropic": ("claude-opus-5",),
+    "openai": (),        # ← fill in your subscription's best model, then it is allowed
+}
+```
+
+An empty list means that provider is **refused**, loudly — the gate never
+guesses which model is good enough on your behalf. Where the harness keeps a
+readable transcript (Claude Code) the model is read from it rather than taken
+on the agent's word; elsewhere pass `--model <id>` and the record says
+`declared, NOT independently verified`.
+
+**Never set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`.** If one is set, you are
+paying per token for something your subscription already covers.
 
 ## 1. Install and prove it works
 
@@ -124,3 +155,15 @@ seam: code pulled from `main`, the site pushed to `bot/site` (GitHub Pages),
 private state archived to its own repo. `deploy/digitalocean/README.md` is the
 step-by-step; `docs/plans/2026-08-04-distributed-desk-architecture.md` is the
 full design with its security model.
+
+## 7. The two surfaces
+
+| Surface | Data | Actions | Where |
+|---|---|---|---|
+| **Public demo** ([live](https://qpec.github.io/invest-ai/)) | pregenerated sample | replay a recording, banner says nothing executes | GitHub Pages |
+| **Your desk** | your real data | live, token-gated | `webapp.py --serve` on loopback |
+
+Both come out of the same generator, so a UI change lands in both at once —
+`python webapp.py --demo …` builds the first, `--serve` runs the second. On the
+box the desk runs as `scout-desk.service` and you reach it with
+`ssh -N -L 8899:127.0.0.1:8899 root@<box>`.
