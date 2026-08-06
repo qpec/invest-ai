@@ -1,0 +1,45 @@
+OK   metadata service walled off (non-root)
+OK   apt base (git rsync curl)
+OK   uv
+OK   timezone Europe/Amsterdam
+OK   swapfile
+FAIL backup volume mount
+OK   secrets written (0600/0640)
+OK   clone qpec/invest-ai@main -> /opt/stock-agentcy
+OK   agentcy runtime (install.sh)
+OK   scout lane (deploy/scout/install.sh)
+OK   judgement lane (deploy/openclaw/install.sh)
+OK   universe.csv seed
+seed counts: prices=1875 secdata=4
+OK   bulk data restored from invest-ai-state
+OK   desk UI restarted on seeded data
+
+== box: 159.223.9.224 ==
+== desk UI: active, HTTP 000000, restarts 0 (ssh -N -L 8899:127.0.0.1:8899) ==
+== bot daemon: active ==
+== judgement auth: PENDING â the bot will ask for it over Telegram ==
+
+== enabled timers ==
+NEXT                                    LEFT LAST PASSED UNIT                      ACTIVATES
+Fri 2026-08-07 01:30:00 CEST              6h -         - agentcy-populate.timer    agentcy-populate.service
+Fri 2026-08-07 02:15:00 CEST              7h -         - scout-refresh.timer       scout-refresh.service
+Fri 2026-08-07 02:45:00 CEST              8h -         - scout-prices.timer        scout-prices.service
+Fri 2026-08-07 03:30:00 CEST              8h -         - agentcy-backup.timer      agentcy-backup.service
+Fri 2026-08-07 03:45:00 CEST              9h -         - scout-backup.timer        scout-backup.service
+Fri 2026-08-07 07:00:00 CEST             12h -         - agentcy-daily.timer       agentcy-daily.service
+Sat 2026-08-08 06:00:00 CEST       1 day 11h -         - scout-scrape.timer        scout-scrape.service
+Sat 2026-08-08 07:00:00 CEST       1 day 12h -         - scout-monitor-brief.timer scout-monitor-brief.service
+Sat 2026-08-08 07:30:00 CEST       1 day 12h -         - scout-verdicts.timer      scout-verdicts.service
+Sat 2026-08-08 08:00:00 CEST       1 day 13h -         - agentcy-weekly.timer      agentcy-weekly.service
+Sat 2026-08-08 12:00:00 CEST       1 day 17h -         - scout-monitor-run.timer   scout-monitor-run.service
+Sat 2026-08-08 12:30:00 CEST       1 day 17h -         - scout-site.timer          scout-site.service
+Thu 2026-10-01 08:30:00 CEST 1 month 25 days -         - agentcy-quarterly.timer   agentcy-quarterly.service
+
+13 timers listed.
+Pass --all to see loaded but inactive timers, too.
+
+== failed units ==
+  UNIT LOAD ACTIVE SUB DESCRIPTION
+
+0 loaded units listed.
+== disk: 41G free, swap: 2.0Gi ==
