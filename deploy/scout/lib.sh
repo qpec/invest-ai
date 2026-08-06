@@ -11,6 +11,13 @@ PY="$CODE/.venv/bin/python"
 SCOUT=/var/lib/stock-agentcy/scout
 AS_OF="$(date +%F)"
 
+# The §3.6 price grid. Defaulted rather than required: the installer creates the
+# directory, an EMPTY one loads as {} — byte-identical to running without prices — and a
+# populated one is the whole valuation pillar. Leaving this to an env var nobody set is
+# how the box came to build price-blind sites while the grid sat on disk beside it.
+# Override in scout.env only to point somewhere else.
+SCOUT_PRICES="${SCOUT_PRICES:-$SCOUT/prices}"
+
 # Git, without ever storing the PAT: the remote embeds only the username, and
 # askpass answers the password prompt from the environment of THIS process.
 export GIT_ASKPASS="$CODE/deploy/scout/git-askpass.sh"

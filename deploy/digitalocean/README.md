@@ -98,7 +98,9 @@ ssh -N -L 8899:127.0.0.1:8899 root@<box>     # leave running
 
 Nightly: `agentcy-populate` 01:30, `scout-refresh` 02:15 (rolling EDGAR sweep —
 thesis names always first, then the stalest of the whole universe, budgeted via
-`SCOUT_REFRESH_BUDGET`), `agentcy-backup` 03:30, `scout-backup` 03:45.
+`SCOUT_REFRESH_BUDGET`), `scout-prices` 02:45 (the §3.6 weekly price grid, same
+priority rule — without it market caps age silently and `pit.PRICE_MAX_AGE_DAYS`
+starts refusing them), `agentcy-backup` 03:30, `scout-backup` 03:45.
 Full design: `docs/plans/2026-08-04-distributed-desk-architecture.md`.
 
 ## First-run reality

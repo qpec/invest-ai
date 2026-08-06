@@ -751,6 +751,34 @@ class TestShareCountFreshness:
         assert b["shares_series_stale"] is True                          # the SERIES is not
         assert b["shares_series_age_days"] > 5000
 
+    def test_a_stale_price_grid_refuses_the_market_cap_too(self):
+        """The same rule with the operands swapped. Nothing in the repo ever refreshed the
+        price grid (prices.py is that producer, added 2026-08-06), so a box whose sweep had
+        stopped kept multiplying a months-old close by a current share count. Prices move
+        slowly, so the product stays plausible — which is what makes it dangerous."""
+        facts = self._facts([{"end": "2026-06-30", "filed": "2026-07-15",
+                              "form": "10-Q", "val": 1_000_000.0}])
+        b = pit.as_of_bundle(facts, "X", None, "2026-08-01",
+                             {"X": {"2026-04-10": {"close": 10.0}}})   # 113 days behind
+        assert b["price"] is None and b["market_cap"] is None
+        assert b["price_age_days"] == 113 and "stale close" in b["price_note"]
+
+    def test_a_price_inside_the_bound_is_used_and_dated(self):
+        facts = self._facts([{"end": "2026-06-30", "filed": "2026-07-15",
+                              "form": "10-Q", "val": 1_000_000.0}])
+        b = pit.as_of_bundle(facts, "X", None, "2026-08-01",
+                             {"X": {"2026-07-27": {"close": 10.0}}})
+        assert b["market_cap"] == pytest.approx(10_000_000.0)
+        assert b["price_as_of"] == "2026-07-27" and b["price_note"] is None
+
+    def test_price_at_itself_stays_unbounded_for_the_backtest(self):
+        # A series that simply stops is how backtest3 models a delisting, and booking the
+        # name out at its last known price is correct there. The bound is a market-cap
+        # rule, not a lookup rule.
+        grid = {"D": {"2024-08-02": {"close": 60.0}}}
+        assert pit.price_at(grid, "D", "2026-08-01") == 60.0
+        assert pit.price_point_at(grid, "D", "2026-08-01") == ("2024-08-02", 60.0)
+
     def test_an_empty_series_reports_an_unknown_age_rather_than_stale(self):
         # No observations at all is a different fact from observations that stopped, and
         # the trend already reports absent for it. Calling it "stale" would invent a date.

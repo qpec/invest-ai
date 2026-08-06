@@ -404,6 +404,8 @@ def assemble(*, sec_data: str, prices_dir: str | None, universe: str, as_of: str
             "mc": _round(bundle.get("market_cap"), 0),
             "shb": bundle.get("shares_basis"), "shn": bundle.get("shares_note"),
             "shd": bundle.get("shares_as_of"),
+            "pxd": bundle.get("price_as_of"), "pxa": bundle.get("price_age_days"),
+            "pxn": bundle.get("price_note"),
         }
 
     # Charts. Coverage before/after is measured across the ENRICHED names only, and the
@@ -1057,8 +1059,11 @@ function renderPanel(sym, row, d){
       ${d.shb ? pill('shares: ' + esc(d.shb) + (d.shd ? ' · ' + esc(d.shd) : ''),
                      d.shb === 'stale-refused' ? 'p-crit'
                      : d.shb === 'weighted-average' ? 'p-warn' : 'p-ghost') : ''}
+      ${d.pxd ? pill('price: ' + esc(d.pxd) + (d.pxa != null ? ` · ${d.pxa}d` : ''),
+                     d.pxn ? 'p-crit' : 'p-ghost') : ''}
     </div>
     ${d.shn ? `<div style="font-size:11.5px;color:var(--text2);margin-top:6px">${esc(d.shn)}</div>` : ''}
+    ${d.pxn ? `<div style="font-size:11.5px;color:var(--text2);margin-top:6px">${esc(d.pxn)}</div>` : ''}
     ${deskBlock([
       {id: 'refresh', symbol: sym, label: '↻ Refresh filings',
        hint: 'refetch this name from EDGAR now'},

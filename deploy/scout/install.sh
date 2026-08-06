@@ -77,7 +77,7 @@ chown root:agentcy "$ETC/scout.env"; chmod 0640 "$ETC/scout.env"
 # deploy/openclaw/install.sh, which installs it after its own prerequisites
 # (the openclaw user, the script chmods) exist.
 chmod 0755 "$CODE"/deploy/scout/*.sh
-MECH_UNITS=(scout-refresh scout-scrape scout-monitor-brief scout-monitor-run
+MECH_UNITS=(scout-refresh scout-prices scout-scrape scout-monitor-brief scout-monitor-run
             scout-site scout-backup)
 # The desk UI is a long-running service, not a timer: installed here, enabled below.
 install -m 0644 "$CODE/deploy/systemd/scout-desk.service" /etc/systemd/system/
@@ -89,7 +89,7 @@ for u in "${MECH_UNITS[@]}"; do
 done
 systemd-analyze verify "${MECH_FILES[@]}"
 systemctl daemon-reload
-systemctl enable --now scout-refresh.timer scout-scrape.timer \
+systemctl enable --now scout-refresh.timer scout-prices.timer scout-scrape.timer \
                        scout-monitor-brief.timer scout-monitor-run.timer \
                        scout-site.timer scout-backup.timer
 systemctl enable --now scout-desk.service

@@ -108,6 +108,14 @@ _SHARES_TAG = "EntityCommonStockSharesOutstanding"
 #      It is a period average rather than a point count — a few percent off, not ten
 #      times — so it is used and LABELLED, never silently substituted.
 SHARES_MAX_AGE_DAYS = 450            # cover pages are quarterly; >15 months is broken
+# The same rule read from the other side. `price_at` took the last bar at or before the
+# day with no bound at all, so a price grid whose refresh had stopped kept multiplying
+# months-old closes by fresh share counts and reporting the product as a market cap --
+# plausible-looking, because prices move slowly, and wrong in exactly the direction
+# nobody checks. Weekly bars: 45 days is six missed bars, which is a stopped schedule
+# rather than a quiet week. (prices.py owns the FETCH cadence; this owns what may become
+# a number, and the two are deliberately separate knobs.)
+PRICE_MAX_AGE_DAYS = 45
 _WEIGHTED_SHARES_TAGS = ("WeightedAverageNumberOfDilutedSharesOutstanding",
                          "WeightedAverageNumberOfSharesOutstandingBasic",
                          "WeightedAverageNumberOfDilutedSharesOutstandingBasic",
@@ -596,14 +604,29 @@ def price_at(prices: dict, symbol: str, day, field: str = DEFAULT_PRICE_FIELD) -
     """Last weekly bar at or before `day` from the §3.6 grid ({symbol: {date: bar}}), read
     on `field`: "close" (RAW, the only price that may multiply a share count) or
     "adj_close" (total return: NAV, forward returns, benchmark). None when the symbol has
-    no bar at or before `day`."""
+    no bar at or before `day`.
+
+    Deliberately UNBOUNDED, unlike the market-cap path. A series that simply stops is how
+    the backtest models a delisting, and booking that name out at its last known price is
+    the correct behaviour there. Staleness matters when a price is multiplied by a share
+    count, so the bound lives at that site (`price_point_at`, used by `as_of_bundle`)."""
+    day = _iso(day)
+    _, value = price_point_at(prices, symbol, day, field)
+    return value
+
+
+def price_point_at(prices: dict, symbol: str, day, field: str = DEFAULT_PRICE_FIELD
+                   ) -> tuple[str | None, float | None]:
+    """`price_at` with the bar's own date, which is what ages it. The date travels with the
+    price for the same reason it travels with the share count in `shares_point_at`: the
+    caller cannot judge a number it cannot date."""
     grid = prices.get(symbol) or {}
     day = _iso(day)
     best = None
     for bar in grid:
         if bar <= day and (best is None or bar > best):
             best = bar
-    return bar_value(grid[best], field) if best is not None else None
+    return (best, bar_value(grid[best], field)) if best is not None else (None, None)
 
 
 # ----------------------------------------------- §3.6 cache-file shapes (writer + reader)
@@ -837,7 +860,18 @@ def as_of_bundle(facts: dict, symbol: str, meta: dict, as_of, prices: dict,
         return None
     balance = _section(_balance_maps(facts, as_of))
     series = shares_series(facts, as_of)
-    px = price_at(prices, symbol, as_of, DEFAULT_PRICE_FIELD)   # the close field, never adj
+    # The close field, never adj — and dated, because it is about to be multiplied by a
+    # share count. A grid whose refresh has stopped keeps offering its last bar forever,
+    # and a July close times an October share count is the share-staleness defect with the
+    # operands swapped: the product looks plausible because prices move slowly.
+    price_day, px = price_point_at(prices, symbol, as_of, DEFAULT_PRICE_FIELD)
+    price_age = None if price_day is None else _days(price_day, _iso(as_of))
+    price_note = None
+    if px is not None and price_age is not None and price_age > PRICE_MAX_AGE_DAYS:
+        price_note = (f"newest price bar is {price_age}d old at {as_of} ({price_day}) — "
+                      f"market cap refused rather than built on a stale close; "
+                      f"run `prices.py refresh`")
+        px = None
     shares_day, shares = shares_point_at(series, as_of)
     shares_basis = "series"
     if shares is None:                    # empty/inconsistent series -> best count at as_of
@@ -882,6 +916,7 @@ def as_of_bundle(facts: dict, symbol: str, meta: dict, as_of, prices: dict,
         "market_cap": market_cap, "market_cap_basis": basis,
         "market_cap_split_unadjusted": split_unadjusted,
         "yahoo_ev": None, "price": px,
+        "price_as_of": price_day, "price_age_days": price_age, "price_note": price_note,
         "shares_series": series, "shares_basis": shares_basis,
         "shares_as_of": shares_day, "shares_age_days": age, "shares_note": shares_note,
         "shares_series_age_days": series_age,
