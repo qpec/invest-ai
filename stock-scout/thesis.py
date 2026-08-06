@@ -608,6 +608,22 @@ def _load_rows(args) -> tuple[list[dict], dict]:
     meta = picks._load_meta(Path(args.universe))
     prices = picks._load_prices(Path(args.prices) if args.prices else None)
     bundles = secsv.bundles(args.sec_data, args.as_of, meta=meta, prices=prices)
+    # The screened universe is bigger than the export (2026-08-05): a name the site
+    # shows from its cached companyfacts must be draftable too, or the desk would
+    # accept a work order for it and quietly write nothing.
+    cache = getattr(args, "enrich_cache", None)
+    if cache and Path(cache).exists():
+        import enrich
+        try:
+            have = {b["symbol"] for b in bundles}
+            extra, _pending = enrich.bootstrap_bundles(
+                [s for s in meta if s not in have], cache_dir=Path(cache),
+                ciks=enrich.cik_map_cached(Path(cache)), as_of=args.as_of,
+                meta=meta, prices=prices)
+            bundles = bundles + extra
+        except Exception as error:  # noqa: BLE001 — enrichment is a bonus, never a gate
+            print(f"enrichment unavailable ({type(error).__name__}: {error}) — "
+                  f"drafting from export names only", file=sys.stderr)
     scored = {r["symbol"]: r for r in scoring.score_universe(bundles)}
     rows = []
     for bundle in bundles:
@@ -633,6 +649,8 @@ def main(argv=None) -> int:
         p.add_argument("--universe", default="universe.csv")
         p.add_argument("--as-of", default=_dt.date.today().isoformat())
         p.add_argument("--theses-dir", default=str(THESES_DIR))
+        p.add_argument("--enrich-cache", help="tier-2 companyfacts cache: lets names "
+                                              "beyond the bulk export be drafted too")
         p.add_argument("--no-filings", action="store_true")
     for cmd, help_text in (("record", "validate what the agent wrote"),
                            ("ratify", "the Gate: the owner commits it (FR9)")):

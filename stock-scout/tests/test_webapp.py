@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import json
 
+from pathlib import Path
+
 import webapp
 
 
@@ -283,3 +285,17 @@ class TestDeskActions:
     def test_monitor_run_carries_the_enrichment_cache(self):
         argv, err = webapp.desk_command("monitor-run", None, self.Args(), set())
         assert err is None and "--enrich-cache" in argv and "ec" in argv
+
+    def test_thesis_actions_carry_the_enrichment_cache(self):
+        """Preflight: without it, drafting a bootstrapped name silently wrote nothing."""
+        for action in ("thesis", "thesis-batch"):
+            argv, err = webapp.desk_command(action, "AAPL", self.Args(), {"AAPL"})
+            assert err is None and "--enrich-cache" in argv
+
+    def test_serve_never_builds_into_the_published_tree(self, tmp_path, capsys):
+        """A served build carries a live token; the docs/ tree is the public mirror."""
+        class Args(self.Args):
+            serve = 8899
+            out_dir = str((Path(webapp.__file__).resolve().parent.parent / "docs"))
+        assert webapp.serve(Args()) == 2
+        assert "refusing to serve" in capsys.readouterr().err

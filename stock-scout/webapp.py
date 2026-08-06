@@ -38,6 +38,7 @@ import argparse
 import datetime as _dt
 import html
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -1090,28 +1091,58 @@ function deskBlock(actions, note){
        <code>python webapp.py --serve --sec-data … --enrich-cache … --theses-dir …</code>
        — see <a href="https://github.com/qpec/invest-ai/blob/main/QUICKSTART.md"
        target="_blank" rel="noopener">QUICKSTART.md</a>.`;
+  // One log element per action, keyed so a job that outlives this render (the operator
+  // opened another symbol) repaints into the new DOM instead of shouting into a
+  // detached node.
+  const logs = actions.map(a => `<div class="desklog" data-job="${
+    esc(jobKey(a.id, a.symbol))}" style="display:none"></div>`).join('');
   return `<div class="desk"><h4>Desk actions</h4><div class="acts">${acts}</div>
-    <div class="why">${why}</div><div class="desklog" style="display:none"></div></div>`;
+    <div class="why">${why}</div>${logs}</div>`;
 }
 
 function bindDeskActions(root){
-  $$('.act', root).forEach(btn => btn.addEventListener('click', () => {
-    if (!DESK.enabled || btn.disabled) return;
-    runAction(btn, btn.dataset.act, btn.dataset.symbol || null);
-  }));
+  $$('.act', root).forEach(btn => {
+    const key = jobKey(btn.dataset.act, btn.dataset.symbol || null);
+    const entry = JOBLOG.get(key);
+    if (entry){
+      paintLog(key);                       // replay a job's output after a re-render
+      if (entry.live){ btn.classList.add('busy'); btn.disabled = true; }
+    }
+    btn.addEventListener('click', () => {
+      if (!DESK.enabled || btn.disabled) return;
+      runAction(btn, btn.dataset.act, btn.dataset.symbol || null);
+    });
+  });
+}
+
+/* A running job's log lives here, not in the DOM: opening another symbol replaces the
+   panel's innerHTML, and output written to a detached node — including the failure — is
+   output the operator never sees. deskBlock() replays this on every render. */
+const JOBLOG = new Map();
+const jobKey = (action, symbol) => action + '|' + (symbol || '');
+
+function paintLog(key){
+  const el = $(`.desklog[data-job="${CSS.escape(key)}"]`);
+  const entry = JOBLOG.get(key);
+  if (!el || !entry) return;
+  el.style.display = 'block';
+  el.innerHTML = entry.lines.map(l =>
+    l.bad ? `<span class="bad">${esc(l.text)}</span>` : esc(l.text)).join('\n');
+  el.scrollTop = el.scrollHeight;
 }
 
 async function runAction(btn, action, symbol){
-  const box = btn.closest('.desk'), log = $('.desklog', box);
+  const box = btn.closest('.desk');
+  const key = jobKey(action, symbol);
   const others = $$('.act', box);
   others.forEach(b => { b.disabled = true; });
   btn.classList.add('busy');
-  log.style.display = 'block';
-  log.innerHTML = `<b>${esc(action)}${symbol ? ' ' + esc(symbol) : ''}</b>\n`;
+  JOBLOG.set(key, {lines: [{text: `${action}${symbol ? ' ' + symbol : ''}`}], live: true});
   const write = (line, bad) => {
-    log.innerHTML += bad ? `<span class="bad">${esc(line)}</span>\n` : esc(line) + '\n';
-    log.scrollTop = log.scrollHeight;
+    JOBLOG.get(key).lines.push({text: line, bad: !!bad});
+    paintLog(key);
   };
+  paintLog(key);
   try {
     const started = await fetch('api/run', {
       method: 'POST', headers: {'Content-Type': 'application/json',
@@ -1124,7 +1155,12 @@ async function runAction(btn, action, symbol){
       await new Promise(r => setTimeout(r, 900));
       const res = await fetch(`api/job?id=${encodeURIComponent(job.id)}`,
                               {headers: {'X-Desk-Token': DESK.token}});
-      const st = await res.json();
+      const st = await res.json().catch(() => ({error: `HTTP ${res.status}`}));
+      if (!res.ok || st.error){
+        write(`${st.error || 'HTTP ' + res.status} — the job may still be running; ` +
+              `check the terminal running --serve`, true);
+        break;
+      }
       (st.lines || []).slice(seen).forEach(l => write(l));
       seen = (st.lines || []).length;
       if (st.done){
@@ -1137,6 +1173,8 @@ async function runAction(btn, action, symbol){
   } catch (err){
     write(String(err && err.message || err), true);
   } finally {
+    const entry = JOBLOG.get(key);
+    if (entry) entry.live = false;
     btn.classList.remove('busy');
     others.forEach(b => { b.disabled = !DESK.enabled; });
   }
@@ -1710,11 +1748,27 @@ def write_site(model: dict, out_dir: Path, *, shard: bool = True) -> Path:
             key = symbol[0].lower() if symbol[:1].isalpha() else "0"
             shards.setdefault(key, {})[symbol] = detail
         for key, chunk in shards.items():
-            (data_dir / f"d-{key}.json").write_text(
-                json.dumps(chunk, ensure_ascii=False, separators=(",", ":")),
-                encoding="utf-8")
+            shard_tmp = data_dir / f".d-{key}.json.tmp"
+            try:
+                shard_tmp.write_text(
+                    json.dumps(chunk, ensure_ascii=False, separators=(",", ":")),
+                    encoding="utf-8")
+                os.replace(shard_tmp, data_dir / f"d-{key}.json")
+            except BaseException:
+                shard_tmp.unlink(missing_ok=True)
+                raise
+    # Atomic: the desk server serves this very directory while a `rebuild` rewrites it,
+    # and a truncate-then-write would hand a reader a blank page. The temp name is
+    # dot-prefixed and removed on failure so a crashed build can never be rsynced into
+    # the published site by deploy/scout/publish.sh.
     out = out_dir / "index.html"
-    out.write_text(render(model, inline), encoding="utf-8")
+    tmp = out_dir / ".index.html.tmp"
+    try:
+        tmp.write_text(render(model, inline), encoding="utf-8")
+        os.replace(tmp, out)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
     return out
 
 
@@ -1736,12 +1790,14 @@ DESK_ACTIONS = {
     "thesis": (lambda a, sym: [sys.executable, "thesis.py", "brief", sym,
                                "--sec-data", a.sec_data, "--universe", a.universe,
                                "--as-of", a.as_of, "--theses-dir", a.theses_dir or "theses"]
-               + (["--prices", a.prices] if a.prices else []), True),
+               + (["--prices", a.prices] if a.prices else [])
+               + (["--enrich-cache", a.enrich_cache] if a.enrich_cache else []), True),
     "thesis-batch": (lambda a, sym: [sys.executable, "thesis.py", "batch",
                                      "--sec-data", a.sec_data, "--universe", a.universe,
                                      "--as-of", a.as_of,
                                      "--theses-dir", a.theses_dir or "theses"]
-                     + (["--prices", a.prices] if a.prices else []), False),
+                     + (["--prices", a.prices] if a.prices else [])
+                     + (["--enrich-cache", a.enrich_cache] if a.enrich_cache else []), False),
     "monitor-brief": (lambda a, sym: [sys.executable, "monitor.py", "brief",
                                       "--theses-dir", a.theses_dir or "theses",
                                       "--as-of", a.as_of], False),
@@ -1778,14 +1834,38 @@ def serve(args) -> int:
     import http.server
     import secrets
     import subprocess
+    import tempfile
     import threading
     import urllib.parse
 
     token = secrets.token_urlsafe(24)
-    out_dir = Path(args.out_dir)
     jobs: dict[str, dict] = {}
+    inflight: dict[str, str] = {}          # at most one entry: job_id -> action
     lock = threading.Lock()
     here = Path(__file__).resolve().parent
+
+    # A served build carries a live capability and MUST NOT land in the tree that gets
+    # published — `--out-dir` defaults to the publish path for the static build, and a
+    # served page written there would commit a token and flip the public mirror's
+    # buttons to enabled (found by preflight review, reproduced).
+    published = (here.parent / "docs").resolve()
+    if args.out_dir is None:
+        args.out_dir = tempfile.mkdtemp(prefix="desk-site-")
+        print(f"building into {args.out_dir} (scratch; pass --out-dir to choose)")
+    out_dir = Path(args.out_dir).resolve()
+    if out_dir == published:
+        print("refusing to serve into the published docs/ tree: a served build carries "
+              "a live capability token. Pass --out-dir <scratch dir>.", file=sys.stderr)
+        return 2
+
+    # The page is assembled in THIS process (resolved against the shell's cwd) while the
+    # action subprocesses run with cwd=here, so every path argument is pinned to an
+    # absolute path once — otherwise a server started from anywhere else would read one
+    # directory and write another.
+    for field in ("sec_data", "prices", "universe", "enrich_cache", "theses_dir"):
+        value = getattr(args, field, None)
+        if value:
+            setattr(args, field, str(Path(value).resolve()))
 
     def build():
         model = assemble(sec_data=args.sec_data, prices_dir=args.prices,
@@ -1804,6 +1884,12 @@ def serve(args) -> int:
             return {"error": error}
         job_id = secrets.token_urlsafe(8)
         with lock:
+            # One desk job at a time: every action mutates the same theses/, cache and
+            # build directory, and two concurrent writers is a corrupted state, not a
+            # faster desk. (Two browser tabs each have their own disabled-button state.)
+            if inflight:
+                return {"error": f"busy: {next(iter(inflight.values()))} is still running"}
+            inflight[job_id] = action
             jobs[job_id] = {"lines": [], "done": False, "ok": False, "code": None}
 
         def run():
@@ -1831,6 +1917,9 @@ def serve(args) -> int:
                 with lock:
                     jobs[job_id]["lines"].append(f"{type(error).__name__}: {error}")
                     jobs[job_id].update(done=True, ok=False, code=-1)
+            finally:
+                with lock:
+                    inflight.pop(job_id, None)
 
         threading.Thread(target=run, daemon=True).start()
         return {"id": job_id}
@@ -1850,16 +1939,25 @@ def serve(args) -> int:
             self.end_headers()
             self.wfile.write(body)
 
+        def _host_ok(self) -> bool:
+            """DNS-rebinding guard, applied to EVERY request before a byte is served:
+            index.html carries the capability token, so a static GET is a
+            secret-bearing GET and must be gated exactly like /api/*."""
+            host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]")
+            return host in ("localhost", "127.0.0.1", "::1")
+
         def _authorized(self) -> bool:
-            # Token + a Host allowlist: the token stops any other page on this machine
-            # from driving the desk, the Host check stops DNS rebinding from turning a
-            # visited website into a caller.
-            host = (self.headers.get("Host") or "").split(":")[0]
-            if host not in ("localhost", "127.0.0.1", "[::1]", "::1"):
-                return False
+            # What the token actually defends: a page on ANOTHER ORIGIN in this browser
+            # cannot read the response of a loopback GET, so it cannot learn the token,
+            # so it cannot forge an /api/ call (a custom header also forces a preflight
+            # this server never approves). It is deliberately NOT a defence against
+            # another process running as this same user — such a process can already run
+            # `python thesis.py` directly, so there is no boundary there to defend.
             return secrets.compare_digest(self.headers.get("X-Desk-Token") or "", token)
 
         def do_POST(self):
+            if not self._host_ok():
+                return self._json({"error": "bad host"}, 421)
             if self.path.split("?")[0].rstrip("/") != "/api/run":
                 return self._json({"error": "not found"}, 404)
             if not self._authorized():
@@ -1874,6 +1972,8 @@ def serve(args) -> int:
             return self._json(result, 200 if "id" in result else 400)
 
         def do_GET(self):
+            if not self._host_ok():
+                return self._json({"error": "bad host"}, 421)
             parsed = urllib.parse.urlparse(self.path)
             if parsed.path.rstrip("/") == "/api/job":
                 if not self._authorized():
@@ -1904,7 +2004,10 @@ def main(argv=None) -> int:
     parser.add_argument("--as-of", default=_dt.date.today().isoformat())
     parser.add_argument("--enrich-cache", help="tier-2 companyfacts cache (enrich.py)")
     parser.add_argument("--theses-dir", help="theses/ for the Thesis + Monitor tabs")
-    parser.add_argument("--out-dir", default="../docs")
+    # No shared default: the static build publishes into ../docs, while --serve (which
+    # bakes a live capability token into the page) must never inherit that path.
+    parser.add_argument("--out-dir", help="static build: default ../docs; "
+                                          "--serve: a scratch dir unless given")
     parser.add_argument("--no-shards", action="store_true",
                         help="single-file build: embed pick/top details only")
     parser.add_argument("--serve", type=int, metavar="PORT", nargs="?", const=8899,
@@ -1923,7 +2026,7 @@ def main(argv=None) -> int:
     # so a reader can see what the desk does, and are inert because this page is a
     # mirror of someone else's machine.
     model["desk"] = {"enabled": False}
-    out = write_site(model, Path(args.out_dir), shard=not args.no_shards)
+    out = write_site(model, Path(args.out_dir or "../docs"), shard=not args.no_shards)
     size = out.stat().st_size / 1024
     print(f"{out}  ({size:,.0f} KB; {model['counts']['screened']} names, "
           f"{model['counts']['picks']} picks, {model['counts']['drafts']} draft(s))")
