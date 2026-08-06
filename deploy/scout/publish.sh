@@ -22,7 +22,11 @@ SITE_BRANCH="${SCOUT_SITE_BRANCH:-bot/site}"
 
 # --- 1. build ---------------------------------------------------------------
 cd "$SCOUT_DIR"
+# --demo: the published page shows the desk's REAL latest numbers, but its actions
+# replay a recording instead of running (a public button must never spend the
+# operator's subscription) and it carries the "nothing is executing" banner.
 "$PY" webapp.py \
+    --demo \
     --sec-data "$SCOUT/secdata" \
     --enrich-cache "$SCOUT/enrich_cache" \
     --theses-dir "$SCOUT/theses" \
@@ -73,7 +77,9 @@ else
     git checkout -B main
 fi
 mkdir -p state
-rsync -a --delete --exclude '*.tmp' "$SCOUT/theses/"  state/theses/
+# --exclude notes/: belt to the braces of notes living outside theses/ entirely — a box
+# upgraded from an older layout may still have them here, and this repo is public.
+rsync -a --delete --exclude '*.tmp' --exclude 'notes/' "$SCOUT/theses/"  state/theses/
 rsync -a --delete --exclude '*.tmp' "$SCOUT/reports/" state/reports/
 # The owner elected to keep the state repo PUBLIC (2026-08-05). FR9 still
 # binds: conviction and circle-of-competence are the owner's alone and never

@@ -672,3 +672,61 @@ def test_gross_profit_is_derived_when_only_the_cost_side_is_tagged():
     assert out["2026-06-30"] == 700.0                   # 1200 - 500, derived
     # Neither side tagged (Medpace's shape) -> no gross profit, and the name suspends honestly.
     assert pit._gross_profit({"Total Revenue": {"2026-06-30": 1200.0}}) == {}
+
+
+class TestShareCountFreshness:
+    """2026-08-05 defect: COKE published a $1.3bn market cap for a ~$13bn company.
+
+    Its cover-page share count is tagged PER CLASS (companyfacts omits dimensional
+    facts), so the non-dimensional series stopped in 2016 — and a 2016 count times a
+    2026 price, across a 10-for-1 split, is a fabrication, not a measurement. It carried
+    a 19.8% owner-FCF yield into the shortlist and the thesis desk's top 1%."""
+
+    def _facts(self, share_entries, weighted=None):
+        facts = {"facts": {"dei": {pit._SHARES_TAG: {"units": {"shares": share_entries}}}}}
+        # a minimal annual income period so as_of_bundle builds at all
+        facts["facts"]["us-gaap"] = {"Revenues": {"units": {"USD": [
+            {"start": "2025-01-01", "end": "2025-12-31", "filed": "2026-02-01",
+             "form": "10-K", "val": 1000.0}]}}}
+        if weighted is not None:
+            facts["facts"]["us-gaap"][pit._WEIGHTED_SHARES_TAGS[0]] = {"units": {"shares": weighted}}
+        return facts
+
+    def test_a_stale_cover_page_count_refuses_the_market_cap(self):
+        facts = self._facts([{"end": "2016-03-04", "filed": "2016-03-18",
+                              "form": "10-K", "val": 7_141_447.0}])
+        b = pit.as_of_bundle(facts, "COKE", None, "2026-08-01", {"COKE": {"2026-07-27": {"close": 187.9}}})
+        assert b["market_cap"] is None
+        assert b["shares_basis"] == "stale-refused"
+        assert "stale" in b["shares_note"]
+
+    def test_the_weighted_average_count_repairs_it_and_says_so(self):
+        facts = self._facts(
+            [{"end": "2010-02-17", "filed": "2010-02-26", "form": "10-K", "val": 713_924_267.0}],
+            weighted=[{"start": "2026-04-01", "end": "2026-06-30", "filed": "2026-07-30",
+                       "form": "10-Q", "val": 851_000_000.0}])
+        b = pit.as_of_bundle(facts, "UPS", None, "2026-08-01", {"UPS": {"2026-07-27": {"close": 100.0}}})
+        assert b["shares_basis"] == "weighted-average"
+        assert b["market_cap"] == pytest.approx(851_000_000.0 * 100.0)
+        assert "weighted-average" in b["shares_note"]
+
+    def test_a_fresh_count_is_untouched(self):
+        facts = self._facts([{"end": "2026-06-30", "filed": "2026-07-15",
+                              "form": "10-Q", "val": 1_000_000.0}])
+        b = pit.as_of_bundle(facts, "OK", None, "2026-08-01", {"OK": {"2026-07-27": {"close": 10.0}}})
+        assert b["market_cap"] == pytest.approx(10_000_000.0)
+        assert b["shares_note"] is None and b["shares_basis"] != "stale-refused"
+
+    def test_a_stale_weighted_average_is_refused_too(self):
+        facts = self._facts(
+            [{"end": "2016-03-04", "filed": "2016-03-18", "form": "10-K", "val": 7_141_447.0}],
+            weighted=[{"start": "2015-01-01", "end": "2015-12-31", "filed": "2016-02-01",
+                       "form": "10-K", "val": 9_000_000.0}])
+        b = pit.as_of_bundle(facts, "COKE", None, "2026-08-01", {"COKE": {"2026-07-27": {"close": 187.9}}})
+        assert b["market_cap"] is None and b["shares_basis"] == "stale-refused"
+
+    def test_the_age_travels_with_the_bundle(self):
+        facts = self._facts([{"end": "2025-06-30", "filed": "2025-07-15",
+                              "form": "10-Q", "val": 5.0}])
+        b = pit.as_of_bundle(facts, "X", None, "2026-08-01", {})
+        assert b["shares_as_of"] == "2025-06-30" and b["shares_age_days"] == 397

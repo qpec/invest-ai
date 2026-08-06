@@ -25,7 +25,7 @@ install -d -m 0700 "$DEST"
 # enrich_cache is deliberately NOT mirrored (2026-08-05): every entry is a pruned
 # EDGAR companyfacts fetch, refetchable in minutes, and at expanded-universe scale
 # it would outgrow the 10 GiB volume — crowding out the irreplaceable dirs below.
-for d in theses reports; do
+for d in theses reports desk-notes; do
     [ -d "$SCOUT/$d" ] || continue
     rsync -a --delete --chmod=D700,F600 "$SCOUT/$d/" "$DEST/$d/"
 done

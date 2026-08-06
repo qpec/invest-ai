@@ -496,7 +496,16 @@ def ratify(symbol: str, *, theses_dir: Path = THESES_DIR, ask=input) -> dict:
     # The Gate is where a draft becomes a thing the monitor acts on, so the model that
     # wrote it is re-checked here rather than trusted from a record written earlier —
     # a record.json edited by hand between beats would otherwise sail straight through.
+    # Re-derive rather than trust: the boolean in record.json is written by the very
+    # process the gate constrains, and a hand-edited record would otherwise sail through
+    # (preflight review 2026-08-05). The recorded id is re-judged against the owner's
+    # current per-provider list here, at the last door before `committed/`.
     agent = doc.get("agent") or {}
+    recheck, problems = deskwork.resolve_model(agent.get("id"), transcript=None)
+    if agent.get("id") and not recheck["approved"]:
+        raise ValueError(
+            f"the draft's recorded model {agent.get('id')!r} is not approved for desk "
+            f"work: {'; '.join(problems)}")
     if not agent.get("approved"):
         raise ValueError(
             f"the draft was written by {agent.get('id') or 'an unrecorded model'}, which "

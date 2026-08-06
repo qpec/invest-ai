@@ -96,6 +96,11 @@ DEFAULT_UNIT = "USD"
 # that `_balance_maps` spells out inline, and the third is the dei share tag.
 _PIT_EXTRA_INSTANT_TAGS = (
     "LongTermDebt", "LongTermDebtNoncurrent", "LongTermDebtCurrent", "ShortTermBorrowings",
+    # Lease-inclusive and combined-total debt concepts (2026-08-05): Comcast reports all
+    # $90bn of its debt under DebtAndCapitalLeaseObligations and nothing under the four
+    # tags above, which made it read as DEBT-FREE.
+    "DebtAndCapitalLeaseObligations", "DebtLongtermAndShorttermCombinedAmount",
+    "LongTermDebtAndCapitalLeaseObligations", "DebtCurrent",
     "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest")
 INSTANT_TAGS = frozenset(
     tag for chain in pit._BALANCE_CONCEPTS.values() for tag in chain

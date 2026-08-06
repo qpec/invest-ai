@@ -91,6 +91,31 @@ _BALANCE_CONCEPTS = {
 }
 _SHARES_TAG = "EntityCommonStockSharesOutstanding"
 
+# --- share-count freshness (2026-08-05 defect: COKE priced at a tenth of its worth) ------
+#
+# The cover-page dei count is a POINT fact and the only per-company share total EDGAR
+# publishes — but a dual-class filer tags it PER CLASS, and companyfacts omits
+# dimensional facts, so for such names the non-dimensional series simply STOPS (COKE's
+# last is 2016, Comcast's 2009, Ford's 2011). Multiplying a 2016 count by a 2026 price
+# is not a measurement; for COKE, whose 10-for-1 split fell in between, it published a
+# $1.3bn market cap for an $13bn company — and a 19.8% owner-FCF yield that carried a
+# fabricated bargain into the shortlist AND the thesis desk's top 1%.
+#
+# Two defences, in order:
+#   1. a stale count may not be multiplied by a fresh price (SHARES_MAX_AGE_DAYS), and
+#   2. before refusing, fall back to the weighted-average share count from the income
+#      statement, which those same filers DO report non-dimensionally and currently.
+#      It is a period average rather than a point count — a few percent off, not ten
+#      times — so it is used and LABELLED, never silently substituted.
+SHARES_MAX_AGE_DAYS = 450            # cover pages are quarterly; >15 months is broken
+_WEIGHTED_SHARES_TAGS = ("WeightedAverageNumberOfDilutedSharesOutstanding",
+                         "WeightedAverageNumberOfSharesOutstandingBasic",
+                         "WeightedAverageNumberOfDilutedSharesOutstandingBasic",
+                         "WeightedAverageNumberOfShareOutstandingBasicAndDiluted")
+# Reachable by the enrichment tier: consumed_tags() introspects the concept tables, so
+# naming the chain here is what makes tier 2 fetch and cache it.
+_SHARE_FALLBACK_CONCEPTS = {"Weighted Average Shares": _WEIGHTED_SHARES_TAGS}
+
 # Point DISCLOSURES — single facts the inversion layer reads (§3.6's refinancing wall and
 # §3.7's concentration flag) and nothing else does. They are deliberately NOT in
 # _BALANCE_CONCEPTS: `_section` unions every label onto one set of period ends and
@@ -323,7 +348,25 @@ def _gross_profit(income: dict) -> dict:
 DEBT_CARRY_FORWARD_DAYS = 400   # a debt balance is assumed to persist about a year
 
 
-def _debt_with_unlevered_dates(debt: dict, maps: dict) -> dict:
+def _pays_interest(facts: dict, as_of: str) -> bool:
+    """Does this filer report material interest expense knowable at as_of?
+
+    The cross-check that makes 'no debt tag' safe to interpret. A company paying
+    interest has borrowings whatever concept it tags them under, so an untagged balance
+    date must NOT be read as debt-free -- that is how a $90bn-levered Comcast came out
+    net-cash. Material means big enough to be real: interest below a basis point of
+    assets is rounding, not leverage."""
+    assets = _merge_chain(facts, _BALANCE_CONCEPTS["Total Assets"], as_of, instant=True)
+    base = max(assets.values()) if assets else 0.0
+    for tag in _SUPPLEMENT_FLOW_CONCEPTS["Interest Expense"]:
+        for value in _latest_filed(_unit_entries(facts, "us-gaap", tag), as_of,
+                                   instant=False).values():
+            if value and abs(value) > max(1e5, 0.0001 * base):
+                return True
+    return False
+
+
+def _debt_with_unlevered_dates(debt: dict, maps: dict, *, pays_interest: bool = False) -> dict:
     """Fill Total Debt on properly-tagged balance dates that carry no debt tag at all.
 
     EDGAR simply stops carrying LongTermDebt* once a filer has repaid its borrowings, so a
@@ -346,6 +389,9 @@ def _debt_with_unlevered_dates(debt: dict, maps: dict) -> dict:
         prior = [d for d in observed if d < end]
         if prior and _days(prior[-1], end) <= DEBT_CARRY_FORWARD_DAYS:
             out[end] = debt[prior[-1]]          # conservative: assume the debt persists
+        elif pays_interest:
+            continue                            # pays interest but tags no debt we know:
+                                                # unmeasured, never "debt-free"
         else:
             out[end] = 0.0                      # properly tagged and no debt in sight
     return out
@@ -390,9 +436,17 @@ def _balance_maps(facts: dict, as_of: str) -> dict:
     (incl-NCI equity minus equity) and Working Capital (AssetsCurrent - LiabilitiesCurrent)."""
     maps = {label: _merge_chain(facts, tags, as_of, instant=True)
             for label, tags in _BALANCE_CONCEPTS.items()}
-    ltd = _merge_chain(facts, ("LongTermDebt",), as_of, instant=True)
-    noncur = _merge_chain(facts, ("LongTermDebtNoncurrent",), as_of, instant=True)
-    cur = _merge_chain(facts, ("LongTermDebtCurrent",), as_of, instant=True)
+    # Wider chains (2026-08-05): Comcast carries $90bn of debt under
+    # DebtAndCapitalLeaseObligations and nothing in the original four tags, so it read as
+    # DEBT-FREE — net cash, an EV missing $90bn, and a doubled owner-FCF yield. Lease-
+    # inclusive and combined-total concepts are ordinary reporting choices, not exotica.
+    ltd = _merge_chain(facts, ("LongTermDebt", "DebtAndCapitalLeaseObligations",
+                               "DebtLongtermAndShorttermCombinedAmount"),
+                       as_of, instant=True)
+    noncur = _merge_chain(facts, ("LongTermDebtNoncurrent",
+                                  "LongTermDebtAndCapitalLeaseObligations"),
+                          as_of, instant=True)
+    cur = _merge_chain(facts, ("LongTermDebtCurrent", "DebtCurrent"), as_of, instant=True)
     short = _merge_chain(facts, ("ShortTermBorrowings",), as_of, instant=True)
     incl_nci = _merge_chain(
         facts, ("StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",),
@@ -401,7 +455,8 @@ def _balance_maps(facts: dict, as_of: str) -> dict:
     for end in sorted(set(ltd) | set(noncur) | set(cur)):
         debt[end] = ltd[end] if end in ltd else (
             noncur.get(end, 0.0) + cur.get(end, 0.0) + short.get(end, 0.0))
-    maps["Total Debt"] = _debt_with_unlevered_dates(debt, maps)
+    maps["Total Debt"] = _debt_with_unlevered_dates(
+        debt, maps, pays_interest=_pays_interest(facts, as_of))
     equity = maps["Stockholders Equity"]
     maps["Minority Interest"] = {end: incl_nci[end] - equity[end]
                                  for end in incl_nci if end in equity}
@@ -473,6 +528,29 @@ def shares_fallback(facts: dict, as_of) -> tuple[float | None, str | None]:
     keeps a market cap and therefore GRADES instead of silently suspending."""
     _, count, basis = _fallback_point(facts, as_of)
     return count, basis
+
+
+def weighted_shares_point(facts: dict, as_of) -> tuple[str | None, float | None]:
+    """(period end, count) of the newest weighted-average share count knowable at as_of.
+
+    The fallback for filers whose cover-page count went dimensional: it is reported on
+    every income statement, non-dimensionally, by essentially every filer. Chain order is
+    diluted-then-basic, first present per period, and the filed-date discipline is the
+    same one every other fact obeys."""
+    merged = {}
+    for tag in _WEIGHTED_SHARES_TAGS:
+        for (start, end), val in _latest_filed(_unit_entries(facts, "us-gaap", tag),
+                                               _iso(as_of), instant=False).items():
+            merged.setdefault(end, val)
+    if not merged:
+        return None, None
+    end = max(merged)
+    return end, float(merged[end])
+
+
+def shares_age_days(shares_day: str | None, as_of) -> int | None:
+    """How old the share count is at as_of. None when there is no count to age."""
+    return None if not shares_day else _days(shares_day, _iso(as_of))
 
 
 def shares_point_at(series: list, as_of) -> tuple[str | None, float | None]:
@@ -764,6 +842,26 @@ def as_of_bundle(facts: dict, symbol: str, meta: dict, as_of, prices: dict,
     shares_basis = "series"
     if shares is None:                    # empty/inconsistent series -> best count at as_of
         shares_day, shares, shares_basis = _fallback_point(facts, as_of)
+    # A count far older than the price it will be multiplied by is not a measurement of
+    # this company today (see SHARES_MAX_AGE_DAYS). Try the income statement's weighted
+    # average — current for the dual-class filers whose cover page went dimensional —
+    # and refuse outright if that is stale too: no market cap, and everything derived
+    # from it (owner-FCF yield, the valuation pillar) reports absent rather than wrong.
+    shares_note = None
+    age = shares_age_days(shares_day, as_of)
+    if shares is not None and age is not None and age > SHARES_MAX_AGE_DAYS:
+        wa_day, wa_shares = weighted_shares_point(facts, as_of)
+        wa_age = shares_age_days(wa_day, as_of)
+        if wa_shares and wa_age is not None and wa_age <= SHARES_MAX_AGE_DAYS:
+            shares_note = (f"cover-page share count is {age}d old (dimensional tagging); "
+                           f"using the weighted-average count of {wa_day}")
+            shares_day, shares, shares_basis = wa_day, wa_shares, "weighted-average"
+            age = wa_age
+        else:
+            shares_note = (f"no share count newer than {age}d at {as_of} "
+                           f"(cover page {shares_day}); market cap refused rather than "
+                           f"built from a stale count")
+            shares_day, shares, shares_basis = None, None, "stale-refused"
     market_cap, split_unadjusted = market_cap_at(
         shares_day, shares, px, basis, (splits or {}).get(symbol) or {}, as_of)
     meta = meta or {}
@@ -775,6 +873,7 @@ def as_of_bundle(facts: dict, symbol: str, meta: dict, as_of, prices: dict,
         "market_cap_split_unadjusted": split_unadjusted,
         "yahoo_ev": None, "price": px,
         "shares_series": series, "shares_basis": shares_basis,
+        "shares_as_of": shares_day, "shares_age_days": age, "shares_note": shares_note,
         "splits": splits_as_of((splits or {}).get(symbol) or {}, as_of),
         "disclosures": disclosures(facts, as_of),
         "supplements": supplement,

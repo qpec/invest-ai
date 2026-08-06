@@ -10,6 +10,12 @@
 set -euo pipefail
 . /opt/stock-agentcy/deploy/scout/lib.sh
 
+# The served build embeds a live capability token AND the owner's desk notes. $SCOUT is
+# world-traversable (the judgement lane reads caches from it), so the build directory
+# must not be: 0700, and every file inside it private.
+umask 077
+install -d -m 0700 "$SCOUT/desk-ui"
+
 cd "$SCOUT_DIR"
 exec "$PY" webapp.py \
     --serve "${SCOUT_DESK_PORT:-8899}" \

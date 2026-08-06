@@ -19,8 +19,11 @@ PrivateTmp=false
 # Loopback only: the owner tunnels in (ssh -L 8899:127.0.0.1:8899). There is no public
 # port and therefore no authentication surface of our own to get wrong — SSH is the
 # authentication, and it is the one every other box operation already uses.
-IPAddressAllow=localhost
-IPAddressDeny=any
+#
+# NOT IPAddressDeny=any: the desk's own buttons shell out to enrich/monitor, which must
+# reach EDGAR over HTTPS, and an egress filter on this cgroup would kill exactly the
+# actions the page exists to run (preflight review 2026-08-05). The BIND address is what
+# makes this private, and webapp.py binds 127.0.0.1 unconditionally.
 
 [Install]
 WantedBy=multi-user.target

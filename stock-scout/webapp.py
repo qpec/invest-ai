@@ -402,6 +402,8 @@ def assemble(*, sec_data: str, prices_dir: str | None, universe: str, as_of: str
                        if registry.get(k) is None},
             "composites": composites_by_symbol.get(symbol),
             "mc": _round(bundle.get("market_cap"), 0),
+            "shb": bundle.get("shares_basis"), "shn": bundle.get("shares_note"),
+            "shd": bundle.get("shares_as_of"),
         }
 
     # Charts. Coverage before/after is measured across the ENRICHED names only, and the
@@ -1051,8 +1053,12 @@ function renderPanel(sym, row, d){
       ${pill(card.band || '—', BAND_CLS[card.band])}
       ${pill((inv.verdict || '—') + ' — inversion', VERDICT_CLS[inv.verdict])}
       ${pill('evidence: ' + (card.evidence || '—'), 'p-quiet')}
-      ${d.mc != null ? pill(fmtMc(d.mc), 'p-quiet') : ''}
+      ${d.mc != null ? pill(fmtMc(d.mc), 'p-quiet') : pill('market cap refused', 'p-warn')}
+      ${d.shb ? pill('shares: ' + esc(d.shb) + (d.shd ? ' · ' + esc(d.shd) : ''),
+                     d.shb === 'stale-refused' ? 'p-crit'
+                     : d.shb === 'weighted-average' ? 'p-warn' : 'p-ghost') : ''}
     </div>
+    ${d.shn ? `<div style="font-size:11.5px;color:var(--text2);margin-top:6px">${esc(d.shn)}</div>` : ''}
     ${deskBlock([
       {id: 'refresh', symbol: sym, label: '↻ Refresh filings',
        hint: 'refetch this name from EDGAR now'},
@@ -1196,9 +1202,9 @@ function deskBlock(actions, note){
                              : 'local setup required')}">${esc(a.label)}</button>`).join('');
   const why = DESK.demo
     ? `<b>Visual demo — nothing is executing.</b> These buttons replay the real output
-       each action printed on this sample data${DESK.captured ? ' (recorded ' +
-       esc(DESK.captured) + ')' : ''}; a static page has nothing to run, and running the
-       desk spends its operator's own subscription and machine. To drive it for real,
+       each action printed when it was last run${DESK.captured ? ' (recorded ' +
+       esc(DESK.captured) + ')' : ''}; a published page has nothing to run, and running
+       the desk spends its operator's own subscription and machine. To drive it for real,
        set up your own in a few minutes — see
        <a href="https://github.com/qpec/invest-ai/blob/main/QUICKSTART.md"
        target="_blank" rel="noopener">QUICKSTART.md</a>.`
@@ -1845,8 +1851,10 @@ def render(model: dict, embed_details: dict) -> str:
     demo = (model.get("desk") or {}).get("demo")
     demobar = ("" if not demo else
                '<div class="demobar"><b>Visual demo — nothing here is executing.</b>'
-               '<span>Pregenerated sample data; the desk actions replay a recording of '
-               'their real output. Run it yourself for live numbers — '
+               '<span>The numbers are the desk\'s own latest run; the desk actions '
+               'replay a recording of their real output rather than running, because a '
+               'published page must never spend its operator\'s subscription or '
+               'machine. Run your own for live actions — '
                '<a href="https://github.com/qpec/invest-ai/blob/main/QUICKSTART.md" '
                'target="_blank" rel="noopener">QUICKSTART.md</a>.</span></div>')
     page = (TEMPLATE
@@ -1940,7 +1948,9 @@ DESK_ACTIONS = {
                                     "--as-of", a.as_of,
                                     "--theses-dir", a.theses_dir or "theses"]
                     + (["--prices", a.prices] if a.prices else [])
-                    + (["--enrich-cache", a.enrich_cache] if a.enrich_cache else []), False),
+                    + (["--enrich-cache", a.enrich_cache] if a.enrich_cache else [])
+                    + (["--reports-dir", str(Path(a.theses_dir or "theses").parent
+                                             / "reports")]), False),
     "rebuild": (None, False),          # handled in-process, no subprocess
 }
 
@@ -1963,12 +1973,20 @@ def desk_command(action: str, symbol, args, known) -> tuple[list | None, str | N
     return builder(args, symbol), None
 
 
+def notes_dir(theses_dir) -> Path:
+    """Where desk notes live: a SIBLING of theses/, never inside it.
+
+    Inside, they would ride the weekly `rsync $SCOUT/theses/ state/theses/` straight into
+    the state archive the owner elected to make public — free-form portfolio prose, in
+    git history, forever (preflight review 2026-08-05). Outside, no publish path can
+    reach them and no reviewer has to remember an exclude."""
+    return Path(theses_dir or "theses").resolve().parent / "desk-notes"
+
+
 def load_notes(theses_dir: Path | None) -> dict[str, str]:
-    """Desk notes, {SYMBOL: text}. Loaded ONLY by the served build — a static build never
-    calls this, so owner prose cannot reach a published page by construction rather than
-    by a stripping step someone might forget (the same reasoning as FR9 fields, one
-    level stricter because notes have no schema to police them)."""
-    base = Path(theses_dir or "theses") / "notes"
+    """Desk notes, {SYMBOL: text}. Loaded ONLY by the served build, and stored outside the
+    theses tree — so neither the published page nor the state archive can carry them."""
+    base = notes_dir(theses_dir)
     if not base.exists():
         return {}
     out = {}
@@ -1980,11 +1998,25 @@ def load_notes(theses_dir: Path | None) -> dict[str, str]:
     return out
 
 
+_SYMBOL_OK = re.compile(r"\A[A-Z0-9][A-Z0-9.\-]{0,15}\Z")
+
+
+def _safe_symbol(symbol) -> str | None:
+    """A symbol that may become a path component. The API already checks membership of
+    the screened set, but universe.csv is user-supplied: two independent checks, because
+    a path built from unvalidated text is the oldest bug there is."""
+    symbol = str(symbol or "").upper()
+    return symbol if _SYMBOL_OK.match(symbol) and ".." not in symbol else None
+
+
 def save_note(theses_dir: Path, symbol: str, text: str) -> dict:
     """A free-text note beside a name. Owner prose, never scored, never published: it
     lives in the state tree with the theses and is exactly what a desk needs for
     'why I keep looking at this'."""
-    path = Path(theses_dir) / "notes" / f"{symbol}.md"
+    symbol = _safe_symbol(symbol)
+    if not symbol:
+        return {"error": "unusable symbol"}
+    path = notes_dir(theses_dir) / f"{symbol}.md"
     deskwork.write_atomic(path, text.strip() + "\n" if text.strip() else "")
     return {"saved": str(path), "chars": len(text.strip())}
 
@@ -1997,6 +2029,9 @@ def save_thesis_draft(theses_dir: Path, symbol: str, payload: dict) -> dict:
     trigger, an unknown metric or a forbidden field exactly as it does for the agent,
     and nothing here can touch `theses/committed/` (ratification stays the interactive
     Gate, FR9). A refused edit is reported and NOT written."""
+    symbol = _safe_symbol(symbol)
+    if not symbol:
+        return {"error": "unusable symbol"}
     draft = Path(theses_dir) / "drafts" / symbol / "thesis.json"
     if not draft.exists():
         return {"error": f"no draft for {symbol}"}
@@ -2013,7 +2048,16 @@ def save_thesis_draft(theses_dir: Path, symbol: str, payload: dict) -> dict:
     if problems:
         return {"error": "refused", "problems": problems}
     deskwork.write_atomic(draft, json.dumps(payload, indent=2))
-    return {"saved": str(draft), "triggers": len(payload.get("triggers") or [])}
+    # thesis.json is the agent's raw file; the page and `ratify` both read record.json.
+    # Writing only the former made an edit look saved and change nothing (preflight
+    # review 2026-08-05) -- so re-run the same `record` the agent's work goes through,
+    # which re-validates, re-stamps the model, and regenerates the record.
+    try:
+        doc = thesis_mod.record(symbol, theses_dir=Path(theses_dir))
+    except Exception as error:  # noqa: BLE001 -- record refusing IS the answer
+        return {"error": "saved but record refused it", "problems": [str(error)]}
+    return {"saved": str(draft), "triggers": len(payload.get("triggers") or []),
+            "recorded": doc.get("status")}
 
 
 def serve(args) -> int:
@@ -2055,6 +2099,9 @@ def serve(args) -> int:
             setattr(args, field, str(Path(value).resolve()))
 
     def build():
+        # A Restart=always desk would otherwise freeze as_of at the date it booted.
+        if not getattr(args, "as_of_pinned", False):
+            args.as_of = _dt.date.today().isoformat()
         model = assemble(sec_data=args.sec_data, prices_dir=args.prices,
                          universe=args.universe, as_of=args.as_of,
                          enrich_cache=args.enrich_cache, theses_dir=args.theses_dir)
@@ -2153,8 +2200,8 @@ def serve(args) -> int:
                 return self._json({"error": "not authorized"}, 403)
             try:
                 length = int(self.headers.get("Content-Length") or 0)
-                if length > 2 * 1024 * 1024:      # a thesis is prose, not a payload dump
-                    return self._json({"error": "too large"}, 413)
+                if not 0 <= length <= 2 * 1024 * 1024:   # negative => read() to EOF
+                    return self._json({"error": "bad length"}, 413)
                 payload = json.loads(self.rfile.read(length) or b"{}")
             except (ValueError, json.JSONDecodeError):
                 return self._json({"error": "bad request"}, 400)
@@ -2164,12 +2211,15 @@ def serve(args) -> int:
                     return self._json({"error": "unknown symbol"}, 400)
                 theses = Path(args.theses_dir or "theses")
                 kind = payload.get("kind")
-                if kind == "note":
-                    result = save_note(theses, symbol, str(payload.get("text") or ""))
-                elif kind == "thesis":
-                    result = save_thesis_draft(theses, symbol, payload.get("thesis"))
-                else:
-                    result = {"error": f"unknown edit kind {kind!r}"}
+                # Serialised with the action jobs: both mutate the same files, and
+                # write_atomic's fixed .tmp sibling makes concurrent writers a race.
+                with lock:
+                    if kind == "note":
+                        result = save_note(theses, symbol, str(payload.get("text") or ""))
+                    elif kind == "thesis":
+                        result = save_thesis_draft(theses, symbol, payload.get("thesis"))
+                    else:
+                        result = {"error": f"unknown edit kind {kind!r}"}
                 return self._json(result, 400 if result.get("error") else 200)
             result = start(str(payload.get("action") or ""),
                            (payload.get("symbol") or None))

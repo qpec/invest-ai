@@ -19,7 +19,7 @@ id -nG agentcy | grep -qw scoutwork || usermod -aG scoutwork agentcy
 # (opened by brief.sh). Readable only: caches and reports. Invisible: the two
 # repo clones AND theses/committed (both hold FR9 material after ratification),
 # the DB backups, and everything credentialed.
-mkdir -p "$SCOUT"/{secdata,prices,enrich_cache,reports,site-build} \
+mkdir -p "$SCOUT"/{secdata,prices,enrich_cache,reports,site-build,desk-notes,desk-ui} \
          "$SCOUT"/theses/{drafts,committed}
 chown -R agentcy:agentcy "$SCOUT"
 chmod 755 "$SCOUT" "$SCOUT"/secdata "$SCOUT"/prices "$SCOUT"/enrich_cache \
@@ -28,6 +28,16 @@ chmod 750 "$SCOUT"/theses/committed
 chown agentcy:scoutwork "$SCOUT"/theses/drafts
 chmod 2775 "$SCOUT"/theses/drafts
 chmod 750 "$SCOUT"/site-build
+# Desk notes are owner prose and the desk UI build carries a live capability token:
+# both stay out of the judgement lane's reach, like theses/committed.
+chmod 750 "$SCOUT"/desk-notes "$SCOUT"/desk-ui
+# Migration: notes written before 2026-08-05 lived inside theses/, where the weekly
+# state-archive rsync would have published them.
+if [ -d "$SCOUT/theses/notes" ]; then
+    mv -n "$SCOUT"/theses/notes/* "$SCOUT"/desk-notes/ 2>/dev/null || true
+    rmdir "$SCOUT/theses/notes" 2>/dev/null || true
+    echo ">>> moved desk notes out of theses/ (they must never reach the state archive)"
+fi
 # install -d resets mode+owner on existing dirs (mkdir -p would not), and git
 # clones into an existing empty dir keep it — so the FR9-bearing clones are
 # unreadable to the judgement lane from birth, on fresh and re-run installs.

@@ -1,0 +1,32 @@
+{
+  "symbol": "CROX",
+  "name": "Crocs, Inc.",
+  "sector": "Consumer Discretionary",
+  "prepared_at": "2026-08-03",
+  "scorecard": {
+    "pct": 94,
+    "band": "Exceptional",
+    "evidence": "full"
+  },
+  "inversion": {
+    "verdict": "Ordinary",
+    "severe": 0,
+    "failure_modes": [
+      "The price fell 74.9% peak-to-trough (2020-01-06 -> 2020-03-16) and has since regained that peak \u2014 volatile, not ruined, but a fall the owner had to sit through.",
+      "This business resists valuation: annual revenue growth is typically 19 points away from its 18%/yr average and the operating margin is typically 10 points away from its 14% average \u2014 what cannot be valued must be avoided however cheap it looks."
+    ]
+  },
+  "metrics": {
+    "owner_fcf_margin_pct": 16.353265434665413,
+    "owner_fcf_yield_pct": 9.115029550158932,
+    "revenue_growth_pct": 16.323932348377657,
+    "roic_pct": 24.308424528350994,
+    "gross_margin_pct": 57.469765955274475,
+    "net_debt_to_ebitda": null,
+    "sbc_pct_of_revenue": 1.0238809371259123,
+    "share_count_trend_pct_per_year": -11.987890709247019,
+    "accrual_divergence_pct": -4.173060219499239,
+    "owner_fcf_usd": 663103000.0
+  },
+  "market_cap": 6137449050.75
+}

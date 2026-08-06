@@ -58,6 +58,7 @@ TIER_VENDOR = "vendor-yf"
 
 # The provenance ledger a payload carries after enrichment: {"us-gaap:Tag": tier}.
 ENRICHMENT_KEY = "enrichment"
+SCHEMA_KEY = "_tag_schema"      # which consumed-tag selection this payload was pruned under
 
 _last_request = 0.0
 
@@ -157,7 +158,7 @@ def consumed_tags() -> dict[str, frozenset[str]]:
     us_gaap: set[str] = set()
     for table in (pit._INCOME_CONCEPTS, pit._CASHFLOW_CONCEPTS, pit._BALANCE_CONCEPTS,
                   pit._SUPPLEMENT_FLOW_CONCEPTS, pit._SUPPLEMENT_POINT_CONCEPTS,
-                  pit._DISCLOSURE_CONCEPTS):
+                  pit._DISCLOSURE_CONCEPTS, pit._SHARE_FALLBACK_CONCEPTS):
         for chain in table.values():
             us_gaap.update(chain)
     us_gaap.update(secsv._PIT_EXTRA_INSTANT_TAGS)
@@ -173,6 +174,20 @@ def consumed_tags() -> dict[str, frozenset[str]]:
 # persistence streaks need a few recent years of 10-Q chains, nothing older.
 QUARTERLY_HORIZON_YEARS = 5
 _ANNUAL_FORMS = ("10-K", "20-F", "40-F")
+
+
+def tag_schema_id() -> str:
+    """A short fingerprint of the consumed-tag selection.
+
+    Stamped into every cached payload so a cache pruned under an OLDER selection is
+    detectable. Without it, widening a concept chain (2026-08-05 added the lease-inclusive
+    debt tags and the weighted-average share counts) would leave thousands of payloads
+    that silently lack the new tags — and a missing tag reads as "this filer does not
+    report it", which is how Comcast came out debt-free."""
+    import hashlib
+    keep = consumed_tags()
+    material = "|".join(f"{ns}:{','.join(sorted(tags))}" for ns, tags in sorted(keep.items()))
+    return hashlib.sha256(material.encode()).hexdigest()[:12]
 
 
 def prune_payload(payload: dict) -> dict:
@@ -217,6 +232,7 @@ def prune_payload(payload: dict) -> dict:
         return annual_form_seen or end >= quarterly_cutoff
 
     pruned = {k: v for k, v in payload.items() if k != "facts"}
+    pruned[SCHEMA_KEY] = tag_schema_id()
     facts: dict = {}
     for namespace, tags in (payload.get("facts") or {}).items():
         wanted = keep.get(namespace)
@@ -443,9 +459,17 @@ def rolling_refresh(cache_dir: Path, universe_symbols, *, priority=(),
     # ticker enters the map. A week keeps the map fresher than any filing cadence.
     ciks = cik_map_cached(cache_dir, transport, max_age_days=7)
 
+    schema = tag_schema_id()
+
     def mtime(sym: str) -> float:
+        """Staleness key. A payload pruned under a different tag selection sorts with the
+        never-fetched ones: its gaps are OUR truncation, not the filer's silence."""
         path = cache_dir / f"CIK{ciks[sym]:010d}.json"
         try:
+            with path.open("rb") as fh:
+                head = fh.read(4096).decode("utf-8", "replace")
+            if f'"{SCHEMA_KEY}": "{schema}"' not in head and f'"{SCHEMA_KEY}":"{schema}"' not in head:
+                return float("-inf")
             return os.path.getmtime(path)
         except OSError:
             return float("-inf")

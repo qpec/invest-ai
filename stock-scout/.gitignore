@@ -12,3 +12,7 @@ universe.csv
 
 # thesis engine — theses are portfolio data (NFR2); state never lives in the code repo
 theses/
+# ...except the bundled demo draft, which IS shipped content (public SEC-derived, no
+# conviction, no owner fields) — without this the demo's Thesis tab is empty.
+!sample-data/theses/
+!sample-data/theses/**

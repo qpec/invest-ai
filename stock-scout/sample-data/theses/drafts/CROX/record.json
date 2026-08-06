@@ -1,0 +1,151 @@
+{
+  "symbol": "CROX",
+  "status": "draft",
+  "version": 0,
+  "built_at": "2026-08-03",
+  "agent": {
+    "id": "claude-opus-5",
+    "provenance": "observed",
+    "approved": true
+  },
+  "metrics_snapshot": {
+    "symbol": "CROX",
+    "name": "Crocs, Inc.",
+    "sector": "Consumer Discretionary",
+    "prepared_at": "2026-08-03",
+    "scorecard": {
+      "pct": 94,
+      "band": "Exceptional",
+      "evidence": "full"
+    },
+    "inversion": {
+      "verdict": "Ordinary",
+      "severe": 0,
+      "failure_modes": [
+        "The price fell 74.9% peak-to-trough (2020-01-06 -> 2020-03-16) and has since regained that peak \u2014 volatile, not ruined, but a fall the owner had to sit through.",
+        "This business resists valuation: annual revenue growth is typically 19 points away from its 18%/yr average and the operating margin is typically 10 points away from its 14% average \u2014 what cannot be valued must be avoided however cheap it looks."
+      ]
+    },
+    "metrics": {
+      "owner_fcf_margin_pct": 16.353265434665413,
+      "owner_fcf_yield_pct": 9.115029550158932,
+      "revenue_growth_pct": 16.323932348377657,
+      "roic_pct": 24.308424528350994,
+      "gross_margin_pct": 57.469765955274475,
+      "net_debt_to_ebitda": null,
+      "sbc_pct_of_revenue": 1.0238809371259123,
+      "share_count_trend_pct_per_year": -11.987890709247019,
+      "accrual_divergence_pct": -4.173060219499239,
+      "owner_fcf_usd": 663103000.0
+    },
+    "market_cap": 6137449050.75
+  },
+  "thesis": {
+    "symbol": "CROX",
+    "business_model": "Crocs designs and sells moulded-foam casual footwear \u2014 the Classic Clog and its variants \u2014 made by third-party factories in Asia and sold roughly half direct-to-consumer and half through wholesale partners, at group gross margins near 60% because the product costs very little to make and the brand carries the price. A second brand, HEYDUDE, acquired in 2022 for about $2.5bn mostly with debt, sells canvas slip-ons through the same infrastructure, is shrinking, and has already been written down by $738m.",
+    "moat": {
+      "kind": "brand_trust",
+      "evidence": [
+        "Q2 2026 group gross margin of 59.4% GAAP / 60.0% adjusted was earned after a 160bp tariff hit and after being dragged down by HEYDUDE's 43.7% adjusted gross margin, implying the Crocs Brand alone runs above 60% on an injection-moulded resin clog \u2014 price far above cost on a commodity-simple product is the moat in its most testable form. https://www.prnewswire.com/news-releases/crocs-inc-reports-record-second-quarter-2026-results-raises-full-year-2026-outlook-302838339.html",
+        "The franchise survived a full fashion cycle \u2014 2006-07 boom, a decade-long bust, revival from 2017 \u2014 which is the strongest available evidence that the clog is a category rather than a moment; most fads do not get a second act.",
+        "Direct-to-consumer was 52.1% of FY2025 revenue with digital at 37.8% of consolidated revenue, and Crocs Brand DTC grew 12.9% in Q2 2026 while its wholesale fell 5.0%: a brand that can sell directly does not need the shelf. https://www.stocktitan.net/sec-filings/CROX/10-k-crocs-inc-files-annual-report-b308dfb6db7f.html",
+        "Jibbitz personalisation charms are reported at roughly $260m a year at premium margin, and the Disney and LEGO collaborations drove growth specifically in accessories and premium charms \u2014 a customised clog is worth more to its owner than a fresh competitor's, which is the closest thing here to a switching cost (figure is from marketing analysis, not a filing; Crocs does not disclose it). https://www.opensend.com/post/crocs-marketing-strategy",
+        "Crocs Brand international DTC grew 23.7% (+21.6% constant currency) in Q2 2026 with double-digit growth in China, India and Japan and a record revenue quarter in China \u2014 the saturation argument is not yet true outside North America. https://www.investing.com/news/transcripts/earnings-call-transcript-crocs-beats-q2-2026-estimates-but-shares-tumble-93CH-4824915",
+        "Evidence against, recorded here rather than only in the bear case: global footwear market share is about 1.0% (up from 0.3% in 2018), the moulded clog has no manufacturing barrier, and Birkenstock grew net revenue 11.1% in Q1 2026 while Crocs was flat. https://pestel-analysis.com/blogs/competitors/crocs"
+      ]
+    },
+    "owner_earnings_picture": "FY2025 is the cleanest possible demonstration of why this framework judges cash rather than EPS: Crocs reported a GAAP net loss of $81.2m \u2014 caused by $738.1m of HEYDUDE impairments ($430m trademark, $307m goodwill) \u2014 while generating $710.4m of operating cash flow and $659.2m of free cash flow in the same year. The packet's $663.1m of TTM owner earnings sits directly on that $659.2m, an independent corroboration that the export measures the right thing. The business is asset-light (FY2026 capex guided to $70-80m on ~$4bn of revenue) and the cash is being returned rather than reinvested: 6.5m shares for $577m repurchased in FY2025 (~10% of shares outstanding) plus 2.3m for $251m in Q2 2026, taking diluted shares from 55.8m to 49.6m in a year, alongside $128m of debt repaid in FY2025 and $31m more in Q2 2026 against $1.31bn borrowings and $170m cash. Stock compensation is only 1.0% of revenue, so dilution is not eating the buyback, and accrual divergence of -4.2% says reported income runs behind cash rather than ahead of it. The honest qualification: FY2025 free cash flow was helped by working capital as HEYDUDE inventory was deliberately drained, and six-month 2026 FCF of $232.0m against a $705m TTM figure means the second half carries most of the year \u2014 no single half should be annualised. https://investors.crocs.com/news-and-events/press-releases/press-release-details/2026/Crocs-Inc--Reports-Fourth-Quarter-and-Full-Year-2025-Results-Issues-First-Quarter-and-Full-Year-2026-Outlook/default.aspx",
+    "valuation_anchor": {
+      "metric": "owner_fcf_yield_pct",
+      "value": 9.1,
+      "statement": "At the packet's $6.14bn market capitalisation plus $1.31bn of borrowings less $170m of cash, enterprise value is roughly $7.3bn against $663m of TTM owner earnings \u2014 a 9.1% owner-earnings yield, or about eleven times the cash an owner could actually extract. Read plainly, that price underwrites no growth: it does not require HEYDUDE to recover or international to keep compounding, only the cash engine to hold. This is a description of what is being bought, not a forecast of what it returns and not a price target \u2014 and eleven times is also the multiple markets historically assign to businesses they believe have a terminal-value problem, which is the counter-reading and is taken seriously in the bear case."
+    },
+    "horizon_years": 10,
+    "ten_year_statement": "Probably yes, with a much wider distribution than a 94% scorecard suggests. The case for holding through a closed market for a decade is that the clog has already proved it can survive going out of fashion once and come back, the product is asset-light and cash-generative at every point in that cycle, and the current price asks for no growth at all. The case against is that this is a discretionary consumer brand with no patent, no contractual lock-in and one dominant silhouette \u2014 nothing here has the ten-year inevitability of a toll road, and the honest answer is that a decade of ownership would require tolerating at least one period in which the shoe is unfashionable and the quote reflects it.",
+    "bear_case": "The Inversion Layer returned no severe findings, so nothing below is argued down from a severe rating; both findings it did report are load-bearing and neither is dismissed. FINDING 1 \u2014 the 74.9% drawdown ('The price fell 74.9% peak-to-trough (2020-01-06 -> 2020-03-16) and has since regained that peak \u2014 volatile, not ruined, but a fall the owner had to sit through'). The layer is right that it recovered and right that recovery is what separates volatility from ruin, but the discriminating fact is what kind of business falls three-quarters in ten weeks: a discretionary consumer brand whose demand is a want, not a need, sold through channels that shut. Recovery does not immunise the next one. FINDING 2 \u2014 'this business resists valuation: annual revenue growth is typically 19 points away from its 18%/yr average and the operating margin is typically 10 points away from its 14% average \u2014 what cannot be valued must be avoided however cheap it looks.' This is the strongest argument against the whole file and it is not argued down. A mean absolute deviation of 19 points around an 18% growth mean means the average year misses the average by more than the average itself, and the same is nearly true of margin; discounted cash flow here is theatre. The only defensible response is to refuse to forecast and check instead that the current cash is real, that it is being returned rather than spent on acquisitions, and that the price already assumes zero growth \u2014 which is an argument for a smaller position and a shorter leash, not for the elegance of a model. BEYOND THE LAYER: HEYDUDE is still shrinking (revenue -13.3% in FY2025, -5.7% to $179m in Q2 2026, wholesale -17.2%) and management's claimed return to growth in H2 2026 was challenged by multiple analysts on the Q2 call; the $738m write-down is sunk and irrelevant to valuation, but the judgement that produced it is not sunk and that same team now sits on $2.0bn of buyback authorisation and rising cash. North America is not expected to return to growth in 2026 (Q2 revenue +0.4%, wholesale -8.4%). Google Trends interest in the brand peaked in 2024 \u2014 weak alone, serious alongside flat North America and falling wholesale. Roughly three-quarters of FY2025 production came from two third-party manufacturers (~45% and ~28%) concentrated in Vietnam and China, a single-point failure the packet cannot see because it is disclosed in text rather than tagged in XBRL. Tariffs cost 160bp of gross margin in Q2 2026 and are guided to persist, against a US sourcing mix of ~47% Vietnam, 17% Indonesia, 13% China and 13% India, with the CEO's stated preference for 'higher price, higher margin and maybe slightly lesser volume' being both the right instinct and an admission that volume is the variable being sacrificed. Transparency is worsening: from Q3 2026 a business-model change with a major North American marketplace partner reclassifies revenue between DTC and wholesale \u2014 exactly the divergence the DTC evidence rests on \u2014 and management declined to quantify it under repeated questioning. In one sentence, this loses money if the Crocs Brand quietly follows HEYDUDE into decline as the clog cycle turns, the 60% gross margin proves to have been a fashion rent rather than a brand rent, and the buyback turns out to have been executed at eleven times earnings that were themselves the peak.",
+    "triggers": [
+      {
+        "id": "cash-engine-breaks",
+        "kind": "metric",
+        "statement": "Owner earnings are the entire thesis: the price underwrites no growth, so it only works while the cash keeps coming. Owner-earnings margin has run near 16% (FY2025 free cash flow of $659m on $4,041m of revenue). A fall below 10% sustained across two checks means the engine, not the weather, has changed.",
+        "action": "break",
+        "metric": "owner_fcf_margin_pct",
+        "op": "<",
+        "threshold": 10.0,
+        "consecutive_checks": 2,
+        "question": null
+      },
+      {
+        "id": "pricing-power-erodes",
+        "kind": "metric",
+        "statement": "The moat claim is that Crocs can charge far above cost for a simple moulded product. Blended gross margin is 57.5% today even with HEYDUDE at 43.7% and a 160bp tariff drag. Below 50% the brand is no longer carrying the price, and the owner should re-examine whether the moat evidence still holds before deciding anything.",
+        "action": "review",
+        "metric": "gross_margin_pct",
+        "op": "<",
+        "threshold": 50.0,
+        "consecutive_checks": 2,
+        "question": null
+      },
+      {
+        "id": "buyback-stops-dilution-returns",
+        "kind": "metric",
+        "statement": "Share count is falling about 12%/yr and that shrinkage is a large part of what the owner is buying. If the trend turns positive \u2014 shares growing rather than shrinking \u2014 the cash is being needed somewhere else, which is the earliest visible sign that either the engine or the capital-allocation discipline has changed.",
+        "action": "review",
+        "metric": "share_count_trend_pct_per_year",
+        "op": ">",
+        "threshold": 0.0,
+        "consecutive_checks": 2,
+        "question": null
+      },
+      {
+        "id": "core-brand-shrinks",
+        "kind": "event",
+        "statement": "HEYDUDE shrinking is a known and priced problem; the Crocs Brand shrinking is the thesis being falsified. Two consecutive quarters of constant-currency decline in the core brand means the clog cycle has turned, and the pre-committed answer is to sell.",
+        "action": "break",
+        "metric": null,
+        "op": null,
+        "threshold": null,
+        "consecutive_checks": null,
+        "question": "Has Crocs, Inc. disclosed, in an SEC filing or an official quarterly earnings release, that Crocs Brand revenue (excluding HEYDUDE) declined year-over-year on a constant-currency basis in two consecutive quarters? Answer yes only if both quarters are stated in company-published figures."
+      },
+      {
+        "id": "balance-sheet-re-levers",
+        "kind": "event",
+        "statement": "The 2022 HEYDUDE deal was debt-funded and cost $738m in write-downs; management now targets net leverage of 1.0-1.5x and sits at the low end. Leverage above 2.0x means the discipline that makes this thesis work has been abandoned, and the framework's rule against leverage on volatile assets applies to the company as much as to the owner.",
+        "action": "break",
+        "metric": null,
+        "op": null,
+        "threshold": null,
+        "consecutive_checks": null,
+        "question": "Has Crocs, Inc. disclosed, in an SEC filing or an official earnings release, net leverage (net debt to adjusted EBITDA) above 2.0x? Answer yes only on a company-stated figure or on borrowings and EBITDA figures published by the company that plainly compute above 2.0x."
+      },
+      {
+        "id": "fashion-cycle-turns",
+        "kind": "narrative",
+        "statement": "Google Trends interest peaked in 2024, North America is flat and wholesale is falling. Individually each is noise; together they would be the clog going out of fashion again. This is a judgement, not a fact, so it can only summon the owner to the desk \u2014 it never sells on its own.",
+        "action": "review",
+        "metric": null,
+        "op": null,
+        "threshold": null,
+        "consecutive_checks": null,
+        "question": "Taking the evidence together \u2014 search-interest trend, wholesale partners' shelf-space and order commentary, resale prices and discounting depth, and coverage in major trade outlets \u2014 is there credible evidence that the Crocs clog is entering a structural fashion decline rather than normal seasonal or channel softness?"
+      }
+    ],
+    "sources": [
+      "https://www.prnewswire.com/news-releases/crocs-inc-reports-record-second-quarter-2026-results-raises-full-year-2026-outlook-302838339.html",
+      "https://investors.crocs.com/news-and-events/press-releases/press-release-details/2026/Crocs-Inc--Reports-Fourth-Quarter-and-Full-Year-2025-Results-Issues-First-Quarter-and-Full-Year-2026-Outlook/default.aspx",
+      "https://www.investing.com/news/transcripts/earnings-call-transcript-crocs-beats-q2-2026-estimates-but-shares-tumble-93CH-4824915",
+      "https://www.stocktitan.net/sec-filings/CROX/10-k-crocs-inc-files-annual-report-b308dfb6db7f.html",
+      "https://www.fool.com/investing/2026/05/24/crocs-core-brand-generates-plenty-of-cash-flow-but/",
+      "https://pestel-analysis.com/blogs/competitors/crocs",
+      "https://www.opensend.com/post/crocs-marketing-strategy",
+      "https://finance.yahoo.com/markets/stocks/articles/strategic-partnerships-strengthen-crocs-market-position-134600865.html",
+      "https://wwd.com/footwear-news/shoe-industry-news/crocs-ceo-andrew-rees-vietnam-tariffs-china-prices-1237703747/",
+      "https://wwd.com/footwear-news/shoe-industry-news/crocs-marketplace-business-model-shift-tiktok-shop-1239089017/",
+      "https://thefinancecorner.substack.com/p/crocs-the-fashion-fad-is-still-around",
+      "https://www.stocktitan.net/sec-filings/CROX/form-4-crocs-inc-insider-trading-activity-a2554ab58ba5.html",
+      "https://finance.yahoo.com/quote/CROX/"
+    ]
+  },
+  "validation_problems": []
+}

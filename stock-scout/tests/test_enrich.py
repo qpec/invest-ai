@@ -256,7 +256,7 @@ class TestRollingRefresh:
         # OLD has the oldest cache file, MID newer, NEW has none (infinitely stale)
         for sym, age_days in (("OLD", 30), ("MID", 1)):
             path = tmp_path / f"CIK{ciks[sym]:010d}.json"
-            path.write_text("{}")
+            path.write_text(json.dumps({enrich.SCHEMA_KEY: enrich.tag_schema_id()}))
             stamp = _time.time() - age_days * 86400
             os.utime(path, (stamp, stamp))
         (tmp_path / "_tickers.json").write_text(json.dumps(ciks))
@@ -400,3 +400,24 @@ class TestSecMerge:
         # OABI over its warrant; a class line (BF-A, first in file) when no plain
         # line exists; the preferred-only filer and the ETF venue dropped whole.
         assert got == ["OABI", "BF-A"]
+
+
+class TestCacheSchemaStamp:
+    """2026-08-05: widening a concept chain leaves every older cached payload silently
+    missing the new tags — and a missing tag reads as 'the filer does not report this'.
+    Comcast came out debt-free that way."""
+
+    def test_a_payload_from_an_older_schema_is_refetched_first(self, tmp_path):
+        ciks = {"OLD": 1, "CUR": 2}
+        (tmp_path / "_tickers.json").write_text(json.dumps(ciks))
+        (tmp_path / "CIK0000000001.json").write_text(json.dumps({"_tag_schema": "deadbeef"}))
+        (tmp_path / "CIK0000000002.json").write_text(
+            json.dumps({enrich.SCHEMA_KEY: enrich.tag_schema_id()}))
+        fetched = []
+
+        def transport(url):
+            fetched.append(url)
+            return json.dumps({"cik": 0, "facts": {}}).encode()
+
+        enrich.rolling_refresh(tmp_path, ["CUR", "OLD"], budget=1, transport=transport)
+        assert [int(u.split("CIK")[1][:10]) for u in fetched] == [1]   # the outdated one
