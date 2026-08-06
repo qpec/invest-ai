@@ -64,6 +64,29 @@ def append_source_observation(conn: sqlite3.Connection, *, ticker: str, source: 
     })
 
 
+def define_source_policy(conn: sqlite3.Connection, *, metric_definition_id: int,
+                         source: str, source_role: str, priority: int, certified: bool,
+                         active_from: str, created_at: str,
+                         tolerance_abs: float | None = None,
+                         tolerance_rel: float | None = None,
+                         max_age_seconds: int | None = None,
+                         active_until: str | None = None) -> int:
+    """Append an explicit primary/fallback admission policy for one metric version."""
+    return db.append_source_policy(conn, {
+        "metric_definition_id": metric_definition_id,
+        "source": source,
+        "source_role": source_role,
+        "priority": priority,
+        "certified": int(certified),
+        "tolerance_abs": tolerance_abs,
+        "tolerance_rel": tolerance_rel,
+        "max_age_seconds": max_age_seconds,
+        "active_from": active_from,
+        "active_until": active_until,
+        "created_at": created_at,
+    })
+
+
 def append_metric_observation(conn: sqlite3.Connection, *, metric_definition_id: int,
                               ticker: str, value: float | None, status: MetricStatus | str,
                               confidence: float, as_of: str, calculated_at: str,

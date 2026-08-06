@@ -111,3 +111,48 @@ def test_optional_missing_does_not_block_decision_readiness(tmp_path):
 
     assert health["optional_unusable"] == 1
     assert health["decision_ready"] == 1
+
+
+def test_uncertified_vendor_fallback_is_not_current(tmp_path):
+    conn = _conn(tmp_path)
+    definition_id = _definition(conn)
+    primary = ledger.append_metric_observation(
+        conn, metric_definition_id=definition_id, ticker="ACME", value=18.2,
+        status=ledger.MetricStatus.FRESH, confidence=1.0, as_of="2026-03-31",
+        calculated_at="2026-05-01T11:00:00Z", input_ids=[])
+    policy_id = ledger.define_source_policy(
+        conn, metric_definition_id=definition_id, source="vendor-x",
+        source_role="FALLBACK", priority=10, certified=False,
+        active_from="2026-01-01", created_at="2026-01-01T00:00:00Z")
+    ledger.append_metric_observation(
+        conn, metric_definition_id=definition_id, ticker="ACME", value=19.1,
+        status=ledger.MetricStatus.FRESH, confidence=0.8, as_of="2026-06-30",
+        calculated_at="2026-08-01T11:00:00Z", input_ids=[],
+        source_policy_id=policy_id)
+
+    assert ledger.current_metric(conn, "ACME", "owner_fcf_margin_pct")[
+        "metric_observation_id"] == primary
+
+
+def test_certified_vendor_fallback_is_current_and_labelled(tmp_path):
+    conn = _conn(tmp_path)
+    definition_id = _definition(conn)
+    ledger.append_metric_observation(
+        conn, metric_definition_id=definition_id, ticker="ACME", value=18.2,
+        status=ledger.MetricStatus.FRESH, confidence=1.0, as_of="2026-03-31",
+        calculated_at="2026-05-01T11:00:00Z", input_ids=[])
+    policy_id = ledger.define_source_policy(
+        conn, metric_definition_id=definition_id, source="vendor-x",
+        source_role="FALLBACK", priority=10, certified=True,
+        active_from="2026-01-01", created_at="2026-01-01T00:00:00Z")
+    fallback = ledger.append_metric_observation(
+        conn, metric_definition_id=definition_id, ticker="ACME", value=19.1,
+        status=ledger.MetricStatus.FRESH, confidence=0.8, as_of="2026-06-30",
+        calculated_at="2026-08-01T11:00:00Z", input_ids=[],
+        source_policy_id=policy_id)
+
+    current = ledger.current_metric(conn, "ACME", "owner_fcf_margin_pct")
+
+    assert current["metric_observation_id"] == fallback
+    assert current["source_role"] == "FALLBACK"
+    assert current["source"] == "vendor-x"

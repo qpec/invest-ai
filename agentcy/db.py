@@ -302,6 +302,30 @@ def append_metric_inputs(conn, metric_observation_id: int,
         })
 
 
+def append_source_policy(conn, row: Mapping) -> int:
+    """Append a versioned metric/source policy, returning its id on exact replay."""
+    allowed = frozenset({"metric_definition_id", "source", "source_role", "priority",
+                         "certified", "tolerance_abs", "tolerance_rel", "max_age_seconds",
+                         "active_from", "active_until", "created_at"})
+    values = _checked(row, allowed, "source_policy")
+    names = ("metric_definition_id", "source", "source_role", "priority", "certified",
+             "tolerance_abs", "tolerance_rel", "max_age_seconds", "active_from",
+             "active_until", "created_at")
+    conn.execute(
+        "INSERT OR IGNORE INTO source_policy"
+        " (metric_definition_id, source, source_role, priority, certified, tolerance_abs,"
+        "  tolerance_rel, max_age_seconds, active_from, active_until, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        tuple(values.get(name) for name in names),
+    )
+    found = conn.execute(
+        "SELECT policy_id FROM source_policy"
+        " WHERE metric_definition_id=? AND source=? AND active_from=?",
+        (values["metric_definition_id"], values["source"], values["active_from"]),
+    ).fetchone()
+    return int(found[0])
+
+
 def append_thesis(conn, *, thesis_id: str, ticker: str, origin: str,
                   created_at: str) -> None:
     """Insert immutable thesis identity."""

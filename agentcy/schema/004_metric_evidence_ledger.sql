@@ -117,6 +117,8 @@ WITH ranked AS (
            md.formula_version,
            md.unit,
            md.requirement,
+           COALESCE(sp.source_role, 'PRIMARY') AS source_role,
+           COALESCE(sp.source, 'ledger-primary') AS source,
            ROW_NUMBER() OVER (
                PARTITION BY mo.ticker, md.metric_key
                ORDER BY mo.as_of DESC, mo.calculated_at DESC,
@@ -124,7 +126,11 @@ WITH ranked AS (
            ) AS recency_rank
       FROM metric_observation mo
       JOIN metric_definition md ON md.definition_id = mo.metric_definition_id
-     WHERE md.active_until IS NULL OR md.active_until >= mo.as_of
+      LEFT JOIN source_policy sp ON sp.policy_id = mo.source_policy_id
+     WHERE (md.active_until IS NULL OR md.active_until >= mo.as_of)
+       AND (sp.policy_id IS NULL OR sp.source_role = 'PRIMARY' OR sp.certified = 1)
+       AND (sp.active_from IS NULL OR sp.active_from <= mo.as_of)
+       AND (sp.active_until IS NULL OR sp.active_until >= mo.as_of)
 )
 SELECT * FROM ranked WHERE recency_rank = 1;
 
