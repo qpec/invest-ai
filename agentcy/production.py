@@ -28,6 +28,7 @@ class ReleaseInput:
     index_exists: bool
     manifest_exists: bool
     data_quality_passed: bool
+    thesis_evaluations_passed: bool = True
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,7 @@ def validate_release(value: ReleaseInput) -> ReleaseResult:
         "public_fields_safe": not _contains_private_field(value.public_model),
         "site_complete": value.index_exists and value.manifest_exists,
         "data_quality_passed": value.data_quality_passed,
+        "thesis_evaluations_passed": value.thesis_evaluations_passed,
     }
     failed = tuple(name for name, passed in checks.items() if not passed)
     return ReleaseResult(passed=not failed, checks=checks, failed=failed)

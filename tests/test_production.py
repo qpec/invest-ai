@@ -17,6 +17,7 @@ def valid_release(**overrides):
         index_exists=True,
         manifest_exists=True,
         data_quality_passed=True,
+        thesis_evaluations_passed=True,
     )
     values.update(overrides)
     return production.ReleaseInput(**values)
@@ -37,6 +38,12 @@ def test_validate_rejects_mixed_snapshot_ids():
     result = production.validate_release(valid_release(
         component_snapshot_ids=frozenset({"snap-1", "snap-old"})))
     assert not result.checks["single_snapshot"]
+
+
+def test_validate_rejects_failed_top_thesis_evaluation():
+    result = production.validate_release(valid_release(
+        thesis_evaluations_passed=False))
+    assert not result.checks["thesis_evaluations_passed"]
 
 
 @pytest.mark.parametrize("field", sorted(production.PRIVATE_FIELDS))

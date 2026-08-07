@@ -8,6 +8,15 @@
 
 **Tech Stack:** Python 3.13, SQLite, pytest, existing Scout CLIs, static HTML/JSON, Bash, GitHub Pages classic branch deployment.
 
+**Execution status (2026-08-07):** Tasks 1–6 are implemented. The real local
+dry run proves the 5,763 eligible-security projection, 4,768 scoreable names,
+48 top members, atomic artifact creation and the privacy/site gates. Final live
+publication is deliberately blocked by `thesis_evaluations_passed`: this
+container has no accepted drafts for the 48 current top names and no
+owner-approved thesis-writing model is configured. OpenAI's approved-model list
+is empty by existing Gate policy and the Claude CLI is absent. The release gate
+therefore refuses to label those drafts current or push them to Pages.
+
 ---
 
 ## File map

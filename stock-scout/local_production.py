@@ -167,6 +167,8 @@ def make_local_stages(conn: sqlite3.Connection, config: LocalProductionConfig,
             stale = context.deep and record.exists()
             outcome, reason = thesis.evaluation_decision(
                 previous["input_fingerprint"] if previous else None, fingerprint, stale)
+            if not record.exists():
+                outcome, reason = "FAILED", "DRAFT_MISSING"
             evaluations.append({
                 **member, "input_fingerprint": fingerprint, "outcome": outcome,
                 "evaluated_at": context.started_at, "reason_code": reason,
@@ -225,6 +227,9 @@ def make_local_stages(conn: sqlite3.Connection, config: LocalProductionConfig,
             manifest_exists=(Path(build["artifact_path"]) /
                              "production-manifest.json").exists(),
             data_quality_passed=True,
+            thesis_evaluations_passed=all(
+                item["outcome"] != "FAILED"
+                for item in context.results["evaluate_theses"]["evaluations"]),
         ))
         return {"passed": outcome.passed, "failed": list(outcome.failed),
                 "checks": outcome.checks}
