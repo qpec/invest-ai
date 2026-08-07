@@ -273,6 +273,45 @@ def finish_market_price_run(conn, refresh_run_id: int, *, finished_at: str,
     )
 
 
+# --- Production Scout / thesis / monitor snapshots ---------------------------------
+
+_PRODUCTION_RUN_COLS = frozenset({
+    "run_id", "mode", "status", "source_commit", "started_at", "finished_at",
+    "failure_stage", "failure_reason",
+})
+_PRODUCTION_TOP_MEMBER_COLS = frozenset({
+    "run_id", "security_key", "symbol", "rank", "score",
+})
+_PRODUCTION_THESIS_EVALUATION_COLS = frozenset({
+    "run_id", "security_key", "symbol", "input_fingerprint", "outcome",
+    "evaluated_at", "reason_code", "thesis_version",
+})
+_PRODUCTION_SNAPSHOT_COLS = frozenset({
+    "snapshot_id", "run_id", "manifest_hash", "artifact_path", "created_at",
+    "active", "published_commit",
+})
+
+
+def append_production_run(conn, row: Mapping) -> int:
+    return _insert(conn, "production_run", _checked(
+        row, _PRODUCTION_RUN_COLS, "production_run"))
+
+
+def append_production_top_member(conn, row: Mapping) -> int:
+    return _insert(conn, "production_top_member", _checked(
+        row, _PRODUCTION_TOP_MEMBER_COLS, "production_top_member"))
+
+
+def append_production_thesis_evaluation(conn, row: Mapping) -> int:
+    return _insert(conn, "production_thesis_evaluation", _checked(
+        row, _PRODUCTION_THESIS_EVALUATION_COLS, "production_thesis_evaluation"))
+
+
+def append_production_snapshot(conn, row: Mapping) -> int:
+    return _insert(conn, "production_snapshot", _checked(
+        row, _PRODUCTION_SNAPSHOT_COLS, "production_snapshot"))
+
+
 _SCOUT_VERDICT_COLS = frozenset({"ticker", "axis", "value", "reason", "recorded_at"})
 
 def append_scout_verdict(conn, *, ticker: str, axis: str, value: str,
