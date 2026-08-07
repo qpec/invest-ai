@@ -51,7 +51,7 @@ ORDER_NAME = "WORK-ORDER.md"
 # guess here would quietly authorise second-rate work.
 APPROVED_MODELS = {
     "anthropic": ("claude-opus-5",),
-    "openai": (),
+    "openai": ("gpt-5.6-sol",),
 }
 
 # How a model id announces its provider. Checked longest-prefix-first so a future

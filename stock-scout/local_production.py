@@ -5,6 +5,7 @@ import hashlib
 import csv
 import json
 import sqlite3
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +13,7 @@ from pathlib import Path
 import monitor
 import thesis
 import webapp
+import deskwork
 from agentcy import market_prices
 from agentcy import production as release
 
@@ -27,6 +29,8 @@ class LocalProductionConfig:
     reports_dir: Path
     as_of: str
     network_refresh: bool = False
+    thesis_runner: Path | None = None
+    thesis_model: str = "gpt-5.6-sol"
 
 
 def export_price_grid(conn: sqlite3.Connection, directory: Path) -> int:
@@ -83,9 +87,58 @@ def _file_hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def prepare_thesis_orders(config: LocalProductionConfig, eligible_universe: Path,
+                          symbols: list[str]) -> None:
+    if not symbols:
+        return
+    args = [
+        "brief", *sorted(symbols), "--sec-data", str(config.sec_data),
+        "--prices", str(config.price_grid), "--universe", str(eligible_universe),
+        "--as-of", config.as_of, "--theses-dir", str(config.theses_dir),
+        "--enrich-cache", str(config.enrich_cache), "--no-filings",
+    ]
+    if thesis.main(args):
+        raise RuntimeError("thesis work-order preparation failed")
+
+
+def execute_thesis_runner(config: LocalProductionConfig, symbol: str, run_id: str,
+                          *, run_command=subprocess.run) -> dict:
+    if config.thesis_runner is None:
+        raise RuntimeError("thesis runner is not configured")
+    order = (config.theses_dir / "drafts" / symbol / deskwork.ORDER_NAME).resolve()
+    if not order.exists():
+        raise FileNotFoundError(f"missing thesis work order for {symbol}")
+    run_command(
+        [str(config.thesis_runner), symbol, str(order), run_id], check=True,
+    )
+    return thesis.record(
+        symbol, theses_dir=config.theses_dir, model=config.thesis_model,
+    )
+
+
+def _record_is_accepted(path: Path) -> bool:
+    if not path.exists():
+        return False
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return not doc.get("validation_problems") and bool(doc.get("agent", {}).get("approved"))
+
+
 def make_local_stages(conn: sqlite3.Connection, config: LocalProductionConfig,
                       *, publish=lambda context: {"commit": "STAGED"}):
     from production import ProductionStages
+
+    def assemble_model(context):
+        model = webapp.assemble(
+            sec_data=str(config.sec_data), prices_dir=str(config.price_grid),
+            universe=str(context.runtime["eligible_universe"]), as_of=config.as_of,
+            enrich_cache=str(config.enrich_cache), theses_dir=str(config.theses_dir),
+            log=lambda message: None,
+        )
+        model["snapshot_id"] = context.snapshot_id
+        return model
 
     def refresh(context):
         if config.network_refresh:
@@ -119,13 +172,8 @@ def make_local_stages(conn: sqlite3.Connection, config: LocalProductionConfig,
             conn, config.universe, eligible_universe)
         if not eligible_count:
             raise RuntimeError("security master has no eligible universe rows")
-        model = webapp.assemble(
-            sec_data=str(config.sec_data), prices_dir=str(config.price_grid),
-            universe=str(eligible_universe), as_of=config.as_of,
-            enrich_cache=str(config.enrich_cache), theses_dir=str(config.theses_dir),
-            log=lambda message: None,
-        )
-        model["snapshot_id"] = context.snapshot_id
+        context.runtime["eligible_universe"] = eligible_universe
+        model = assemble_model(context)
         context.runtime["model"] = model
         return {"eligible": model["counts"]["screened"], "rows": model["rows"]}
 
@@ -146,6 +194,7 @@ def make_local_stages(conn: sqlite3.Connection, config: LocalProductionConfig,
         model = context.runtime["model"]
         by_symbol = {row["s"]: row for row in model["rows"]}
         evaluations = []
+        pending = []
         for member in context.results["select_top"]["members"]:
             symbol = member["symbol"]
             compact = by_symbol[symbol]
@@ -164,16 +213,44 @@ def make_local_stages(conn: sqlite3.Connection, config: LocalProductionConfig,
                 (member["security_key"],),
             ).fetchone()
             record = config.theses_dir / "drafts" / symbol / "record.json"
-            stale = context.deep and record.exists()
+            accepted = _record_is_accepted(record)
+            stale = context.deep and accepted
             outcome, reason = thesis.evaluation_decision(
                 previous["input_fingerprint"] if previous else None, fingerprint, stale)
-            if not record.exists():
-                outcome, reason = "FAILED", "DRAFT_MISSING"
-            evaluations.append({
+            evaluation = {
                 **member, "input_fingerprint": fingerprint, "outcome": outcome,
                 "evaluated_at": context.started_at, "reason_code": reason,
                 "thesis_version": None,
-            })
+            }
+            if not accepted or outcome != "REUSED":
+                pending.append((symbol, evaluation))
+            evaluations.append(evaluation)
+
+        preparation_error = None
+        if pending:
+            try:
+                prepare_thesis_orders(
+                    config, context.runtime["eligible_universe"],
+                    [symbol for symbol, _evaluation in pending],
+                )
+            except Exception as error:  # each candidate still gets an auditable failure
+                preparation_error = error
+
+        for symbol, evaluation in pending:
+            try:
+                if preparation_error is not None:
+                    raise preparation_error
+                doc = execute_thesis_runner(config, symbol, context.run_id)
+                # Draft records are version 0; production_thesis_evaluation reserves
+                # positive versions for owner-ratified theses.
+                evaluation["thesis_version"] = doc.get("version") or None
+            except Exception as error:  # one bad thesis blocks release without losing peers
+                evaluation["outcome"] = "FAILED"
+                evaluation["reason_code"] = (
+                    "WORK_ORDER_FAILED" if preparation_error is not None
+                    else "THESIS_RUNNER_OR_GATE_FAILED"
+                )
+                print(f"{symbol}: thesis evaluation failed: {type(error).__name__}: {error}")
         return {"evaluations": evaluations}
 
     def run_monitor(context):
@@ -195,8 +272,10 @@ def make_local_stages(conn: sqlite3.Connection, config: LocalProductionConfig,
 
     def build_site(context):
         artifact = config.artifact_root / context.run_id
+        artifact.mkdir(parents=True, exist_ok=True)
         docs = artifact / "docs"
-        model = context.runtime["model"]
+        model = assemble_model(context)
+        context.runtime["model"] = model
         webapp.write_site(model, docs)
         manifest = {
             "schema_version": 1, "run_id": context.run_id,

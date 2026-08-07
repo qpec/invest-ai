@@ -207,6 +207,8 @@ def main(argv=None) -> int:
             command.add_argument("--enrich-cache", required=True)
             command.add_argument("--theses-dir", required=True)
             command.add_argument("--reports-dir", required=True)
+            command.add_argument("--thesis-runner", required=True)
+            command.add_argument("--thesis-model", default="gpt-5.6-sol")
             command.add_argument("--as-of", required=True)
             command.add_argument("--network-refresh", action="store_true")
         else:
@@ -260,6 +262,7 @@ def main(argv=None) -> int:
         enrich_cache=Path(args.enrich_cache), theses_dir=Path(args.theses_dir),
         reports_dir=Path(args.reports_dir), as_of=args.as_of,
         network_refresh=args.network_refresh,
+        thesis_runner=Path(args.thesis_runner), thesis_model=args.thesis_model,
     )
     source_commit = _git_commit(Path(args.repo))
     orchestrator = ProductionOrchestrator(

@@ -775,6 +775,14 @@ class TestTwoProviderModelGate:
         assert problems == []
         assert "openai" in deskwork.model_note(info)
 
+    def test_owner_approved_gpt_56_sol_is_accepted(self):
+        info, problems = deskwork.resolve_model("gpt-5.6-sol", transcript=None)
+        assert problems == []
+        assert info == {
+            "id": "gpt-5.6-sol", "provider": "openai",
+            "provenance": "declared", "approved": True,
+        }
+
     def test_cross_provider_approval_does_not_leak(self, monkeypatch):
         monkeypatch.setattr(deskwork, "APPROVED_MODELS",
                             {"anthropic": ("claude-opus-5",), "openai": ("gpt-5.2",)})
