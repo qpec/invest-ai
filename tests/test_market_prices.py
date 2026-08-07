@@ -133,3 +133,36 @@ def test_refresh_persists_latest_bar_and_historical_split_events(tmp_db):
     assert [(row["bar_date"], row["split_ratio"]) for row in rows] == [
         ("2026-02-01", 2.0), ("2026-08-06", None)
     ]
+
+
+def test_refresh_treats_share_classes_with_same_issuer_key_as_distinct(tmp_db):
+    from agentcy.market_prices import refresh
+
+    _eligible(tmp_db)
+    run_id = tmp_db.execute(
+        "SELECT run_id FROM security_master_run WHERE status='SUCCEEDED'"
+    ).fetchone()[0]
+    tmp_db.execute(
+        "UPDATE security_master_run SET input_rows=3, eligible_rows=3 WHERE run_id=?",
+        (run_id,),
+    )
+    tmp_db.execute(
+        "INSERT INTO security_observation"
+        " (run_id, security_key, cik, symbol, name, country, exchange, currency,"
+        " instrument_type, eligibility, reason_code, source, source_hash, observed_at)"
+        " VALUES (?, 'cik:0000000001', '0000000001', 'ACMEB', 'ACME class B', 'US',"
+        " 'Nasdaq', 'USD', 'ORDINARY_SHARE', 'ELIGIBLE', 'PRIMARY_ORDINARY_SHARE',"
+        " 'test', 'hash-ACMEB', '2026-08-07T10:00:00Z')",
+        (run_id,),
+    )
+
+    summary = refresh(
+        tmp_db, fetch_batch=_fetch, state_dir=Path("/tmp/unused"), now=NOW,
+        scheduled_for="2026-08-07", budget=3, chunk_size=3,
+    )
+
+    assert summary.status == "SUCCEEDED"
+    assert summary.completed == 3
+    assert tmp_db.execute(
+        "SELECT COUNT(*) FROM v_current_market_price"
+    ).fetchone()[0] == 3

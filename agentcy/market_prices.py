@@ -56,15 +56,15 @@ def _start_run(conn: sqlite3.Connection, *, scheduled_for: str, started_at: str,
     })
 
 
-def _latest_outcomes(conn: sqlite3.Connection, run_id: int) -> dict[str, str]:
+def _latest_outcomes(conn: sqlite3.Connection, run_id: int) -> dict[tuple[str, str], str]:
     rows = conn.execute(
-        "SELECT security_key, outcome FROM ("
-        " SELECT *, ROW_NUMBER() OVER (PARTITION BY security_key"
+        "SELECT security_key, provider_symbol, outcome FROM ("
+        " SELECT *, ROW_NUMBER() OVER (PARTITION BY security_key, provider_symbol"
         " ORDER BY attempt_no DESC, price_attempt_id DESC) rank"
         " FROM market_price_attempt WHERE refresh_run_id=?"
         ") WHERE rank=1", (run_id,)
     )
-    return {row["security_key"]: row["outcome"] for row in rows}
+    return {(row["security_key"], row["provider_symbol"]): row["outcome"] for row in rows}
 
 
 def _attempt_no(conn: sqlite3.Connection, run_id: int, security_key: str) -> int:
@@ -160,7 +160,8 @@ def refresh(conn: sqlite3.Connection, *, state_dir: Path, now: datetime,
     outcomes = _latest_outcomes(conn, run_id)
     done = {key for key, outcome in outcomes.items()
             if outcome in {"OK", "NO_DATA", "TERMINAL"}}
-    pending = [row for row in securities if row["security_key"] not in done]
+    pending = [row for row in securities
+               if (row["security_key"], row["symbol"]) not in done]
     work = pending[:max(0, int(budget))]
 
     for offset in range(0, len(work), max(1, int(chunk_size))):
