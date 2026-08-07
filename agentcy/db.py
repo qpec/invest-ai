@@ -229,6 +229,50 @@ def append_security_alias(conn, row: Mapping) -> int:
         row, _SECURITY_ALIAS_COLS, "security_alias"))
 
 
+# --- Local market-price evidence -----------------------------------------------------
+
+_MARKET_PRICE_RUN_COLS = frozenset({
+    "scheduled_for", "attempt", "started_at", "status", "selected_count",
+})
+_MARKET_PRICE_ATTEMPT_COLS = frozenset({
+    "refresh_run_id", "security_key", "provider_symbol", "attempt_no",
+    "attempted_at", "outcome", "reason_code", "detail",
+})
+_MARKET_PRICE_OBSERVATION_COLS = frozenset({
+    "refresh_run_id", "security_key", "provider", "provider_symbol", "bar_date",
+    "raw_close", "adjusted_close", "dividend", "split_ratio", "currency",
+    "fetched_at", "payload_hash",
+})
+
+
+def append_market_price_run(conn, row: Mapping) -> int:
+    return _insert(conn, "market_price_refresh_run", _checked(
+        row, _MARKET_PRICE_RUN_COLS, "market_price_refresh_run"))
+
+
+def append_market_price_attempt(conn, row: Mapping) -> int:
+    return _insert(conn, "market_price_attempt", _checked(
+        row, _MARKET_PRICE_ATTEMPT_COLS, "market_price_attempt"))
+
+
+def append_market_price_observation(conn, row: Mapping) -> int:
+    return _insert(conn, "market_price_observation", _checked(
+        row, _MARKET_PRICE_OBSERVATION_COLS, "market_price_observation"))
+
+
+def finish_market_price_run(conn, refresh_run_id: int, *, finished_at: str,
+                            status: str, ok_count: int, terminal_count: int,
+                            failed_count: int, failure_summary: str | None = None,
+                            promoted: bool = False) -> None:
+    conn.execute(
+        "UPDATE market_price_refresh_run SET finished_at=?, status=?, ok_count=?,"
+        " terminal_count=?, failed_count=?, failure_summary=?, promoted=?"
+        " WHERE refresh_run_id=?",
+        (finished_at, status, ok_count, terminal_count, failed_count,
+         failure_summary, int(promoted), refresh_run_id),
+    )
+
+
 _SCOUT_VERDICT_COLS = frozenset({"ticker", "axis", "value", "reason", "recorded_at"})
 
 def append_scout_verdict(conn, *, ticker: str, axis: str, value: str,
