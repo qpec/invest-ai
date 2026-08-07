@@ -165,3 +165,15 @@ def record_published_commit(conn: sqlite3.Connection, snapshot_id: str,
         (finished_at, row["run_id"]),
     )
     conn.commit()
+
+
+def record_publication_failure(conn: sqlite3.Connection, run_id: str, *, reason: str,
+                               finished_at: str) -> None:
+    if _run_status(conn, run_id) != "VALIDATED":
+        raise ValueError("only a VALIDATED run can record a publication failure")
+    conn.execute(
+        "UPDATE production_run SET finished_at=?, failure_stage='publish',"
+        " failure_reason=? WHERE run_id=?",
+        (finished_at, reason, run_id),
+    )
+    conn.commit()
