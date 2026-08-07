@@ -91,7 +91,8 @@ def append_metric_observation(conn: sqlite3.Connection, *, metric_definition_id:
                               ticker: str, value: float | None, status: MetricStatus | str,
                               confidence: float, as_of: str, calculated_at: str,
                               input_ids: Iterable[int], refresh_run_id: int | None = None,
-                              source_policy_id: int | None = None) -> int:
+                              source_policy_id: int | None = None,
+                              reason_code: str = "LEGACY") -> int:
     """Atomically append a derived metric and its exact source lineage."""
     numeric = None if value is None else float(value)
     if numeric is not None and not math.isfinite(numeric):
@@ -106,6 +107,7 @@ def append_metric_observation(conn: sqlite3.Connection, *, metric_definition_id:
             "value": numeric,
             "status": MetricStatus(status).value,
             "confidence": confidence,
+            "reason_code": reason_code,
             "as_of": as_of,
             "calculated_at": calculated_at,
             "refresh_run_id": refresh_run_id,

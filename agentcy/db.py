@@ -375,7 +375,8 @@ def append_source_observation(conn, row: Mapping) -> int:
 def append_metric_observation(conn, row: Mapping) -> int:
     """Append one derived metric observation."""
     allowed = frozenset({"metric_definition_id", "ticker", "value", "status", "confidence",
-                         "as_of", "calculated_at", "refresh_run_id", "source_policy_id"})
+                         "reason_code", "as_of", "calculated_at", "refresh_run_id",
+                         "source_policy_id"})
     return _insert(conn, "metric_observation",
                    _checked(row, allowed, "metric_observation"))
 

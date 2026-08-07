@@ -91,7 +91,9 @@ def _append_attempt(conn, *, run_id: int, security_key: str, symbol: str,
 
 def _append_frame(conn, *, run_id: int, security_key: str, symbol: str,
                   frame: pd.DataFrame, fetched_at: str) -> None:
-    for index, values in frame.iterrows():
+    latest = frame.index.max()
+    retained = frame[(frame.index == latest) | (frame["split"].astype(float) > 0)]
+    for index, values in retained.iterrows():
         split = float(values["split"])
         evidence = {
             "security_key": security_key,
@@ -167,7 +169,7 @@ def refresh(conn: sqlite3.Connection, *, state_dir: Path, now: datetime,
         currencies = {row["symbol"]: row["currency"] for row in chunk}
         try:
             frames, failures = fetch_batch(
-                symbols, currencies=currencies, state_dir=Path(state_dir), period="10d"
+                symbols, currencies=currencies, state_dir=Path(state_dir), period="2y"
             )
         except fetch_yf.RateLimited as error:
             with conn:

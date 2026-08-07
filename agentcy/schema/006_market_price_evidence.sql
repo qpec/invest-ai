@@ -4,6 +4,11 @@
 -- one extra metadata request per symbol. Existing snapshots remain readable as NULL.
 ALTER TABLE security_observation ADD COLUMN currency TEXT;
 
+-- New metric writes name why a value is present or absent. Legacy rows remain explicit
+-- as LEGACY so existing readers and migrations keep their historical meaning.
+ALTER TABLE metric_observation
+    ADD COLUMN reason_code TEXT NOT NULL DEFAULT 'LEGACY';
+
 CREATE TABLE market_price_refresh_run (
     refresh_run_id INTEGER PRIMARY KEY,
     scheduled_for TEXT NOT NULL,
