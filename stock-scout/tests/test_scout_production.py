@@ -120,3 +120,18 @@ def test_publish_failure_is_retryable_without_recomputation(production_db, tmp_p
     ).retry_publish("run-1")
     assert retry.status == "PUBLISHED"
     assert calls == before + ["publish-retry"]
+
+
+def test_deferred_publish_stops_after_atomic_promotion(production_db, tmp_path):
+    calls = []
+    result = production.ProductionOrchestrator(
+        production_db, stage_set(calls, tmp_path / "artifact"),
+        source_commit="source", now=lambda: "2026-08-07T12:00:00Z",
+        defer_publish=True,
+    ).run(mode="manual", run_id="run-1", snapshot_id="snap-1")
+    assert result.status == "VALIDATED"
+    assert calls[-1] == "validate"
+    assert "publish" not in calls
+    assert production_db.execute(
+        "SELECT active FROM production_snapshot WHERE snapshot_id='snap-1'"
+    ).fetchone()[0] == 1
