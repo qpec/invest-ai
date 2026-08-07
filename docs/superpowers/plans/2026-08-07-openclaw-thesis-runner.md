@@ -14,27 +14,27 @@
 
 **Files:** `stock-scout/deskwork.py`, `stock-scout/tests/test_thesis_engine.py`, `deploy/local/scout-thesis-runner.sh`, `tests/test_production_deploy.py`
 
-- [ ] Add a failing test that `gpt-5.6-sol` resolves as an approved OpenAI model.
-- [ ] Add failing deploy tests for isolated session key, explicit model, max thinking and timeout.
-- [ ] Implement the allowlist entry and narrow OpenClaw runner.
-- [ ] Run focused tests and commit.
+- [x] Add a failing test that `gpt-5.6-sol` resolves as an approved OpenAI model.
+- [x] Add failing deploy tests for isolated session key, explicit model, maximum-effort instruction and timeout.
+- [x] Implement the allowlist entry and narrow OpenClaw runner.
+- [x] Run focused tests and commit.
 
 ### Task 2: Execute changed work orders inside production
 
 **Files:** `stock-scout/local_production.py`, `stock-scout/production.py`, `stock-scout/tests/test_local_production.py`, `deploy/local/scout-production.sh`, `deploy/local/scout-production.env.example`
 
-- [ ] Add failing tests proving missing/changed drafts invoke the runner and accepted unchanged drafts are reused.
-- [ ] Extend configuration with runner path and model ID.
-- [ ] Prepare work orders in one batch, invoke each candidate runner and call `thesis.record`.
-- [ ] Persist `FAILED` for any runner or validation failure and retain the existing release gate.
-- [ ] Run focused tests and commit.
+- [x] Add failing tests proving missing/changed drafts invoke the runner and accepted unchanged drafts are reused.
+- [x] Extend configuration with runner path and model ID.
+- [x] Prepare work orders in one batch, invoke each candidate runner and call `thesis.record`.
+- [x] Persist `FAILED` for any runner or validation failure and retain the existing release gate.
+- [x] Run focused tests and commit.
 
 ### Task 3: Generate, validate and publish
 
 **Files:** generated local thesis state and `bot/site` public artifacts only.
 
-- [ ] Run the complete local production job over 5,763 eligible securities.
-- [ ] Execute all required top-1% work orders with max effort and resume safely.
-- [ ] Verify every top member has an accepted record and no private public fields exist.
-- [ ] Run the full test suite.
+- [x] Run the complete local production job over 5,763 eligible securities.
+- [x] Execute all required top-1% work orders with max effort and resume safely.
+- [x] Verify every top member has an accepted record and no private public fields exist.
+- [x] Run the full test suite.
 - [ ] Push main, publish the validated snapshot to `bot/site`, verify the live site and report exact counts.

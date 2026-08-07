@@ -11,7 +11,10 @@ OpenClaw OAuth route to execute top-1% thesis work orders.
 Python remains authoritative. It prepares one immutable work order per current
 top-1% candidate and invokes a narrow runner executable with the symbol and
 absolute work-order path. The runner starts an isolated Nova session using
-`openai/gpt-5.6-sol` with `max` thinking. Nova may write only the requested
+`openai/gpt-5.6-sol` through the Codex harness with an explicit maximum-effort
+instruction. The OpenClaw adapter reports this harness as fixed `thinking=off`, so
+the runner deliberately does not send the unsupported `--thinking max` override.
+Nova may write only the requested
 draft artifacts. Python then calls the existing `thesis.record` validation and
 persists `CREATED`, `REFRESHED`, `REUSED` or `FAILED` with the input fingerprint.
 
