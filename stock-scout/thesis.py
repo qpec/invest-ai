@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -473,6 +474,46 @@ def top_symbols(rows: list[dict], universe_size: int) -> list[dict]:
                                                scorecard.NO_PRICE_BAND)]
     count = max(1, math.ceil(universe_size * TOP_FRACTION))
     return sorted(scoreable, key=lambda r: scorecard.rank_key(r["card"]))[:count]
+
+
+def research_fingerprint(row: dict, formula_version: str) -> str:
+    """Stable identity of the evidence and rank a draft thesis was evaluated against.
+
+    Rendering timestamps and prose are deliberately absent: re-evaluating unchanged
+    inputs records REUSED without manufacturing a new research artifact.
+    """
+    card = row.get("card") or {}
+    bundle = row.get("bundle") or {}
+    material = {
+        "security_key": row.get("security_key") or row.get("symbol"),
+        "symbol": row.get("symbol"),
+        "rank": row.get("rank"),
+        "formula_version": formula_version,
+        "card": {key: card.get(key) for key in
+                 ("score", "pct", "band", "evidence")},
+        "evidence": {
+            "companyfacts_hash": bundle.get("companyfacts_hash"),
+            "accessions": sorted(bundle.get("accessions") or []),
+            "price_observation_id": bundle.get("price_observation_id"),
+            "metric_evidence_ids": sorted(bundle.get("metric_evidence_ids") or []),
+        },
+    }
+    encoded = json.dumps(
+        material, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def evaluation_decision(previous_fingerprint: str | None, current_fingerprint: str,
+                        stale: bool) -> tuple[str, str]:
+    """Return the draft-only action and auditable reason for one top member."""
+    if previous_fingerprint is None:
+        return "CREATED", "NEW_TOP_MEMBER"
+    if stale:
+        return "REFRESHED", "RESEARCH_STALE"
+    if previous_fingerprint != current_fingerprint:
+        return "REFRESHED", "INPUTS_CHANGED"
+    return "REUSED", "INPUTS_UNCHANGED"
 
 
 # --- Ratify (the Gate step, FR9) ----------------------------------------------------------

@@ -781,3 +781,60 @@ class TestTwoProviderModelGate:
         info, problems = deskwork.resolve_model("claude-haiku-9", transcript=None)
         assert info["approved"] is False
         assert any("not approved" in p and "anthropic" in p for p in problems)
+
+
+class TestProductionThesisFreshness:
+    def row(self):
+        return {
+            "security_key": "sec-aaa",
+            "symbol": "AAA",
+            "rank": 1,
+            "card": {"score": 70.0, "pct": 80.0, "band": "Exceptional",
+                     "evidence": "full", "generated_at": "volatile"},
+            "bundle": {
+                "companyfacts_hash": "facts-a",
+                "accessions": ["0001", "0002"],
+                "price_observation_id": 42,
+                "metric_evidence_ids": [9, 4],
+                "generated_at": "also volatile",
+            },
+        }
+
+    def test_research_fingerprint_is_stable_and_ignores_render_timestamps(self):
+        left = self.row()
+        right = {
+            "bundle": dict(reversed(list(left["bundle"].items()))),
+            "card": dict(reversed(list(left["card"].items()))),
+            "rank": 1, "symbol": "AAA", "security_key": "sec-aaa",
+        }
+        right["card"]["generated_at"] = "changed"
+        right["bundle"]["generated_at"] = "changed"
+        assert thesis.research_fingerprint(left, "scout-v1") == \
+            thesis.research_fingerprint(right, "scout-v1")
+
+    @pytest.mark.parametrize("path,value", [
+        (("rank",), 2),
+        (("card", "score"), 71.0),
+        (("bundle", "companyfacts_hash"), "facts-b"),
+        (("bundle", "price_observation_id"), 43),
+        (("bundle", "accessions"), ["0003"]),
+    ])
+    def test_research_fingerprint_changes_with_evidence_or_rank(self, path, value):
+        before = self.row()
+        after = self.row()
+        target = after
+        for key in path[:-1]:
+            target = target[key]
+        target[path[-1]] = value
+        assert thesis.research_fingerprint(before, "scout-v1") != \
+            thesis.research_fingerprint(after, "scout-v1")
+
+    def test_evaluation_decision_is_explicit(self):
+        assert thesis.evaluation_decision(None, "a", False) == \
+            ("CREATED", "NEW_TOP_MEMBER")
+        assert thesis.evaluation_decision("a", "a", False) == \
+            ("REUSED", "INPUTS_UNCHANGED")
+        assert thesis.evaluation_decision("a", "b", False) == \
+            ("REFRESHED", "INPUTS_CHANGED")
+        assert thesis.evaluation_decision("a", "a", True) == \
+            ("REFRESHED", "RESEARCH_STALE")
