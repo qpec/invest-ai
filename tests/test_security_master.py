@@ -217,6 +217,18 @@ def test_import_writes_provider_aliases(tmp_db, universe_csv, sec_exchange_json)
     assert aliases[1]["security_key"] == "cik:0000000001"
 
 
+def test_import_retains_listing_currency(tmp_db, universe_csv, sec_exchange_json):
+    from agentcy.security_master import import_snapshot
+
+    import_snapshot(tmp_db, universe_csv, sec_exchange_json,
+                    source_vintage="2026-08-07",
+                    observed_at="2026-08-07T08:00:00Z")
+    row = tmp_db.execute(
+        "SELECT currency FROM v_current_security WHERE symbol='DUTCH.AS'"
+    ).fetchone()
+    assert row["currency"] == "EUR"
+
+
 def test_import_keeps_stale_ticker_collision_in_review(tmp_db, tmp_path):
     from agentcy.security_master import import_snapshot
 

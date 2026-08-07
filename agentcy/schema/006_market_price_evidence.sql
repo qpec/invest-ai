@@ -1,5 +1,9 @@
 -- Immutable provider-neutral market-price evidence and resumable refresh state.
 
+-- Currency belongs to listing identity and is needed to validate batched prices without
+-- one extra metadata request per symbol. Existing snapshots remain readable as NULL.
+ALTER TABLE security_observation ADD COLUMN currency TEXT;
+
 CREATE TABLE market_price_refresh_run (
     refresh_run_id INTEGER PRIMARY KEY,
     scheduled_for TEXT NOT NULL,

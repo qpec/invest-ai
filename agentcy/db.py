@@ -190,7 +190,7 @@ _SECURITY_RUN_COLS = frozenset({"source_vintage", "input_hash", "started_at", "s
                                  "input_rows"})
 _SECURITY_OBSERVATION_COLS = frozenset({
     "run_id", "security_key", "cik", "symbol", "name", "country", "exchange",
-    "instrument_type", "eligibility", "reason_code", "source", "source_hash",
+    "currency", "instrument_type", "eligibility", "reason_code", "source", "source_hash",
     "observed_at",
 })
 _SECURITY_ALIAS_COLS = frozenset({
