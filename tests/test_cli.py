@@ -8,6 +8,7 @@ def test_parser_covers_the_section_10_surface():
     assert set(sub.choices) == {
         "run", "bot", "gate", "scout", "watchlist", "snapshot", "journal",
         "thesis", "config", "absence", "ask", "event", "render",
+        "security-master",
     }
 
 

@@ -143,6 +143,18 @@ def build_parser() -> argparse.ArgumentParser:
                     help="regenerate every archive file from the DB (§8)")
     rd.set_defaults(handler="render")
 
+    sm = sub.add_parser("security-master", help="local security identity and eligibility")
+    smsub = sm.add_subparsers(dest="security_master_cmd", required=True)
+    smimport = smsub.add_parser("import", help="import an append-only universe snapshot")
+    smimport.add_argument("--universe", required=True, help="normalized universe CSV")
+    smimport.add_argument("--sec-exchange", required=True,
+                          help="SEC company_tickers_exchange.json")
+    smimport.add_argument("--vintage", required=True, help="source vintage label")
+    smimport.set_defaults(handler="security-master")
+    smaudit = smsub.add_parser("audit", help="write current eligibility coverage JSON")
+    smaudit.add_argument("--out", required=True, help="atomic JSON output path")
+    smaudit.set_defaults(handler="security-master")
+
     return p
 
 
@@ -654,6 +666,36 @@ def _cmd_event(args) -> int:
     return 0
 
 
+def _cmd_security_master(args) -> int:
+    """Import immutable identity observations or publish the current audit summary."""
+    import json
+
+    from agentcy import db, security_master
+
+    conn = _open()
+    if args.security_master_cmd == "import":
+        summary = security_master.import_snapshot(
+            conn,
+            Path(args.universe),
+            Path(args.sec_exchange),
+            source_vintage=args.vintage,
+            observed_at=db.to_iso(_clock().now()),
+        )
+        print(json.dumps(summary.__dict__, sort_keys=True))
+        return 0
+
+    payload = security_master.audit_summary(conn)
+    payload["generated_at"] = db.to_iso(_clock().now())
+    output = Path(args.out)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_suffix(output.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                         encoding="utf-8")
+    os.replace(temporary, output)
+    print(json.dumps(payload, sort_keys=True))
+    return 0
+
+
 def _archive_dir():
     """§8: the archive lives at <state_dir>/archive — derived, never hardcoded."""
     from agentcy import db
@@ -674,6 +716,7 @@ _HANDLERS["thesis"] = _cmd_thesis
 _HANDLERS["journal"] = _cmd_journal
 _HANDLERS["ask"] = _cmd_ask
 _HANDLERS["event"] = _cmd_event
+_HANDLERS["security-master"] = _cmd_security_master
 
 
 def main(argv: Sequence[str] | None = None) -> int:
