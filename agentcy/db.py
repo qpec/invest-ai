@@ -184,6 +184,134 @@ def append_universe_fetch(conn, *, yf_ticker: str, outcome: str, attempted_at: s
          "run_id": run_id}, _UNIVERSE_FETCH_COLS, "universe_fetch"))
 
 
+# --- Local security master ------------------------------------------------------------
+
+_SECURITY_RUN_COLS = frozenset({"source_vintage", "input_hash", "started_at", "status",
+                                 "input_rows"})
+_SECURITY_OBSERVATION_COLS = frozenset({
+    "run_id", "security_key", "cik", "symbol", "name", "country", "exchange",
+    "currency", "instrument_type", "eligibility", "reason_code", "source", "source_hash",
+    "observed_at",
+})
+_SECURITY_ALIAS_COLS = frozenset({
+    "run_id", "security_key", "provider", "symbol", "exchange", "valid_from",
+    "valid_until", "observed_at",
+})
+
+
+def append_security_master_run(conn, row: Mapping) -> int:
+    """Start one immutable-input security-master run."""
+    return _insert(conn, "security_master_run", _checked(
+        row, _SECURITY_RUN_COLS, "security_master_run"))
+
+
+def finish_security_master_run(conn, run_id: int, *, finished_at: str, status: str,
+                               eligible_rows: int, ineligible_rows: int,
+                               review_rows: int, failure_summary: str | None = None) -> None:
+    """Finish the mutable run envelope; evidence rows themselves remain immutable."""
+    conn.execute(
+        "UPDATE security_master_run SET finished_at=?, status=?, eligible_rows=?,"
+        " ineligible_rows=?, review_rows=?, failure_summary=? WHERE run_id=?",
+        (finished_at, status, eligible_rows, ineligible_rows, review_rows,
+         failure_summary, run_id),
+    )
+
+
+def append_security_observation(conn, row: Mapping) -> int:
+    """Append one classified listing observation."""
+    return _insert(conn, "security_observation", _checked(
+        row, _SECURITY_OBSERVATION_COLS, "security_observation"))
+
+
+def append_security_alias(conn, row: Mapping) -> int:
+    """Append one provider-symbol alias for a stable security key."""
+    return _insert(conn, "security_alias", _checked(
+        row, _SECURITY_ALIAS_COLS, "security_alias"))
+
+
+# --- Local market-price evidence -----------------------------------------------------
+
+_MARKET_PRICE_RUN_COLS = frozenset({
+    "scheduled_for", "attempt", "started_at", "status", "selected_count",
+})
+_MARKET_PRICE_ATTEMPT_COLS = frozenset({
+    "refresh_run_id", "security_key", "provider_symbol", "attempt_no",
+    "attempted_at", "outcome", "reason_code", "detail",
+})
+_MARKET_PRICE_OBSERVATION_COLS = frozenset({
+    "refresh_run_id", "security_key", "provider", "provider_symbol", "bar_date",
+    "raw_close", "adjusted_close", "dividend", "split_ratio", "currency",
+    "fetched_at", "payload_hash",
+})
+
+
+def append_market_price_run(conn, row: Mapping) -> int:
+    return _insert(conn, "market_price_refresh_run", _checked(
+        row, _MARKET_PRICE_RUN_COLS, "market_price_refresh_run"))
+
+
+def append_market_price_attempt(conn, row: Mapping) -> int:
+    return _insert(conn, "market_price_attempt", _checked(
+        row, _MARKET_PRICE_ATTEMPT_COLS, "market_price_attempt"))
+
+
+def append_market_price_observation(conn, row: Mapping) -> int:
+    return _insert(conn, "market_price_observation", _checked(
+        row, _MARKET_PRICE_OBSERVATION_COLS, "market_price_observation"))
+
+
+def finish_market_price_run(conn, refresh_run_id: int, *, finished_at: str,
+                            status: str, ok_count: int, terminal_count: int,
+                            failed_count: int, failure_summary: str | None = None,
+                            promoted: bool = False) -> None:
+    conn.execute(
+        "UPDATE market_price_refresh_run SET finished_at=?, status=?, ok_count=?,"
+        " terminal_count=?, failed_count=?, failure_summary=?, promoted=?"
+        " WHERE refresh_run_id=?",
+        (finished_at, status, ok_count, terminal_count, failed_count,
+         failure_summary, int(promoted), refresh_run_id),
+    )
+
+
+# --- Production Scout / thesis / monitor snapshots ---------------------------------
+
+_PRODUCTION_RUN_COLS = frozenset({
+    "run_id", "mode", "status", "source_commit", "started_at", "finished_at",
+    "failure_stage", "failure_reason",
+})
+_PRODUCTION_TOP_MEMBER_COLS = frozenset({
+    "run_id", "security_key", "symbol", "rank", "score",
+})
+_PRODUCTION_THESIS_EVALUATION_COLS = frozenset({
+    "run_id", "security_key", "symbol", "input_fingerprint", "outcome",
+    "evaluated_at", "reason_code", "thesis_version",
+})
+_PRODUCTION_SNAPSHOT_COLS = frozenset({
+    "snapshot_id", "run_id", "manifest_hash", "artifact_path", "created_at",
+    "active", "published_commit",
+})
+
+
+def append_production_run(conn, row: Mapping) -> int:
+    return _insert(conn, "production_run", _checked(
+        row, _PRODUCTION_RUN_COLS, "production_run"))
+
+
+def append_production_top_member(conn, row: Mapping) -> int:
+    return _insert(conn, "production_top_member", _checked(
+        row, _PRODUCTION_TOP_MEMBER_COLS, "production_top_member"))
+
+
+def append_production_thesis_evaluation(conn, row: Mapping) -> int:
+    return _insert(conn, "production_thesis_evaluation", _checked(
+        row, _PRODUCTION_THESIS_EVALUATION_COLS, "production_thesis_evaluation"))
+
+
+def append_production_snapshot(conn, row: Mapping) -> int:
+    return _insert(conn, "production_snapshot", _checked(
+        row, _PRODUCTION_SNAPSHOT_COLS, "production_snapshot"))
+
+
 _SCOUT_VERDICT_COLS = frozenset({"ticker", "axis", "value", "reason", "recorded_at"})
 
 def append_scout_verdict(conn, *, ticker: str, axis: str, value: str,
@@ -233,6 +361,98 @@ def append_earnings_calendar(conn, *, yf_ticker: str, expected_date: str,
     _insert(conn, "earnings_calendar", {"yf_ticker": yf_ticker,
                                         "expected_date": expected_date,
                                         "fetched_at": fetched_at, "run_id": run_id})
+
+
+# --- Metric Evidence Ledger -------------------------------------------------------------
+
+def append_metric_definition(conn, row: Mapping) -> int:
+    """Append a versioned metric definition, returning the existing id on exact replay."""
+    allowed = frozenset({"metric_key", "formula_version", "unit", "requirement",
+                         "freshness_policy", "active_from", "active_until", "created_at"})
+    values = _checked(row, allowed, "metric_definition")
+    conn.execute(
+        "INSERT OR IGNORE INTO metric_definition"
+        " (metric_key, formula_version, unit, requirement, freshness_policy, active_from,"
+        "  active_until, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        tuple(values.get(name) for name in (
+            "metric_key", "formula_version", "unit", "requirement", "freshness_policy",
+            "active_from", "active_until", "created_at")),
+    )
+    found = conn.execute(
+        "SELECT definition_id FROM metric_definition"
+        " WHERE metric_key=? AND formula_version=?",
+        (values["metric_key"], values["formula_version"]),
+    ).fetchone()
+    return int(found[0])
+
+
+def append_source_observation(conn, row: Mapping) -> int:
+    """Append an immutable source fact, returning the id on payload replay."""
+    allowed = frozenset({"ticker", "source", "source_key", "accession", "value", "unit",
+                         "currency", "period_start", "period_end", "filed_at", "fetched_at",
+                         "payload_hash", "refresh_run_id"})
+    values = _checked(row, allowed, "source_observation")
+    names = ("ticker", "source", "source_key", "accession", "value", "unit", "currency",
+             "period_start", "period_end", "filed_at", "fetched_at", "payload_hash",
+             "refresh_run_id")
+    conn.execute(
+        "INSERT OR IGNORE INTO source_observation"
+        " (ticker, source, source_key, accession, value, unit, currency, period_start,"
+        "  period_end, filed_at, fetched_at, payload_hash, refresh_run_id)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        tuple(values.get(name) for name in names),
+    )
+    found = conn.execute(
+        "SELECT observation_id FROM source_observation"
+        " WHERE ticker=? AND source=? AND source_key=? AND period_end=? AND payload_hash=?",
+        (values["ticker"], values["source"], values["source_key"], values["period_end"],
+         values["payload_hash"]),
+    ).fetchone()
+    return int(found[0])
+
+
+def append_metric_observation(conn, row: Mapping) -> int:
+    """Append one derived metric observation."""
+    allowed = frozenset({"metric_definition_id", "ticker", "value", "status", "confidence",
+                         "reason_code", "as_of", "calculated_at", "refresh_run_id",
+                         "source_policy_id"})
+    return _insert(conn, "metric_observation",
+                   _checked(row, allowed, "metric_observation"))
+
+
+def append_metric_inputs(conn, metric_observation_id: int,
+                         source_observation_ids: Sequence[int]) -> None:
+    """Link exact source lineage to one derived observation."""
+    for source_observation_id in source_observation_ids:
+        _insert(conn, "metric_input", {
+            "metric_observation_id": metric_observation_id,
+            "source_observation_id": source_observation_id,
+            "input_role": "input",
+        })
+
+
+def append_source_policy(conn, row: Mapping) -> int:
+    """Append a versioned metric/source policy, returning its id on exact replay."""
+    allowed = frozenset({"metric_definition_id", "source", "source_role", "priority",
+                         "certified", "tolerance_abs", "tolerance_rel", "max_age_seconds",
+                         "active_from", "active_until", "created_at"})
+    values = _checked(row, allowed, "source_policy")
+    names = ("metric_definition_id", "source", "source_role", "priority", "certified",
+             "tolerance_abs", "tolerance_rel", "max_age_seconds", "active_from",
+             "active_until", "created_at")
+    conn.execute(
+        "INSERT OR IGNORE INTO source_policy"
+        " (metric_definition_id, source, source_role, priority, certified, tolerance_abs,"
+        "  tolerance_rel, max_age_seconds, active_from, active_until, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        tuple(values.get(name) for name in names),
+    )
+    found = conn.execute(
+        "SELECT policy_id FROM source_policy"
+        " WHERE metric_definition_id=? AND source=? AND active_from=?",
+        (values["metric_definition_id"], values["source"], values["active_from"]),
+    ).fetchone()
+    return int(found[0])
 
 
 def append_thesis(conn, *, thesis_id: str, ticker: str, origin: str,

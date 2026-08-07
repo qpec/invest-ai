@@ -1,0 +1,11 @@
+[Unit]
+Description=weekly deep Scout production snapshot
+
+[Timer]
+OnCalendar=Sat *-*-* 10:00:00 Europe/Amsterdam
+Persistent=true
+Unit=scout-production@weekly.service
+
+[Install]
+WantedBy=timers.target
+

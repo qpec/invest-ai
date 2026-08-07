@@ -1,0 +1,17 @@
+[Unit]
+Description=local Scout production pipeline (%i)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=openclaw
+EnvironmentFile=/home/openclaw/config/invest-ai-production.env
+WorkingDirectory=/home/openclaw/projects/invest-ai
+ExecStart=/home/openclaw/projects/invest-ai/deploy/local/scout-production.sh %i
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/openclaw/projects/invest-ai/var/scout
+PrivateTmp=true
+TimeoutStartSec=6h
+

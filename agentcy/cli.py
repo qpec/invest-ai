@@ -143,6 +143,31 @@ def build_parser() -> argparse.ArgumentParser:
                     help="regenerate every archive file from the DB (§8)")
     rd.set_defaults(handler="render")
 
+    sm = sub.add_parser("security-master", help="local security identity and eligibility")
+    smsub = sm.add_subparsers(dest="security_master_cmd", required=True)
+    smimport = smsub.add_parser("import", help="import an append-only universe snapshot")
+    smimport.add_argument("--universe", required=True, help="normalized universe CSV")
+    smimport.add_argument("--sec-exchange", required=True,
+                          help="SEC company_tickers_exchange.json")
+    smimport.add_argument("--vintage", required=True, help="source vintage label")
+    smimport.set_defaults(handler="security-master")
+    smaudit = smsub.add_parser("audit", help="write current eligibility coverage JSON")
+    smaudit.add_argument("--out", required=True, help="atomic JSON output path")
+    smaudit.set_defaults(handler="security-master")
+
+    market = sub.add_parser("market-data", help="local provider-neutral market evidence")
+    marketsub = market.add_subparsers(dest="market_cmd", required=True)
+    prices = marketsub.add_parser("prices", help="market-price refresh and status")
+    pricesub = prices.add_subparsers(dest="prices_cmd", required=True)
+    prefresh = pricesub.add_parser("refresh", help="refresh eligible securities")
+    prefresh.add_argument("--budget", type=int, required=True)
+    prefresh.add_argument("--chunk-size", type=int, default=50)
+    prefresh.add_argument("--resume", type=int, default=None)
+    prefresh.set_defaults(handler="market-data")
+    pstatus = pricesub.add_parser("status", help="write current price-health JSON")
+    pstatus.add_argument("--out", required=True)
+    pstatus.set_defaults(handler="market-data")
+
     return p
 
 
@@ -654,6 +679,74 @@ def _cmd_event(args) -> int:
     return 0
 
 
+def _cmd_security_master(args) -> int:
+    """Import immutable identity observations or publish the current audit summary."""
+    import json
+
+    from agentcy import db, security_master
+
+    conn = _open()
+    if args.security_master_cmd == "import":
+        summary = security_master.import_snapshot(
+            conn,
+            Path(args.universe),
+            Path(args.sec_exchange),
+            source_vintage=args.vintage,
+            observed_at=db.to_iso(_clock().now()),
+        )
+        print(json.dumps(summary.__dict__, sort_keys=True))
+        return 0
+
+    payload = security_master.audit_summary(conn)
+    payload["generated_at"] = db.to_iso(_clock().now())
+    output = Path(args.out)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_suffix(output.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                         encoding="utf-8")
+    os.replace(temporary, output)
+    print(json.dumps(payload, sort_keys=True))
+    return 0
+
+
+def _market_prices():
+    from agentcy import market_prices
+    return market_prices
+
+
+def _cmd_market_data(args) -> int:
+    """Refresh or report the local provider-neutral market-price layer."""
+    import json
+
+    from agentcy import db
+
+    conn = _open()
+    market = _market_prices()
+    now = _clock().now()
+    if args.prices_cmd == "refresh":
+        summary = market.refresh(
+            conn,
+            state_dir=db.state_dir(),
+            now=now,
+            scheduled_for=now.date().isoformat(),
+            budget=args.budget,
+            chunk_size=args.chunk_size,
+            resume_run_id=args.resume,
+        )
+        print(json.dumps(vars(summary), sort_keys=True))
+        return 0 if summary.status in {"RUNNING", "SUCCEEDED"} else 1
+
+    payload = market.status_summary(conn, as_of=now)
+    output = Path(args.out)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_suffix(output.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                         encoding="utf-8")
+    os.replace(temporary, output)
+    print(json.dumps(payload, sort_keys=True))
+    return 0
+
+
 def _archive_dir():
     """§8: the archive lives at <state_dir>/archive — derived, never hardcoded."""
     from agentcy import db
@@ -674,6 +767,8 @@ _HANDLERS["thesis"] = _cmd_thesis
 _HANDLERS["journal"] = _cmd_journal
 _HANDLERS["ask"] = _cmd_ask
 _HANDLERS["event"] = _cmd_event
+_HANDLERS["security-master"] = _cmd_security_master
+_HANDLERS["market-data"] = _cmd_market_data
 
 
 def main(argv: Sequence[str] | None = None) -> int:

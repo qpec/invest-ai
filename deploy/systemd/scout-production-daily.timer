@@ -1,0 +1,11 @@
+[Unit]
+Description=weekday Scout production snapshot
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 23:15:00 Europe/Amsterdam
+Persistent=true
+Unit=scout-production@daily.service
+
+[Install]
+WantedBy=timers.target
+

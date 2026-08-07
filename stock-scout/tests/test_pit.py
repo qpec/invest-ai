@@ -92,6 +92,35 @@ def test_revenue_chain_priority_prefers_the_contract_tag():
     assert bundle["annual"]["income"]["2024-12-31"]["Total Revenue"] == 500.0
 
 
+def test_da_composes_depreciation_and_intangible_amortization_for_exact_span():
+    gaap = {
+        "Depreciation": [dfact("2024-01-01", "2024-12-31", 30.0, "2025-02-01")],
+        "AmortizationOfIntangibleAssets": [
+            dfact("2024-01-01", "2024-12-31", 7.0, "2025-02-01")
+        ],
+    }
+    annual, _ = pit._cashflow_maps(facts_of(gaap=gaap), "2025-03-01")
+    assert annual["Depreciation And Amortization"]["2024-12-31"] == 37.0
+
+
+def test_da_combined_fact_wins_and_partial_components_are_not_imputed():
+    gaap = {
+        "DepreciationDepletionAndAmortization": [
+            dfact("2024-01-01", "2024-12-31", 40.0, "2025-02-01")
+        ],
+        "Depreciation": [
+            dfact("2024-01-01", "2024-12-31", 30.0, "2025-02-01"),
+            dfact("2023-01-01", "2023-12-31", 25.0, "2024-02-01"),
+        ],
+        "AmortizationOfIntangibleAssets": [
+            dfact("2024-01-01", "2024-12-31", 7.0, "2025-02-01")
+        ],
+    }
+    annual, _ = pit._cashflow_maps(facts_of(gaap=gaap), "2025-03-01")
+    assert annual["Depreciation And Amortization"]["2024-12-31"] == 40.0
+    assert "2023-12-31" not in annual["Depreciation And Amortization"]
+
+
 # ------------------------------------------------- YTD -> quarter derivation (§5.9)
 
 def test_ytd_subtraction_and_q4_from_fy_minus_prior_ytd():

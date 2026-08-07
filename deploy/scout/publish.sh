@@ -11,6 +11,11 @@
 set -euo pipefail
 . /opt/stock-agentcy/deploy/scout/lib.sh
 
+if [ "${SCOUT_LOCAL_PRODUCTION_ACTIVE:-0}" = "1" ]; then
+    echo "local production publisher is active; refusing competing box publish" >&2
+    exit 75
+fi
+
 # Everything this script writes locally (site build, both clones — the state
 # clone holds FR9 material) stays private to the agentcy user; the dirs are
 # 0700 from install, this covers the files.
