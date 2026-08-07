@@ -118,6 +118,18 @@ def _normalize_name(name: str) -> str:
     return " ".join(words)
 
 
+def _listing_currency(value: str | None, exchange: str | None) -> str | None:
+    explicit = str(value or "").strip().upper()
+    if explicit:
+        return explicit
+    exchange_upper = str(exchange or "").strip().upper()
+    if exchange_upper in _SEC_PRIMARY_EXCHANGES:
+        return "USD"
+    if exchange_upper in _DUTCH_PRIMARY_EXCHANGES:
+        return "EUR"
+    return None
+
+
 def _input_hash(universe_path: Path, sec_exchange_path: Path) -> str:
     digest = hashlib.sha256()
     for path in (universe_path, sec_exchange_path):
@@ -195,6 +207,7 @@ def import_snapshot(conn: sqlite3.Connection, universe_path: Path,
                 cik=cik,
                 sec_primary=sec is not None,
             )
+            currency = _listing_currency(row.get("currency"), exchange)
             if sec and len(cik_names.get(cik or "", [])) > 1:
                 sec_name = _normalize_name(str(sec.get("name") or ""))
                 universe_name = _normalize_name(name)
@@ -221,7 +234,7 @@ def import_snapshot(conn: sqlite3.Connection, universe_path: Path,
                 "name": name,
                 "country": row.get("country") or None,
                 "exchange": exchange or None,
-                "currency": row.get("currency") or None,
+                "currency": currency,
                 "instrument_type": classification.instrument_type.value,
                 "eligibility": classification.eligibility.value,
                 "reason_code": classification.reason_code,
