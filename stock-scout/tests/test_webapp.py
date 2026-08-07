@@ -46,6 +46,26 @@ class TestPayload:
         assert "conviction" not in cleaned and "circle_of_competence" not in cleaned
         assert cleaned["symbol"] == "AAA"
 
+    def test_public_portfolio_thesis_is_allowlisted_at_every_depth(self):
+        doc = {
+            "symbol": "AAA", "status": "intact", "version": 2,
+            "ratified_at": "2026-08-01", "last_monitored": "2026-08-07",
+            "target_weight": 0.10, "quantity": 100, "cost_basis": 12.5,
+            "account_id": "secret", "conviction": "high",
+            "thesis": {
+                "business_model": "Makes widgets.", "ten_year_statement": "Compounds.",
+                "triggers": [], "shares": 100, "private_note": "secret",
+            },
+        }
+        public = webapp.public_portfolio_thesis(doc, {}, next_run="2026-08-08")
+        encoded = json.dumps(public)
+        for forbidden in ("quantity", "cost_basis", "account_id", "conviction",
+                          "shares", "private_note"):
+            assert forbidden not in encoded
+        assert public["symbol"] == "AAA"
+        assert public["thesis"]["business_model"] == "Makes widgets."
+        assert public["next_run"] == "2026-08-08"
+
 
 class TestTriggerEval:
     def test_safety_margin_is_positive_when_safe_either_direction(self):
@@ -123,7 +143,9 @@ class TestSite:
                         "mc": None}},
             "charts": {"bands": [], "verdicts": [], "coverage": []},
             "units": {}, "thesis": {"top": [], "drafts": []},
-            "monitor": {"committed": [], "next_run": "2026-08-08", "preview": None},
+            "portfolio_monitor": {"committed": [], "next_run": "2026-08-08",
+                                  "preview": None},
+            "snapshot_id": "snap-1",
         }
 
     def test_write_site_shards_every_symbol_exactly_once(self, tmp_path):
@@ -149,12 +171,23 @@ class TestSite:
         """Belt and braces at the render layer: even a committed thesis with FR9 fields
         present must not put those words into the payload as keys."""
         model = self._model()
-        model["monitor"]["committed"] = [webapp.strip_owner_fields(
+        model["portfolio_monitor"]["committed"] = [webapp.public_portfolio_thesis(
             {"symbol": "AAA", "status": "intact", "version": 1,
              "conviction": "high", "circle_of_competence": "day job",
-             "trigger_state": {}, "triggers": []})]
+             "trigger_state": {}, "thesis": {"triggers": []}}, {},
+            next_run="2026-08-08")]
         page = webapp.write_site(model, tmp_path).read_text(encoding="utf-8")
         assert '"conviction"' not in page and '"circle_of_competence"' not in page
+
+    def test_site_has_combined_portfolio_monitor_and_one_sentence_disclaimer(self,
+                                                                             tmp_path):
+        page = webapp.write_site(self._model(), tmp_path).read_text(encoding="utf-8")
+        assert 'data-tab="portfolio_monitor"' in page
+        assert 'data-tab="monitor"' not in page
+        assert "Model portfolio &amp; monitor" in page
+        disclaimer = "Illustratieve modelportefeuille, geen financieel advies."
+        assert page.count(disclaimer) == 1
+        assert "Research tool — not investment advice." not in page
 
 
 class TestMoreReviewRegressions:

@@ -229,6 +229,32 @@ def strip_owner_fields(doc: dict) -> dict:
     return {k: v for k, v in doc.items() if k not in OWNER_ONLY_FIELDS}
 
 
+PUBLIC_THESIS_FIELDS = (
+    "business_model", "moat", "owner_earnings_picture", "valuation_anchor",
+    "ten_year_statement", "bear_case", "sources",
+)
+
+
+def public_portfolio_thesis(doc: dict, registry: dict,
+                            *, next_run: str) -> dict:
+    """Construct the public holding view from an allowlist, never by redaction."""
+    body = doc.get("thesis") or {}
+    public_body = {key: body.get(key) for key in PUBLIC_THESIS_FIELDS if key in body}
+    triggers = trigger_eval({"triggers": body.get("triggers") or []}, registry)
+    return {
+        "symbol": doc.get("symbol"),
+        "status": doc.get("status"),
+        "version": doc.get("version"),
+        "ratified_at": doc.get("ratified_at"),
+        "last_monitored": doc.get("last_monitored"),
+        "next_run": next_run,
+        "target_weight": doc.get("target_weight"),
+        "thesis": public_body,
+        "trigger_state": doc.get("trigger_state") or {},
+        "triggers": triggers,
+    }
+
+
 def load_thesis_dir(theses_dir: Path, registry_by_symbol: dict) -> dict:
     """Everything the Thesis and Monitor tabs need from theses/: drafts in full (owner-
     field-stripped), committed statuses, evaluated triggers."""
@@ -260,14 +286,8 @@ def load_thesis_dir(theses_dir: Path, registry_by_symbol: dict) -> dict:
     if (theses_dir / "committed").exists():
         for path in sorted((theses_dir / "committed").glob("*.json")):
             doc = json.loads(path.read_text(encoding="utf-8"))
-            body = strip_owner_fields(doc.get("thesis") or {})
-            committed.append({
-                "symbol": doc.get("symbol"), "status": doc.get("status"),
-                "version": doc.get("version"), "ratified_at": doc.get("ratified_at"),
-                "trigger_state": doc.get("trigger_state") or {},
-                "triggers": trigger_eval(body, registry_by_symbol.get(
-                    doc.get("symbol")) or {}),
-            })
+            committed.append(public_portfolio_thesis(
+                doc, registry_by_symbol.get(doc.get("symbol")) or {}, next_run=""))
     return {"drafts": drafts, "committed": committed}
 
 
@@ -461,9 +481,13 @@ def assemble(*, sec_data: str, prices_dir: str | None, universe: str, as_of: str
         "charts": {"bands": bands, "verdicts": verdicts, "coverage": cov},
         "units": {k: v[1] for k, v in thesis_mod.METRICS.items()},
         "thesis": {"top": top_list, "drafts": theses["drafts"]},
-        "monitor": {"committed": theses["committed"],
-                    "next_run": next_saturday(as_of),
-                    "preview": theses["drafts"][0] if theses["drafts"] else None},
+        "portfolio_monitor": {
+            "committed": [dict(item, next_run=next_saturday(as_of))
+                          for item in theses["committed"]],
+            "next_run": next_saturday(as_of),
+            "preview": theses["drafts"][0] if theses["drafts"] else None,
+        },
+        "snapshot_id": f"legacy-{as_of}",
     }
 
 
@@ -1399,7 +1423,7 @@ function drawCharts(){
   coverageChart();
 }
 
-/* ---------- thesis + monitor tabs ---------- */
+/* ---------- thesis + portfolio monitor tabs ---------- */
 function distBar(t){
   if (t.kind !== 'metric' || t.current == null || t.distance_pct == null) return '';
   const away = t.distance_pct;
@@ -1493,7 +1517,7 @@ const md_inline = s => {
   out = out.replace(/(https?:\/\/[^\s]+)$/,'<a href="$1" target="_blank" rel="noopener">source ↗</a>');
   return out;
 };
-function renderMonitorTab(){
+function renderPortfolioMonitorTab(){
   const deskHost = $('#monitorDesk');
   if (deskHost){
     deskHost.innerHTML = deskBlock([
@@ -1507,21 +1531,23 @@ function renderMonitorTab(){
     bindDeskActions(deskHost);
   }
   const host = $('#committedHost');
-  if (!S.monitor.committed.length){
+  if (!S.portfolio_monitor.committed.length){
     host.innerHTML = `<div class="empty"><b>No committed theses yet</b>
       The monitor reads only <code>theses/committed/</code>, and only the owner's
       ratification at the Gate puts a thesis there — conviction and circle-of-competence
       are asked, never generated (FR9).</div>`;
   } else {
-    host.innerHTML = S.monitor.committed.map(c => `
+    host.innerHTML = S.portfolio_monitor.committed.map(c => `
       <div class="trig"><div class="th"><span class="tid">${esc(c.symbol)}</span>
         ${pill(c.status, c.status === 'intact' ? 'p-good' : c.status === 'broken' ? 'p-crit' : 'p-warn')}
-        <span class="muted">v${c.version} · ratified ${esc(c.ratified_at || '')}</span></div>
+        <span class="muted">v${c.version} · ratified ${esc(c.ratified_at || '')} · monitored ${esc(c.last_monitored || '')}</span></div>
+        ${c.target_weight != null ? `<p class="ts">Target weight: <span class="num">${(100*c.target_weight).toFixed(1)}%</span></p>` : ''}
+        ${c.thesis && c.thesis.business_model ? `<p class="ts">${esc(c.thesis.business_model)}</p>` : ''}
         ${(c.triggers || []).map(trigCard).join('')}</div>`).join('');
   }
-  const pv = S.monitor.preview;
+  const pv = S.portfolio_monitor.preview;
   const pvHost = $('#previewHost');
-  if (pv && !S.monitor.committed.length){
+  if (pv && !S.portfolio_monitor.committed.length){
     pvHost.innerHTML = `<div class="hd"><h2>Preview — what the first weekly run will check</h2>
       ${pill('draft, NOT committed — the monitor will not act on it', 'p-warn')}</div>
       <div class="bd">
@@ -1532,7 +1558,7 @@ function renderMonitorTab(){
       <b>UNCHECKED</b> — a gap in the monitoring, never a pass.</p>
       ${(pv.triggers || []).map(trigCard).join('')}</div>`;
   } else { pvHost.style.display = 'none'; }
-  $('#nextRun').textContent = S.monitor.next_run;
+  $('#nextRun').textContent = S.portfolio_monitor.next_run;
 }
 
 /* ---------- tabs + routing + keyboard + theme ---------- */
@@ -1545,7 +1571,7 @@ function setTab(tab, push){
 function route(){
   const h = location.hash.replace(/^#/, '');
   const [tab, sym] = h.split('/');
-  if (['scout', 'thesis', 'monitor'].includes(tab)) setTab(tab, false);
+  if (['scout', 'thesis', 'portfolio_monitor'].includes(tab)) setTab(tab, false);
   if (sym && S.rows.some(r => r.s === sym)) {
     if (state.open !== sym) openPanel(sym);   // re-entrancy guard: hash writes loop back here
   } else if (state.open) {
@@ -1593,7 +1619,7 @@ function initKeys(){
     else if (e.key === 'Escape') closePanel();
     else if (e.key === '1') setTab('scout');
     else if (e.key === '2') setTab('thesis');
-    else if (e.key === '3') setTab('monitor');
+    else if (e.key === '3') setTab('portfolio_monitor');
     else if (e.key === 't') $('#themeBtn').click();
     else if ((e.key === 'j' || e.key === 'k') && state.open){
       const i = state.view.findIndex(r => r.s === state.open);
@@ -1652,7 +1678,7 @@ function boot(){
   $('#ovbg').onclick = closePanel;
   initTheme(); initTip(); initKeys();
   let rsz; addEventListener('resize', () => { clearTimeout(rsz); rsz = setTimeout(drawCharts, 200); });
-  renderThesisTab(); renderMonitorTab();
+  renderThesisTab(); renderPortfolioMonitorTab();
   applyFilters(); drawCharts();
   addEventListener('hashchange', route);
   route();
@@ -1667,7 +1693,7 @@ TEMPLATE = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%93%88%3C/text%3E%3C/svg%3E">
-<title>Invest AI — Scout · Thesis · Monitor</title>
+<title>Invest AI — Scout · Thesis · Portfolio monitor</title>
 <style>__CSS__</style>
 </head>
 <body>
@@ -1675,7 +1701,7 @@ TEMPLATE = """<!DOCTYPE html>
   __DEMOBAR__
   <div class="masthead">
     <h1>Invest AI</h1>
-    <span class="sub">the desk · as of <b id="asOf" class="num"></b></span>
+    <span class="sub">the desk · as of <b id="asOf" class="num"></b> · snapshot <b class="num">__SNAPSHOT_ID__</b></span>
     <div class="right">
       <span class="sub" id="srcNote"></span>
       <button class="btn" id="themeBtn" title="toggle theme (t)">◐ theme</button>
@@ -1688,12 +1714,10 @@ TEMPLATE = """<!DOCTYPE html>
     <button class="step" data-tab="thesis"><span class="circ">2</span>
       <span><span class="lbl">The Thesis Desk</span><span class="cnt" id="cThesis"></span></span></button>
     <span class="chev">›</span>
-    <button class="step" data-tab="monitor"><span class="circ">3</span>
-      <span><span class="lbl">The Monitor</span><span class="cnt" id="cMonitor"></span></span></button>
+    <button class="step" data-tab="portfolio_monitor"><span class="circ">3</span>
+      <span><span class="lbl">Model portfolio &amp; monitor</span><span class="cnt" id="cMonitor"></span></span></button>
   </nav>
-  <div class="notice"><b>Research tool — not investment advice.</b> Nothing on this page
-  is a recommendation to buy or sell any security, and none of it should be the sole
-  basis for an investment decision. Output can be wrong or stale — do your own research.</div>
+  <div class="notice"><b>Illustratieve modelportefeuille, geen financieel advies.</b></div>
 </header>
 
 <div class="wrap">
@@ -1787,9 +1811,10 @@ TEMPLATE = """<!DOCTYPE html>
   <div id="draftHost"></div>
 </section>
 
-<!-- ============ 3 · MONITOR ============ -->
-<section class="tabpane" id="tab-monitor" style="display:none">
-  <p class="intro"><b>3 · The Monitor checks every committed thesis against its own
+<!-- ============ 3 · MODEL PORTFOLIO + MONITOR ============ -->
+<section class="tabpane" id="tab-portfolio_monitor" style="display:none">
+  <p class="intro"><b>3 · The model portfolio and monitor keep every chosen thesis together.</b>
+  The monitor checks each committed thesis against its own
   triggers, weekly.</b> Never open-ended news scanning: the thesis drives the monitoring.
   Metric triggers are pure arithmetic on fresh filings (with the tier-2 enrichment cache,
   so a leverage trigger stays checkable); judgement questions go to the agent and an
@@ -1824,9 +1849,7 @@ python monitor.py run --sec-data &lt;dir&gt; --prices &lt;dir&gt; \\
 </section>
 
 <footer>
-  <b>Not investment advice — research and education only; consult a licensed advisor
-  before investing.</b> ·
-  <b>The system advises and monitors. It never executes trades.</b> (FR11) · Conviction and
+  <b>The system never executes trades.</b> (FR11) · Conviction and
   circle-of-competence never appear on this page — they are the owner's, asked at the Gate
   (FR9) · Data: bulk SEC export + live EDGAR companyfacts (tier 2, as-filed) · generated
   __GENERATED__ by <code>python webapp.py</code> ·
@@ -1855,13 +1878,7 @@ def render(model: dict, embed_details: dict) -> str:
     counts = model["counts"]
     demo = (model.get("desk") or {}).get("demo")
     demobar = ("" if not demo else
-               '<div class="demobar"><b>Visual demo — nothing here is executing.</b>'
-               '<span>The numbers are the desk\'s own latest run; the desk actions '
-               'replay a recording of their real output rather than running, because a '
-               'published page must never spend its operator\'s subscription or '
-               'machine. Run your own for live actions — '
-               '<a href="https://github.com/qpec/invest-ai/blob/main/QUICKSTART.md" '
-               'target="_blank" rel="noopener">QUICKSTART.md</a>.</span></div>')
+               '<div class="demobar"><b>Public read-only snapshot; actions are disabled.</b></div>')
     page = (TEMPLATE
             .replace("__DEMOBAR__", demobar)
             .replace("__CSS__", CSS)
@@ -1870,6 +1887,7 @@ def render(model: dict, embed_details: dict) -> str:
             .replace("__KPI_TOP__", str(counts["top"]))
             .replace("__KPI_ENRICHED__", str(counts["enriched"]))
             .replace("__KPI_COMMITTED__", str(counts["committed"]))
+            .replace("__SNAPSHOT_ID__", str(model.get("snapshot_id") or "unknown"))
             .replace("__GENERATED__", model["generated"])
             .replace("__PAYLOAD__", _payload_json(
                 {k: v for k, v in model.items() if k != "details"}
