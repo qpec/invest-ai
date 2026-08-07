@@ -2,9 +2,16 @@
 from __future__ import annotations
 
 import hashlib
+import csv
+import json
 import re
+import sqlite3
+from collections import Counter
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
+
+from agentcy import db
 
 
 class InstrumentType(StrEnum):
@@ -28,6 +35,15 @@ class Classification:
     instrument_type: InstrumentType
     eligibility: Eligibility
     reason_code: str
+
+
+@dataclass(frozen=True)
+class ImportSummary:
+    run_id: int
+    input_rows: int
+    eligible: int
+    ineligible: int
+    review: int
 
 
 _SEC_PRIMARY_EXCHANGES = frozenset({"NYSE", "NASDAQ", "NYSE AMERICAN"})
@@ -87,3 +103,149 @@ def classify(*, symbol: str, name: str, country: str | None,
         return Classification(InstrumentType.UNKNOWN, Eligibility.REVIEW,
                               "UNRESOLVED_SECONDARY_LISTING")
     return Classification(InstrumentType.UNKNOWN, Eligibility.REVIEW, "UNKNOWN_INSTRUMENT")
+
+
+def _normalize_name(name: str) -> str:
+    words = re.findall(r"[a-z0-9]+", name.casefold())
+    suffixes = {"inc", "incorporated", "corp", "corporation", "company", "co", "plc",
+                "nv", "sa", "se", "ag", "ltd", "limited", "holdings", "group", "the"}
+    while words and words[-1] in suffixes:
+        words.pop()
+    return " ".join(words)
+
+
+def _input_hash(universe_path: Path, sec_exchange_path: Path) -> str:
+    digest = hashlib.sha256()
+    for path in (universe_path, sec_exchange_path):
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _summary_for_run(conn: sqlite3.Connection, run_id: int) -> ImportSummary:
+    row = conn.execute(
+        "SELECT input_rows, eligible_rows, ineligible_rows, review_rows"
+        " FROM security_master_run WHERE run_id=?",
+        (run_id,),
+    ).fetchone()
+    return ImportSummary(run_id, int(row["input_rows"]), int(row["eligible_rows"]),
+                         int(row["ineligible_rows"]), int(row["review_rows"]))
+
+
+def import_snapshot(conn: sqlite3.Connection, universe_path: Path,
+                    sec_exchange_path: Path, *, source_vintage: str,
+                    observed_at: str) -> ImportSummary:
+    """Import one complete local identity snapshot, or replay its existing result."""
+    universe_path = Path(universe_path)
+    sec_exchange_path = Path(sec_exchange_path)
+    fingerprint = _input_hash(universe_path, sec_exchange_path)
+    replay = conn.execute(
+        "SELECT run_id FROM security_master_run"
+        " WHERE source_vintage=? AND input_hash=? AND status='SUCCEEDED'",
+        (source_vintage, fingerprint),
+    ).fetchone()
+    if replay:
+        return _summary_for_run(conn, int(replay["run_id"]))
+
+    payload = json.loads(sec_exchange_path.read_text(encoding="utf-8"))
+    fields = payload.get("fields") or []
+    sec_rows = [dict(zip(fields, values)) for values in payload.get("data") or []]
+    sec_by_symbol = {
+        str(row.get("ticker") or "").upper(): row
+        for row in sec_rows if row.get("ticker")
+    }
+    with universe_path.open(newline="", encoding="utf-8") as handle:
+        universe_rows = list(csv.DictReader(handle))
+
+    counts = Counter()
+    with conn:
+        run_id = db.append_security_master_run(conn, {
+            "source_vintage": source_vintage,
+            "input_hash": fingerprint,
+            "started_at": observed_at,
+            "status": "RUNNING",
+            "input_rows": len(universe_rows),
+        })
+        for row in universe_rows:
+            symbol = str(row.get("symbol") or "").strip().upper()
+            name = str(row.get("name") or "").strip()
+            sec = sec_by_symbol.get(symbol)
+            cik = str(sec["cik"]) if sec and sec.get("cik") not in (None, "") else None
+            exchange = str(sec.get("exchange") or "") if sec else str(row.get("exchange") or "")
+            classification = classify(
+                symbol=symbol,
+                name=name,
+                country=row.get("country"),
+                exchange=exchange,
+                cik=cik,
+                sec_primary=sec is not None,
+            )
+            key = security_key(cik=cik, normalized_name=_normalize_name(name),
+                               primary_symbol=symbol)
+            source_hash = hashlib.sha256(json.dumps(
+                row, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")).hexdigest()
+            db.append_security_observation(conn, {
+                "run_id": run_id,
+                "security_key": key,
+                "cik": f"{int(cik):010d}" if cik else None,
+                "symbol": symbol,
+                "name": name,
+                "country": row.get("country") or None,
+                "exchange": exchange or None,
+                "instrument_type": classification.instrument_type.value,
+                "eligibility": classification.eligibility.value,
+                "reason_code": classification.reason_code,
+                "source": "universe+sec",
+                "source_hash": source_hash,
+                "observed_at": observed_at,
+            })
+            db.append_security_alias(conn, {
+                "run_id": run_id,
+                "security_key": key,
+                "provider": "universe",
+                "symbol": symbol,
+                "exchange": str(row.get("exchange") or "") or None,
+                "valid_from": source_vintage,
+                "valid_until": None,
+                "observed_at": observed_at,
+            })
+            counts[classification.eligibility.value] += 1
+        db.finish_security_master_run(
+            conn,
+            run_id,
+            finished_at=observed_at,
+            status="SUCCEEDED",
+            eligible_rows=counts[Eligibility.ELIGIBLE.value],
+            ineligible_rows=counts[Eligibility.INELIGIBLE.value],
+            review_rows=counts[Eligibility.REVIEW.value],
+        )
+    return _summary_for_run(conn, run_id)
+
+
+def audit_summary(conn: sqlite3.Connection) -> dict:
+    """Return a machine-readable summary of the latest successful identity snapshot."""
+    run = conn.execute(
+        "SELECT * FROM security_master_run WHERE status='SUCCEEDED'"
+        " ORDER BY run_id DESC LIMIT 1"
+    ).fetchone()
+    if run is None:
+        return {"schema_version": 1, "input_rows": 0, "eligible": 0,
+                "ineligible": 0, "review": 0, "reasons": {}, "exchanges": {}}
+    reasons = {row["reason_code"]: row["n"] for row in conn.execute(
+        "SELECT reason_code, COUNT(*) AS n FROM v_current_security GROUP BY reason_code"
+    )}
+    exchanges = {(row["exchange"] or "UNKNOWN"): row["n"] for row in conn.execute(
+        "SELECT exchange, COUNT(*) AS n FROM v_current_security GROUP BY exchange"
+    )}
+    return {
+        "schema_version": 1,
+        "run_id": int(run["run_id"]),
+        "source_vintage": run["source_vintage"],
+        "input_rows": int(run["input_rows"]),
+        "eligible": int(run["eligible_rows"]),
+        "ineligible": int(run["ineligible_rows"]),
+        "review": int(run["review_rows"]),
+        "reasons": dict(sorted(reasons.items())),
+        "exchanges": dict(sorted(exchanges.items())),
+    }

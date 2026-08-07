@@ -184,6 +184,51 @@ def append_universe_fetch(conn, *, yf_ticker: str, outcome: str, attempted_at: s
          "run_id": run_id}, _UNIVERSE_FETCH_COLS, "universe_fetch"))
 
 
+# --- Local security master ------------------------------------------------------------
+
+_SECURITY_RUN_COLS = frozenset({"source_vintage", "input_hash", "started_at", "status",
+                                 "input_rows"})
+_SECURITY_OBSERVATION_COLS = frozenset({
+    "run_id", "security_key", "cik", "symbol", "name", "country", "exchange",
+    "instrument_type", "eligibility", "reason_code", "source", "source_hash",
+    "observed_at",
+})
+_SECURITY_ALIAS_COLS = frozenset({
+    "run_id", "security_key", "provider", "symbol", "exchange", "valid_from",
+    "valid_until", "observed_at",
+})
+
+
+def append_security_master_run(conn, row: Mapping) -> int:
+    """Start one immutable-input security-master run."""
+    return _insert(conn, "security_master_run", _checked(
+        row, _SECURITY_RUN_COLS, "security_master_run"))
+
+
+def finish_security_master_run(conn, run_id: int, *, finished_at: str, status: str,
+                               eligible_rows: int, ineligible_rows: int,
+                               review_rows: int, failure_summary: str | None = None) -> None:
+    """Finish the mutable run envelope; evidence rows themselves remain immutable."""
+    conn.execute(
+        "UPDATE security_master_run SET finished_at=?, status=?, eligible_rows=?,"
+        " ineligible_rows=?, review_rows=?, failure_summary=? WHERE run_id=?",
+        (finished_at, status, eligible_rows, ineligible_rows, review_rows,
+         failure_summary, run_id),
+    )
+
+
+def append_security_observation(conn, row: Mapping) -> int:
+    """Append one classified listing observation."""
+    return _insert(conn, "security_observation", _checked(
+        row, _SECURITY_OBSERVATION_COLS, "security_observation"))
+
+
+def append_security_alias(conn, row: Mapping) -> int:
+    """Append one provider-symbol alias for a stable security key."""
+    return _insert(conn, "security_alias", _checked(
+        row, _SECURITY_ALIAS_COLS, "security_alias"))
+
+
 _SCOUT_VERDICT_COLS = frozenset({"ticker", "axis", "value", "reason", "recorded_at"})
 
 def append_scout_verdict(conn, *, ticker: str, axis: str, value: str,

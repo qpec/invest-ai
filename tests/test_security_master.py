@@ -5,6 +5,45 @@ from agentcy.security_master import (
     security_key,
 )
 
+import csv
+import json
+
+import pytest
+
+
+@pytest.fixture
+def universe_csv(tmp_path):
+    path = tmp_path / "universe.csv"
+    rows = [
+        ["ACME", "Acme Corporation", "Technology", "Software", "United States",
+         "Large Cap", "NMS", "USD"],
+        ["FUND", "Example Municipal Income Fund", "", "", "United States", "",
+         "NYSE", "USD"],
+        ["0AAA.L", "Acme Corporation", "Technology", "Software", "United States",
+         "Large Cap", "LSE", "USD"],
+        ["DUTCH.AS", "Dutch Systems N.V.", "Technology", "Software", "Netherlands",
+         "Mid Cap", "AMS", "EUR"],
+    ]
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["symbol", "name", "sector", "industry", "country", "market_cap",
+                         "exchange", "currency"])
+        writer.writerows(rows)
+    return path
+
+
+@pytest.fixture
+def sec_exchange_json(tmp_path):
+    path = tmp_path / "company_tickers_exchange.json"
+    path.write_text(json.dumps({
+        "fields": ["cik", "name", "ticker", "exchange"],
+        "data": [
+            [1, "Acme Corporation", "ACME", "Nasdaq"],
+            [2, "Example Municipal Income Fund", "FUND", "NYSE"],
+        ],
+    }), encoding="utf-8")
+    return path
+
 
 def test_primary_sec_ordinary_share_is_eligible():
     result = classify(
@@ -117,3 +156,59 @@ def test_security_key_without_cik_is_deterministic_and_name_based():
     second = security_key(cik=None, normalized_name="acme nv", primary_symbol="OTHER")
     assert first == second
     assert first.startswith("name:")
+
+
+def test_import_promotes_only_complete_run(tmp_db, universe_csv, sec_exchange_json):
+    from agentcy.security_master import import_snapshot
+
+    summary = import_snapshot(
+        tmp_db,
+        universe_csv,
+        sec_exchange_json,
+        source_vintage="2026-08-07",
+        observed_at="2026-08-07T08:00:00Z",
+    )
+    assert summary.input_rows == 4
+    assert summary.eligible == 2
+    assert summary.ineligible == 1
+    assert summary.review == 1
+    assert tmp_db.execute("SELECT COUNT(*) FROM v_current_security").fetchone()[0] == 4
+
+
+def test_exact_snapshot_replay_is_idempotent(tmp_db, universe_csv, sec_exchange_json):
+    from agentcy.security_master import import_snapshot
+
+    kwargs = dict(source_vintage="2026-08-07", observed_at="2026-08-07T08:00:00Z")
+    first = import_snapshot(tmp_db, universe_csv, sec_exchange_json, **kwargs)
+    second = import_snapshot(tmp_db, universe_csv, sec_exchange_json, **kwargs)
+    assert second.run_id == first.run_id
+    assert tmp_db.execute("SELECT COUNT(*) FROM security_master_run").fetchone()[0] == 1
+    assert tmp_db.execute("SELECT COUNT(*) FROM security_observation").fetchone()[0] == 4
+
+
+def test_import_writes_provider_aliases(tmp_db, universe_csv, sec_exchange_json):
+    from agentcy.security_master import import_snapshot
+
+    import_snapshot(tmp_db, universe_csv, sec_exchange_json,
+                    source_vintage="2026-08-07",
+                    observed_at="2026-08-07T08:00:00Z")
+    aliases = tmp_db.execute(
+        "SELECT provider, symbol, security_key FROM security_alias ORDER BY symbol"
+    ).fetchall()
+    assert len(aliases) == 4
+    assert aliases[1]["symbol"] == "ACME"
+    assert aliases[1]["security_key"] == "cik:0000000001"
+
+
+def test_audit_summary_reports_reason_and_exchange_counts(
+        tmp_db, universe_csv, sec_exchange_json):
+    from agentcy.security_master import audit_summary, import_snapshot
+
+    import_snapshot(tmp_db, universe_csv, sec_exchange_json,
+                    source_vintage="2026-08-07",
+                    observed_at="2026-08-07T08:00:00Z")
+    audit = audit_summary(tmp_db)
+    assert audit["input_rows"] == 4
+    assert audit["reasons"]["PRIMARY_ORDINARY_SHARE"] == 1
+    assert audit["reasons"]["UNRESOLVED_SECONDARY_LISTING"] == 1
+    assert audit["exchanges"]["AMS"] == 1
