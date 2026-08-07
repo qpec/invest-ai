@@ -209,3 +209,35 @@ def refresh(conn: sqlite3.Connection, *, state_dir: Path, now: datetime,
             )
         return _summary(conn, run_id)
     return result
+
+
+def status_summary(conn: sqlite3.Connection, *, as_of: datetime) -> dict:
+    """Machine-readable state of the latest promoted local price snapshot."""
+    eligible = int(conn.execute("SELECT COUNT(*) FROM v_eligible_security").fetchone()[0])
+    rows = list(conn.execute("SELECT * FROM v_current_market_price"))
+    fresh = sum(freshness_status(row["bar_date"], as_of) == "FRESH" for row in rows)
+    stale = len(rows) - fresh
+    run = conn.execute(
+        "SELECT * FROM market_price_refresh_run"
+        " WHERE status='SUCCEEDED' AND promoted=1"
+        " ORDER BY scheduled_for DESC, attempt DESC, refresh_run_id DESC LIMIT 1"
+    ).fetchone()
+    terminal = 0
+    if run is not None:
+        outcomes = _latest_outcomes(conn, int(run["refresh_run_id"]))
+        terminal = sum(value in {"NO_DATA", "TERMINAL"} for value in outcomes.values())
+    providers: dict[str, int] = {}
+    for row in rows:
+        providers[row["provider"]] = providers.get(row["provider"], 0) + 1
+    return {
+        "schema_version": 1,
+        "generated_at": _iso(as_of),
+        "refresh_run_id": int(run["refresh_run_id"]) if run is not None else None,
+        "eligible": eligible,
+        "fresh": fresh,
+        "stale": stale,
+        "missing": max(0, eligible - len(rows) - terminal),
+        "terminal": terminal,
+        "conflict": 0,
+        "providers": dict(sorted(providers.items())),
+    }

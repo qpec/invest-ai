@@ -9,6 +9,7 @@ def test_parser_covers_the_section_10_surface():
         "run", "bot", "gate", "scout", "watchlist", "snapshot", "journal",
         "thesis", "config", "absence", "ask", "event", "render",
         "security-master",
+        "market-data",
     }
 
 
