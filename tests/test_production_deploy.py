@@ -50,7 +50,8 @@ def test_legacy_publisher_has_local_cutover_guard():
 def test_thesis_runner_pins_owner_approved_max_effort_isolated_session():
     text = read("deploy/local/scout-thesis-runner.sh")
     assert "openai/gpt-5.6-sol" in text
-    assert "--thinking max" in text
+    assert "maximum available effort" in text
+    assert "--thinking max" not in text
     assert "--session-key" in text
     assert "--timeout 3600" in text
     assert "--deliver" not in text
