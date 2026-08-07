@@ -21,6 +21,7 @@ fi
 : "${SCOUT_ENRICH_CACHE:?set SCOUT_ENRICH_CACHE}"
 : "${SCOUT_THESES_DIR:?set SCOUT_THESES_DIR}"
 : "${SCOUT_REPORTS_DIR:?set SCOUT_REPORTS_DIR}"
+: "${SCOUT_THESIS_RUNNER:?set SCOUT_THESIS_RUNNER}"
 : "${SCOUT_SITE_REPO:?set SCOUT_SITE_REPO}"
 : "${SCOUT_SITE_CHECKOUT:?set SCOUT_SITE_CHECKOUT}"
 : "${SCOUT_GIT_ASKPASS:?set SCOUT_GIT_ASKPASS}"
@@ -41,6 +42,8 @@ PY="${SCOUT_PYTHON:-$SCOUT_REPO/.venv/bin/python}"
     --sec-data "$SCOUT_SEC_DATA" --price-grid "$SCOUT_PRICE_GRID" \
     --universe "$SCOUT_UNIVERSE" --enrich-cache "$SCOUT_ENRICH_CACHE" \
     --theses-dir "$SCOUT_THESES_DIR" --reports-dir "$SCOUT_REPORTS_DIR" \
+    --thesis-runner "$SCOUT_THESIS_RUNNER" \
+    --thesis-model "${SCOUT_THESIS_MODEL:-gpt-5.6-sol}" \
     --as-of "$(date -u +%F)" --network-refresh
 
 "$PY" "$SCOUT_REPO/stock-scout/production.py" verify-artifact \

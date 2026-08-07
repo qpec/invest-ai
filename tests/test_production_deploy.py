@@ -54,3 +54,13 @@ def test_thesis_runner_pins_owner_approved_max_effort_isolated_session():
     assert "--session-key" in text
     assert "--timeout 3600" in text
     assert "--deliver" not in text
+
+
+def test_production_wrapper_requires_and_passes_thesis_runner():
+    wrapper = read("deploy/local/scout-production.sh")
+    environment = read("deploy/local/scout-production.env.example")
+    assert ': "${SCOUT_THESIS_RUNNER:?set SCOUT_THESIS_RUNNER}"' in wrapper
+    assert '--thesis-runner "$SCOUT_THESIS_RUNNER"' in wrapper
+    assert '--thesis-model "${SCOUT_THESIS_MODEL:-gpt-5.6-sol}"' in wrapper
+    assert "SCOUT_THESIS_RUNNER=" in environment
+    assert "SCOUT_THESIS_MODEL=gpt-5.6-sol" in environment
