@@ -50,7 +50,7 @@ _SEC_PRIMARY_EXCHANGES = frozenset({"NYSE", "NASDAQ", "NYSE AMERICAN"})
 _DUTCH_PRIMARY_EXCHANGES = frozenset({"AMS", "EURONEXT AMSTERDAM"})
 _DEBT = re.compile(
     r"\b(first mortgage bonds?|senior notes?|subordinated notes?|debentures?)\b|"
-    r"\bnotes?\s+due\s+\d{4}\b",
+    r"\bnotes?\s+due\s+\d{4}\b|\bsr\s+nt\b",
     re.IGNORECASE,
 )
 _FUND = re.compile(
@@ -58,7 +58,11 @@ _FUND = re.compile(
     re.IGNORECASE,
 )
 _WARRANT_UNIT = re.compile(r"\b(warrants?|units?)\b", re.IGNORECASE)
-_PREFERRED = re.compile(r"\bpreferred(?: stock| shares?| securities)?\b", re.IGNORECASE)
+_PREFERRED = re.compile(
+    r"\bpreferred(?: stock| shares?| securities)?\b|\bpreference shares?\b|"
+    r"\bcum(?:ulative)?\s+pfd\b|\bdepositary shares?\b",
+    re.IGNORECASE,
+)
 _ROYALTY_TRUST = re.compile(r"\broyalty trust\b", re.IGNORECASE)
 
 
@@ -87,7 +91,7 @@ def classify(*, symbol: str, name: str, country: str | None,
     if _WARRANT_UNIT.search(name) or symbol_upper.endswith(("-WS", "-WU", "-W", "-U")):
         return Classification(InstrumentType.WARRANT_OR_UNIT, Eligibility.INELIGIBLE,
                               "WARRANT_OR_UNIT")
-    if _PREFERRED.search(name) or symbol_upper.endswith("-P"):
+    if _PREFERRED.search(name) or re.search(r"-P[A-Z]?$", symbol_upper):
         return Classification(InstrumentType.PREFERRED_SHARE, Eligibility.INELIGIBLE,
                               "PREFERRED_SHARE")
     if _ROYALTY_TRUST.search(name):
@@ -157,6 +161,17 @@ def import_snapshot(conn: sqlite3.Connection, universe_path: Path,
     with universe_path.open(newline="", encoding="utf-8") as handle:
         universe_rows = list(csv.DictReader(handle))
 
+    # A reused ticker can point at a new issuer/security while the free universe still
+    # carries the old company. When another row for the same CIK agrees with the SEC
+    # issuer name, keep the disagreeing alias in review instead of silently promoting it.
+    cik_names: dict[str, list[str]] = {}
+    for row in universe_rows:
+        sec = sec_by_symbol.get(str(row.get("symbol") or "").strip().upper())
+        if sec and sec.get("cik") not in (None, ""):
+            cik_names.setdefault(str(sec["cik"]), []).append(
+                _normalize_name(str(row.get("name") or ""))
+            )
+
     counts = Counter()
     with conn:
         run_id = db.append_security_master_run(conn, {
@@ -180,6 +195,19 @@ def import_snapshot(conn: sqlite3.Connection, universe_path: Path,
                 cik=cik,
                 sec_primary=sec is not None,
             )
+            if sec and len(cik_names.get(cik or "", [])) > 1:
+                sec_name = _normalize_name(str(sec.get("name") or ""))
+                universe_name = _normalize_name(name)
+                peers = cik_names[cik]
+                peer_agrees = any(
+                    set(sec_name.split()) & set(peer.split()) for peer in peers
+                    if peer != universe_name
+                )
+                this_agrees = bool(set(sec_name.split()) & set(universe_name.split()))
+                if peer_agrees and not this_agrees:
+                    classification = Classification(
+                        InstrumentType.UNKNOWN, Eligibility.REVIEW, "IDENTITY_CONFLICT"
+                    )
             key = security_key(cik=cik, normalized_name=_normalize_name(name),
                                primary_symbol=symbol)
             source_hash = hashlib.sha256(json.dumps(

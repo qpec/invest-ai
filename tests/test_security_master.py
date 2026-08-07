@@ -129,6 +129,23 @@ def test_warrant_unit_preferred_and_royalty_trust_are_ineligible():
         assert result.reason_code == reason
 
 
+def test_exchange_style_preferred_and_debt_labels_are_ineligible():
+    cases = [
+        ("LILAP", "Issuer 9% Cumulative Preference Shares",
+         InstrumentType.PREFERRED_SHARE, "PREFERRED_SHARE"),
+        ("CTA-PA", "Issuer USD 4.50 Cum Pfd Registered Shs",
+         InstrumentType.PREFERRED_SHARE, "PREFERRED_SHARE"),
+        ("JSM", "Issuer SR NT 6% 121543",
+         InstrumentType.LISTED_DEBT, "LISTED_DEBT"),
+    ]
+    for symbol, name, instrument_type, reason in cases:
+        result = classify(symbol=symbol, name=name, country="United States",
+                          exchange="Nasdaq", cik="1", sec_primary=True)
+        assert result.instrument_type is instrument_type
+        assert result.eligibility is Eligibility.INELIGIBLE
+        assert result.reason_code == reason
+
+
 def test_operating_company_with_trust_in_name_is_not_assumed_royalty_trust():
     result = classify(symbol="TRST", name="TrustCo Bank Corp NY",
                       country="United States", exchange="Nasdaq", cik="4",
@@ -198,6 +215,34 @@ def test_import_writes_provider_aliases(tmp_db, universe_csv, sec_exchange_json)
     assert len(aliases) == 4
     assert aliases[1]["symbol"] == "ACME"
     assert aliases[1]["security_key"] == "cik:0000000001"
+
+
+def test_import_keeps_stale_ticker_collision_in_review(tmp_db, tmp_path):
+    from agentcy.security_master import import_snapshot
+
+    universe = tmp_path / "universe.csv"
+    universe.write_text(
+        "symbol,name,sector,industry,country,market_cap,exchange,currency\n"
+        "MSTR,Strategy Inc,Tech,,United States,,NMS,USD\n"
+        "STRC,Sarcos Technology and Robotics Corporation Common Stock,Tech,,"
+        "United States,,NMS,USD\n",
+        encoding="utf-8",
+    )
+    sec = tmp_path / "sec.json"
+    sec.write_text(json.dumps({
+        "fields": ["cik", "name", "ticker", "exchange"],
+        "data": [
+            [1050446, "Strategy Inc", "MSTR", "Nasdaq"],
+            [1050446, "Strategy Inc", "STRC", "Nasdaq"],
+        ],
+    }), encoding="utf-8")
+    import_snapshot(tmp_db, universe, sec, source_vintage="2026-08-07",
+                    observed_at="2026-08-07T08:00:00Z")
+    row = tmp_db.execute(
+        "SELECT * FROM v_current_security WHERE symbol='STRC'"
+    ).fetchone()
+    assert row["eligibility"] == "REVIEW"
+    assert row["reason_code"] == "IDENTITY_CONFLICT"
 
 
 def test_audit_summary_reports_reason_and_exchange_counts(
