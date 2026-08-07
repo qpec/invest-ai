@@ -75,42 +75,56 @@ until the owner acts. "No action needed" is the celebrated first-class outcome.
 
 ---
 
-## Process & infrastructure
+## Production operation
 
-One VPS, two lanes that never swap jobs, and GitHub as the only seam between
-machines ([full plan](docs/plans/2026-08-04-distributed-desk-architecture.md)):
+The local container is the control plane and GitHub Pages is the read-only
+production dashboard. One fail-atomic job owns the complete snapshot:
 
 ```mermaid
 flowchart LR
-    subgraph BOX["DigitalOcean droplet (~$13/mo)"]
-        direction TB
-        M["Mechanical lane — systemd, no LLM<br/>scrape · enrich · monitor arithmetic · site build"]
-        J["Judgement lane — OpenClaw + Claude<br/>answers pre-committed questions<br/>drafts theses on demand"]
-        D[("SQLite + append-only caches<br/>no server database, on purpose")]
-        M --- D
-        J --- D
-    end
-    GH["GitHub<br/>code (public) · Pages site<br/>private state archive"]
-    O["Owner<br/>Telegram · the Gate (SSH)"]
-    BOX -->|"site + state pushes"| GH
-    GH -->|"pull on deploy"| BOX
-    O <--> J
-    O <--> GH
+    L["Local control plane<br/>refresh · score · top 1% · theses · monitor"]
+    V["Release gates<br/>one snapshot · privacy · data quality"]
+    G["bot/site<br/>static public projection"]
+    P["GitHub Pages<br/>production dashboard"]
+    L --> V --> G --> P
 ```
 
-| When (Sat) | What | Lane |
-|---|---|---|
-| 06:00 | refresh SEC data, enrichment cache, exports | mechanical |
-| 07:00 | write the week's monitor work order | mechanical |
-| 07:30 | agent researches the judgement questions → verdicts | judgement |
-| 12:00 | evaluate every thesis (missing verdicts ⇒ UNCHECKED, never blocked) | mechanical |
-| 12:30 | rebuild + publish the site, push the state archive, send the letter | mechanical |
+Daily runs refresh and rescore after the US close. Saturday's deep run also
+revalidates universe identity, filing freshness and every top-1% research input.
+Manual runs use exactly the same path. A failure leaves the last valid Pages
+snapshot live.
 
-Auth is the owner's Claude subscription via Claude-CLI reuse — no API key exists
-anywhere in the fleet. The agent's user cannot write where committed theses live,
-so nothing in the judgement lane can ratify, even if misled. Portfolio data
-(conviction, holdings) lives only in the **private** state repo, never here and
-never on the public site — enforced at the render layer, with tests.
+Publication also requires an accepted draft for every top-1% candidate. The
+repository writes and validates work orders, while an approved Claude Code or
+OpenClaw judgement runtime performs the research; missing drafts fail the run
+explicitly at `thesis_evaluations_passed`.
+
+The public portfolio-monitor page contains symbol, public thesis, status,
+monitor evidence and optional target weight. Quantities, purchase prices,
+market values and account fields stay local and are rejected by release gates.
+
+### Local production commands
+
+```bash
+# Configure durable paths and a credential-safe GIT_ASKPASS helper outside Git.
+cp deploy/local/scout-production.env.example \
+  /home/openclaw/config/invest-ai-production.env
+
+# Same end-to-end path used by both timers.
+SCOUT_PRODUCTION_ENV=/home/openclaw/config/invest-ai-production.env \
+  deploy/local/scout-production.sh manual
+
+# Inspect a run without publishing anything.
+.venv/bin/python stock-scout/production.py status \
+  --db-dir /home/openclaw/projects/invest-ai/var/scout/agentcy-local-v4 \
+  --run-id RUN_ID
+```
+
+Install `deploy/systemd/scout-production@.service` with its daily and weekly
+timers only after the first validated publication and after retiring the legacy
+publisher. Rollback is a normal revert on `bot/site`; the local append-only run
+history remains intact. Paid data providers are documented as inactive options
+in [the completeness research](docs/research/2026-08-07-paid-data-completeness-options.md).
 
 ## The interface
 

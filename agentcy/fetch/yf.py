@@ -145,6 +145,79 @@ def fetch_daily_bars(yf_ticker: str, *, state_dir: Path, period: str = "10d") ->
     return out
 
 
+def _raw_history_batch(symbols: list[str], period: str) -> pd.DataFrame:
+    """The single batch network touch; callers validate every symbol independently."""
+    return yf.download(
+        tickers=list(symbols),
+        period=period,
+        auto_adjust=False,
+        actions=True,
+        threads=False,
+        group_by="ticker",
+        progress=False,
+    )
+
+
+def _symbol_frame(batch: pd.DataFrame, symbol: str, symbol_count: int) -> pd.DataFrame:
+    if isinstance(batch.columns, pd.MultiIndex):
+        if symbol in batch.columns.get_level_values(0):
+            return batch[symbol].copy()
+        if symbol in batch.columns.get_level_values(-1):
+            return batch.xs(symbol, axis=1, level=-1).copy()
+        return pd.DataFrame(index=batch.index)
+    return batch.copy() if symbol_count == 1 else pd.DataFrame(index=batch.index)
+
+
+def fetch_daily_bars_batch(symbols, *, currencies: dict[str, str], state_dir: Path,
+                           period: str = "10d") -> tuple[dict[str, pd.DataFrame], dict[str, str]]:
+    """Fetch one paced Yahoo batch and strictly normalize each listing independently."""
+    configure()
+    ordered = list(dict.fromkeys(str(symbol).upper() for symbol in symbols))
+    batch = _paced_call(state_dir, lambda: _raw_history_batch(ordered, period))
+    if batch is None or len(batch) == 0:
+        raise FetchFailed("empty price batch — empty is failure (§7.3)")
+
+    frames: dict[str, pd.DataFrame] = {}
+    failures: dict[str, str] = {}
+    for symbol in ordered:
+        currency = str(currencies.get(symbol) or "").strip().upper()
+        if not currency:
+            failures[symbol] = "MISSING_CURRENCY"
+            continue
+        raw = _symbol_frame(batch, symbol, len(ordered))
+        if raw.empty or "Close" not in raw or "Adj Close" not in raw:
+            failures[symbol] = "NO_DATA"
+            continue
+        close = pd.to_numeric(raw["Close"], errors="coerce")
+        adjusted = pd.to_numeric(raw["Adj Close"], errors="coerce")
+        if close.isna().all() or adjusted.isna().all():
+            failures[symbol] = "NO_DATA"
+            continue
+        valid = close.notna() & adjusted.notna()
+        close, adjusted, raw = close[valid], adjusted[valid], raw.loc[valid]
+        if len(close) == 0:
+            failures[symbol] = "NO_DATA"
+            continue
+        if (close <= 0).any() or (adjusted <= 0).any():
+            failures[symbol] = "NON_POSITIVE_CLOSE"
+            continue
+        dividend = (pd.to_numeric(raw.get("Dividends", 0.0), errors="coerce")
+                    if "Dividends" in raw else pd.Series(0.0, index=raw.index))
+        split = (pd.to_numeric(raw.get("Stock Splits", 0.0), errors="coerce")
+                 if "Stock Splits" in raw else pd.Series(0.0, index=raw.index))
+        if dividend.fillna(0.0).lt(0).any() or split.fillna(0.0).lt(0).any():
+            failures[symbol] = "INVALID_ACTION"
+            continue
+        frames[symbol] = pd.DataFrame({
+            "close": close.astype(float),
+            "adj_close": adjusted.astype(float),
+            "dividend": dividend.fillna(0.0).astype(float),
+            "split": split.fillna(0.0).astype(float),
+            "currency": currency,
+        }, index=raw.index)
+    return frames, failures
+
+
 MIN_STATEMENT_ROWS = 8        # plausible-row-count gate (real statements carry dozens)
 RECENT_PERIOD_DAYS = 400      # newest period_end must be younger than this
 PINNED_ROWS = {               # MA-2 + the MA-11 dependents; SBC deliberately unpinned (plan note 4)

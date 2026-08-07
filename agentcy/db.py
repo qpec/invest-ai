@@ -184,6 +184,134 @@ def append_universe_fetch(conn, *, yf_ticker: str, outcome: str, attempted_at: s
          "run_id": run_id}, _UNIVERSE_FETCH_COLS, "universe_fetch"))
 
 
+# --- Local security master ------------------------------------------------------------
+
+_SECURITY_RUN_COLS = frozenset({"source_vintage", "input_hash", "started_at", "status",
+                                 "input_rows"})
+_SECURITY_OBSERVATION_COLS = frozenset({
+    "run_id", "security_key", "cik", "symbol", "name", "country", "exchange",
+    "currency", "instrument_type", "eligibility", "reason_code", "source", "source_hash",
+    "observed_at",
+})
+_SECURITY_ALIAS_COLS = frozenset({
+    "run_id", "security_key", "provider", "symbol", "exchange", "valid_from",
+    "valid_until", "observed_at",
+})
+
+
+def append_security_master_run(conn, row: Mapping) -> int:
+    """Start one immutable-input security-master run."""
+    return _insert(conn, "security_master_run", _checked(
+        row, _SECURITY_RUN_COLS, "security_master_run"))
+
+
+def finish_security_master_run(conn, run_id: int, *, finished_at: str, status: str,
+                               eligible_rows: int, ineligible_rows: int,
+                               review_rows: int, failure_summary: str | None = None) -> None:
+    """Finish the mutable run envelope; evidence rows themselves remain immutable."""
+    conn.execute(
+        "UPDATE security_master_run SET finished_at=?, status=?, eligible_rows=?,"
+        " ineligible_rows=?, review_rows=?, failure_summary=? WHERE run_id=?",
+        (finished_at, status, eligible_rows, ineligible_rows, review_rows,
+         failure_summary, run_id),
+    )
+
+
+def append_security_observation(conn, row: Mapping) -> int:
+    """Append one classified listing observation."""
+    return _insert(conn, "security_observation", _checked(
+        row, _SECURITY_OBSERVATION_COLS, "security_observation"))
+
+
+def append_security_alias(conn, row: Mapping) -> int:
+    """Append one provider-symbol alias for a stable security key."""
+    return _insert(conn, "security_alias", _checked(
+        row, _SECURITY_ALIAS_COLS, "security_alias"))
+
+
+# --- Local market-price evidence -----------------------------------------------------
+
+_MARKET_PRICE_RUN_COLS = frozenset({
+    "scheduled_for", "attempt", "started_at", "status", "selected_count",
+})
+_MARKET_PRICE_ATTEMPT_COLS = frozenset({
+    "refresh_run_id", "security_key", "provider_symbol", "attempt_no",
+    "attempted_at", "outcome", "reason_code", "detail",
+})
+_MARKET_PRICE_OBSERVATION_COLS = frozenset({
+    "refresh_run_id", "security_key", "provider", "provider_symbol", "bar_date",
+    "raw_close", "adjusted_close", "dividend", "split_ratio", "currency",
+    "fetched_at", "payload_hash",
+})
+
+
+def append_market_price_run(conn, row: Mapping) -> int:
+    return _insert(conn, "market_price_refresh_run", _checked(
+        row, _MARKET_PRICE_RUN_COLS, "market_price_refresh_run"))
+
+
+def append_market_price_attempt(conn, row: Mapping) -> int:
+    return _insert(conn, "market_price_attempt", _checked(
+        row, _MARKET_PRICE_ATTEMPT_COLS, "market_price_attempt"))
+
+
+def append_market_price_observation(conn, row: Mapping) -> int:
+    return _insert(conn, "market_price_observation", _checked(
+        row, _MARKET_PRICE_OBSERVATION_COLS, "market_price_observation"))
+
+
+def finish_market_price_run(conn, refresh_run_id: int, *, finished_at: str,
+                            status: str, ok_count: int, terminal_count: int,
+                            failed_count: int, failure_summary: str | None = None,
+                            promoted: bool = False) -> None:
+    conn.execute(
+        "UPDATE market_price_refresh_run SET finished_at=?, status=?, ok_count=?,"
+        " terminal_count=?, failed_count=?, failure_summary=?, promoted=?"
+        " WHERE refresh_run_id=?",
+        (finished_at, status, ok_count, terminal_count, failed_count,
+         failure_summary, int(promoted), refresh_run_id),
+    )
+
+
+# --- Production Scout / thesis / monitor snapshots ---------------------------------
+
+_PRODUCTION_RUN_COLS = frozenset({
+    "run_id", "mode", "status", "source_commit", "started_at", "finished_at",
+    "failure_stage", "failure_reason",
+})
+_PRODUCTION_TOP_MEMBER_COLS = frozenset({
+    "run_id", "security_key", "symbol", "rank", "score",
+})
+_PRODUCTION_THESIS_EVALUATION_COLS = frozenset({
+    "run_id", "security_key", "symbol", "input_fingerprint", "outcome",
+    "evaluated_at", "reason_code", "thesis_version",
+})
+_PRODUCTION_SNAPSHOT_COLS = frozenset({
+    "snapshot_id", "run_id", "manifest_hash", "artifact_path", "created_at",
+    "active", "published_commit",
+})
+
+
+def append_production_run(conn, row: Mapping) -> int:
+    return _insert(conn, "production_run", _checked(
+        row, _PRODUCTION_RUN_COLS, "production_run"))
+
+
+def append_production_top_member(conn, row: Mapping) -> int:
+    return _insert(conn, "production_top_member", _checked(
+        row, _PRODUCTION_TOP_MEMBER_COLS, "production_top_member"))
+
+
+def append_production_thesis_evaluation(conn, row: Mapping) -> int:
+    return _insert(conn, "production_thesis_evaluation", _checked(
+        row, _PRODUCTION_THESIS_EVALUATION_COLS, "production_thesis_evaluation"))
+
+
+def append_production_snapshot(conn, row: Mapping) -> int:
+    return _insert(conn, "production_snapshot", _checked(
+        row, _PRODUCTION_SNAPSHOT_COLS, "production_snapshot"))
+
+
 _SCOUT_VERDICT_COLS = frozenset({"ticker", "axis", "value", "reason", "recorded_at"})
 
 def append_scout_verdict(conn, *, ticker: str, axis: str, value: str,
@@ -286,7 +414,8 @@ def append_source_observation(conn, row: Mapping) -> int:
 def append_metric_observation(conn, row: Mapping) -> int:
     """Append one derived metric observation."""
     allowed = frozenset({"metric_definition_id", "ticker", "value", "status", "confidence",
-                         "as_of", "calculated_at", "refresh_run_id", "source_policy_id"})
+                         "reason_code", "as_of", "calculated_at", "refresh_run_id",
+                         "source_policy_id"})
     return _insert(conn, "metric_observation",
                    _checked(row, allowed, "metric_observation"))
 

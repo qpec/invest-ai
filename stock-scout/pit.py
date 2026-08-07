@@ -82,6 +82,7 @@ _CASHFLOW_CONCEPTS = {
                             "PaymentsOfDistributionsToAffiliates"),
     "Repurchase Of Capital Stock": ("PaymentsForRepurchaseOfCommonStock",),
 }
+_DA_COMPONENT_CONCEPTS = ("Depreciation", "AmortizationOfIntangibleAssets")
 _BALANCE_CONCEPTS = {
     "Cash And Cash Equivalents": ("CashAndCashEquivalentsAtCarryingValue",),
     "Stockholders Equity": ("StockholdersEquity",),
@@ -434,6 +435,28 @@ def _flow_maps(facts: dict, concepts: dict, as_of: str) -> tuple[dict, dict]:
     annual, quarterly = {}, {}
     for label, tags in concepts.items():
         annual[label], quarterly[label] = _chain_flows(facts, tags, as_of)
+    return annual, quarterly
+
+
+def _cashflow_maps(facts: dict, as_of: str) -> tuple[dict, dict]:
+    """Cashflow maps plus a strict D&A composition on identical raw fact spans.
+
+    The combined standardized fact always wins. Separate depreciation and intangible
+    amortization may fill a missing period only when both exist for the exact same
+    start/end span; a lone component is incomplete and remains absent.
+    """
+    annual, quarterly = _flow_maps(facts, _CASHFLOW_CONCEPTS, as_of)
+    dep = _latest_filed(_unit_entries(facts, "us-gaap", _DA_COMPONENT_CONCEPTS[0]),
+                        as_of, instant=False)
+    amort = _latest_filed(_unit_entries(facts, "us-gaap", _DA_COMPONENT_CONCEPTS[1]),
+                          as_of, instant=False)
+    composed = {span: dep[span] + amort[span] for span in dep.keys() & amort.keys()}
+    target_a = annual["Depreciation And Amortization"]
+    target_q = quarterly["Depreciation And Amortization"]
+    for end, value in annual_flows(composed).items():
+        target_a.setdefault(end, value)
+    for end, value in quarterly_flows(composed).items():
+        target_q.setdefault(end, value)
     return annual, quarterly
 
 
@@ -843,7 +866,7 @@ def as_of_bundle(facts: dict, symbol: str, meta: dict, as_of, prices: dict,
     if not facts or not (facts.get("facts") or {}):
         return None
     income_a, income_q = _flow_maps(facts, _INCOME_CONCEPTS, as_of)
-    cashflow_a, cashflow_q = _flow_maps(facts, _CASHFLOW_CONCEPTS, as_of)
+    cashflow_a, cashflow_q = _cashflow_maps(facts, as_of)
     supplement = supplements(facts, as_of)
     for cf in (cashflow_a, cashflow_q):   # EDGAR payments are outflow-positive; Yahoo is negative
         cf["Capital Expenditure"] = {end: -val

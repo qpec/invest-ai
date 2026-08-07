@@ -161,6 +161,7 @@ def consumed_tags() -> dict[str, frozenset[str]]:
                   pit._DISCLOSURE_CONCEPTS, pit._SHARE_FALLBACK_CONCEPTS):
         for chain in table.values():
             us_gaap.update(chain)
+    us_gaap.update(pit._DA_COMPONENT_CONCEPTS)
     us_gaap.update(secsv._PIT_EXTRA_INSTANT_TAGS)
     return {"us-gaap": frozenset(us_gaap), "dei": frozenset({pit._SHARES_TAG})}
 

@@ -73,6 +73,22 @@ def test_metric_observation_retains_exact_input_lineage(tmp_path):
     assert ledger.metric_inputs(conn, metric_id) == [revenue, owner_fcf]
 
 
+def test_missing_metric_requires_explicit_reason_code(tmp_path):
+    conn = _conn(tmp_path)
+    definition_id = _definition(conn, key="owner_fcf_yield_pct")
+    metric_id = ledger.append_metric_observation(
+        conn, metric_definition_id=definition_id, ticker="ACME", value=None,
+        status=ledger.MetricStatus.MISSING, reason_code="MISSING_PRICE",
+        confidence=0.0, as_of="2026-08-07", calculated_at="2026-08-07T12:00:00Z",
+        input_ids=[],
+    )
+    row = conn.execute(
+        "SELECT reason_code FROM metric_observation WHERE metric_observation_id=?",
+        (metric_id,),
+    ).fetchone()
+    assert row["reason_code"] == "MISSING_PRICE"
+
+
 def test_newest_metric_is_current_and_required_stale_blocks_readiness(tmp_path):
     conn = _conn(tmp_path)
     definition_id = _definition(conn)
