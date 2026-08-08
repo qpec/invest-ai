@@ -38,6 +38,7 @@ import argparse
 import datetime as _dt
 import html
 import json
+import math
 import os
 import re
 import shutil
@@ -234,6 +235,71 @@ PUBLIC_THESIS_FIELDS = (
     "business_model", "moat", "owner_earnings_picture", "valuation_anchor",
     "ten_year_statement", "bear_case", "sources",
 )
+
+
+def _finite_number(value) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    return value if math.isfinite(value) else None
+
+
+def relative_percentile(value: float, values: list[float]) -> int:
+    """Return the rounded midrank percentile, including ties symmetrically."""
+    measured = [v for item in values if (v := _finite_number(item)) is not None]
+    target = _finite_number(value)
+    if target is None or not measured:
+        raise ValueError("finite valuation cohort required")
+    below = sum(item < target for item in measured)
+    equal = sum(item == target for item in measured)
+    return round(100 * (below + equal / 2) / len(measured))
+
+
+def valuation_signal(percentile: int) -> str:
+    if percentile >= 80:
+        return "Appears inexpensive on current owner cash flow"
+    if percentile >= 60:
+        return "Looks somewhat inexpensive on current owner cash flow"
+    if percentile >= 40:
+        return "Sits near the middle on current owner cash flow"
+    if percentile >= 20:
+        return "Looks somewhat demanding on current owner cash flow"
+    return "Appears demanding on current owner cash flow"
+
+
+def public_valuation_lens(row: dict, detail: dict, rows: list[dict],
+                          *, caveat: str) -> dict:
+    """Build public valuation context from one point-in-time Scout measurement."""
+    price = _finite_number(detail.get("px"))
+    yield_pct = _finite_number((row.get("reg") or {}).get("owner_fcf_yield_pct"))
+    price_as_of = detail.get("pxd")
+    if price is None or not price_as_of:
+        raise ValueError(f"{row.get('s')}: dated price required for valuation lens")
+    if yield_pct is None or yield_pct <= 0:
+        raise ValueError(f"{row.get('s')}: positive owner-cash yield required")
+    sector = str(row.get("sec") or "").strip()
+    sector_values = [
+        (candidate.get("reg") or {}).get("owner_fcf_yield_pct")
+        for candidate in rows if sector and candidate.get("sec") == sector
+    ]
+    sector_values = [v for v in sector_values if _finite_number(v) is not None]
+    if len(sector_values) >= 20:
+        values = sector_values
+        scope, label = "sector", f"{sector} sector"
+    else:
+        values = [(candidate.get("reg") or {}).get("owner_fcf_yield_pct")
+                  for candidate in rows]
+        values = [v for v in values if _finite_number(v) is not None]
+        scope, label = "universe", "measured Scout universe"
+    percentile = relative_percentile(yield_pct, values)
+    return {
+        "price": round(price, 2), "price_as_of": str(price_as_of),
+        "owner_cash_yield_pct": round(yield_pct, 2),
+        "owner_cash_multiple_x": round(100 / yield_pct, 1),
+        "comparison_scope": scope, "comparison_label": label,
+        "comparison_count": len(values), "percentile": percentile,
+        "signal": valuation_signal(percentile), "caveat": caveat.strip(),
+    }
 
 
 def public_portfolio_thesis(doc: dict, registry: dict,

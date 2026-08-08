@@ -37,6 +37,51 @@ class TestMarkdown:
 
 
 class TestPayload:
+    def test_valuation_lens_uses_sector_midrank_percentile(self):
+        rows = [
+            {"s": "AAA", "sec": "Technology", "reg": {"owner_fcf_yield_pct": 8.0}},
+            {"s": "BBB", "sec": "Technology", "reg": {"owner_fcf_yield_pct": 4.0}},
+            {"s": "CCC", "sec": "Technology", "reg": {"owner_fcf_yield_pct": 8.0}},
+        ] + [
+            {"s": f"T{i}", "sec": "Technology",
+             "reg": {"owner_fcf_yield_pct": 1.0}}
+            for i in range(17)
+        ]
+        lens = webapp.public_valuation_lens(
+            rows[0], {"px": 80.0, "pxd": "2026-08-06"}, rows,
+            caveat="Cash flow may normalize lower.",
+        )
+        assert lens == {
+            "price": 80.0, "price_as_of": "2026-08-06",
+            "owner_cash_yield_pct": 8.0, "owner_cash_multiple_x": 12.5,
+            "comparison_scope": "sector",
+            "comparison_label": "Technology sector", "comparison_count": 20,
+            "percentile": 95, "signal": "Appears inexpensive on current owner cash flow",
+            "caveat": "Cash flow may normalize lower.",
+        }
+
+    def test_valuation_lens_falls_back_to_measured_scout_universe(self):
+        row = {"s": "AAA", "sec": "", "reg": {"owner_fcf_yield_pct": 6.0}}
+        cohort = [row, {"s": "BBB", "sec": "Health Care",
+                        "reg": {"owner_fcf_yield_pct": 3.0}}]
+        lens = webapp.public_valuation_lens(
+            row, {"px": 42.5, "pxd": "2026-08-06"}, cohort, caveat="Check normalization."
+        )
+        assert lens["comparison_scope"] == "universe"
+        assert lens["comparison_label"] == "measured Scout universe"
+        assert lens["comparison_count"] == 2
+        assert lens["percentile"] == 75
+
+    @pytest.mark.parametrize(("percentile", "signal"), [
+        (80, "Appears inexpensive on current owner cash flow"),
+        (60, "Looks somewhat inexpensive on current owner cash flow"),
+        (40, "Sits near the middle on current owner cash flow"),
+        (20, "Looks somewhat demanding on current owner cash flow"),
+        (19, "Appears demanding on current owner cash flow"),
+    ])
+    def test_valuation_signal_boundaries(self, percentile, signal):
+        assert webapp.valuation_signal(percentile) == signal
+
     def test_script_breakout_is_neutralised(self):
         blob = webapp._payload_json({"x": "</script><script>window.PWNED=1"}, {})
         assert "</script" not in blob
