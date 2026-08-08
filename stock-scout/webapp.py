@@ -322,7 +322,8 @@ def public_portfolio_thesis(doc: dict, registry: dict,
     }
 
 
-def public_thesis_reader(draft: dict, row: dict, detail: dict) -> dict:
+def public_thesis_reader(draft: dict, row: dict, detail: dict,
+                         cohort_rows: list[dict] | None = None) -> dict:
     """Join one accepted draft to its two independent Scout judgements.
 
     This is a public allowlist projection: the reader never receives arbitrary
@@ -357,7 +358,7 @@ def public_thesis_reader(draft: dict, row: dict, detail: dict) -> dict:
     if leading is None:
         leading = next((mode.get("detail") for mode in failure_modes
                         if isinstance(mode, dict) and mode.get("detail")), "")
-    return {
+    reader = {
         "symbol": symbol, "name": row.get("n") or symbol,
         "rank": int(row["top"]),
         "quality": {"score": row.get("pct"), "grade": row.get("band"),
@@ -368,6 +369,14 @@ def public_thesis_reader(draft: dict, row: dict, detail: dict) -> dict:
         "report_html": draft.get("report_html") or "",
         "triggers": draft.get("triggers") or [],
     }
+    if cohort_rows is not None:
+        caveat = str(body.get("bear_case") or "").strip()
+        if not caveat:
+            caveat = ("This indication depends on current owner cash flow being "
+                       "representative of normal earning power.")
+        reader["valuation_lens"] = public_valuation_lens(
+            row, detail, cohort_rows, caveat=caveat)
+    return reader
 
 
 def load_thesis_dir(theses_dir: Path, registry_by_symbol: dict) -> dict:
@@ -539,6 +548,7 @@ def assemble(*, sec_data: str, prices_dir: str | None, universe: str, as_of: str
             "mc": _round(bundle.get("market_cap"), 0),
             "shb": bundle.get("shares_basis"), "shn": bundle.get("shares_note"),
             "shd": bundle.get("shares_as_of"),
+            "px": _round(bundle.get("price"), 2),
             "pxd": bundle.get("price_as_of"), "pxa": bundle.get("price_age_days"),
             "pxn": bundle.get("price_note"),
         }
@@ -572,7 +582,7 @@ def assemble(*, sec_data: str, prices_dir: str | None, universe: str, as_of: str
                 for r in top_rows]
     readers = [public_thesis_reader(
         drafts_by_symbol[r["symbol"]], compact_by_symbol[r["symbol"]],
-        details[r["symbol"]])
+        details[r["symbol"]], compact)
         for r in top_rows if r["symbol"] in drafts_by_symbol
         and drafts_by_symbol[r["symbol"]].get("accepted")]
 

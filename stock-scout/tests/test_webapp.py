@@ -162,6 +162,29 @@ class TestPayload:
         )
         assert reader["quality"]["explanation"] == "Carried by durable cash returns."
 
+    def test_public_reader_projects_dated_price_and_allowlisted_valuation(self):
+        draft = {
+            "symbol": "AAA", "accepted": True,
+            "thesis": {
+                "business_model": "Makes widgets.",
+                "valuation_anchor": {"statement": "Cash yield is attractive."},
+                "bear_case": "Peak cash flow may not persist.",
+            },
+        }
+        row = {"s": "AAA", "n": "Alpha", "top": 1, "pct": 90,
+               "band": "Exceptional", "verdict": "Ordinary", "sec": "",
+               "reg": {"owner_fcf_yield_pct": 10.0}}
+        reader = webapp.public_thesis_reader(
+            draft, row,
+            {"px": 25.5, "pxd": "2026-08-06", "private_note": "never publish",
+             "card": {}, "inv": {}},
+            [row],
+        )
+        assert reader["valuation_lens"]["price"] == 25.5
+        assert reader["valuation_lens"]["owner_cash_multiple_x"] == 10.0
+        assert reader["valuation_lens"]["caveat"] == "Peak cash flow may not persist."
+        assert "private_note" not in json.dumps(reader)
+
     def test_public_reader_refuses_unaccepted_or_mismatched_draft(self):
         with pytest.raises(ValueError, match="accepted thesis"):
             webapp.public_thesis_reader({"symbol": "AAA", "accepted": False},
