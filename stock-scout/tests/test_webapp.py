@@ -591,3 +591,47 @@ class TestDeskActions:
             out_dir = str((Path(webapp.__file__).resolve().parent.parent / "docs"))
         assert webapp.serve(Args()) == 2
         assert "refusing to serve" in capsys.readouterr().err
+
+
+class TestCardCarriesTheJudgement:
+    """2026-08-08, owner-directed: every card must show the moat (Pillar 1 demands an
+    advantage WITH EVIDENCE), and the valuation line must differentiate — the old one
+    said 'appears inexpensive' on 47 of 48 cards, and an absolute share price is not a
+    judgement input."""
+
+    def _page(self, tmp_path):
+        return webapp.write_site(TestSite()._model(), tmp_path).read_text(encoding="utf-8")
+
+    def test_the_card_states_the_moat_and_its_evidence(self, tmp_path):
+        page = self._page(tmp_path)
+        assert "function moatLine(" in page
+        assert "${moatLine(reader)}" in page
+        assert "piece${count === 1 ? '' : 's'} of evidence" in page
+        # the absent case keeps its Pillar-1 consequence
+        assert "No durable moat" in page and "Pillar 1 makes this a PASS" in page
+        # and a moat claimed on one source is labelled thin rather than presented as proof
+        assert "', thin'" in page
+
+    def test_the_valuation_block_leads_with_implied_growth_not_the_share_price(self, tmp_path):
+        page = self._page(tmp_path)
+        assert "What the price implies" in page
+        assert "owner-cash growth, for a decade" in page
+        assert "It has grown" in page
+        # the three readings that make the line differentiate
+        for verdict in ("asking for an acceleration it has not shown",
+                        "asking for less than it has delivered",
+                        "asking for roughly what it has delivered"):
+            assert verdict in page
+        # On the CARD the price survives only as muted context, never as the headline.
+        # (The reader's drill-down grid may still show it beside yield and percentile —
+        # that is detail, not the lead.)
+        assert "px-note" in page
+        card = page[page.index("function thesisCard("):]
+        card = card[:card.index("\nfunction ")]
+        assert "<label>Current price</label>" not in card
+        assert "What the price implies" in page
+
+    def test_an_off_the_scale_implied_rate_is_not_quoted_as_precise(self, tmp_path):
+        page = self._page(tmp_path)
+        assert "more than ${e.implied}%/yr" in page
+        assert "less than ${e.implied}%/yr" in page

@@ -923,6 +923,51 @@ def margin_of_safety(bundle: dict) -> dict | None:
             "growth": growth, "base_fcf": base}
 
 
+IMPLIED_GROWTH_BOUNDS = (-0.40, 0.60)   # the rates worth reporting; outside is "off the scale"
+
+
+def implied_growth(bundle: dict, mos: dict | None = None) -> dict | None:
+    """Reverse the margin-of-safety DCF: what owner-FCF growth does TODAY'S PRICE imply?
+
+    Expectations investing (Mauboussin & Rappaport): rather than forecast growth and
+    compare the answer to the price, read the growth the price already embeds and judge
+    whether it is plausible. For a screen this is the more honest direction — a single
+    forecast is one person's guess presented as a valuation, whereas the implied rate is
+    arithmetic the owner can falsify against what the business has actually achieved.
+
+    `dcf_intrinsic` is monotonically increasing in growth (pinned by test), so this is a
+    bisection on the same function, base flow and discount rate the margin of safety
+    uses — the two can never disagree. Returns the implied rate plus the achieved
+    revenue CAGR so the caller can put them side by side, and a `beyond` flag when the
+    price implies a rate outside IMPLIED_GROWTH_BOUNDS (the answer is then "more than
+    this", not a number to quote). None when the DCF itself is not computable.
+    """
+    mos = mos if mos is not None else margin_of_safety(bundle)
+    if mos is None:
+        return None
+    base, mcap, discount = mos["base_fcf"], mos["market_cap"], mos["discount_rate"]
+    quality = mos["intrinsic_value"] / dcf_intrinsic(base, mos["growth"], discount)
+
+    def value_at(rate: float) -> float:
+        return dcf_intrinsic(base, rate, discount) * quality
+
+    low, high = IMPLIED_GROWTH_BOUNDS
+    if value_at(low) > mcap:
+        return {"implied_growth_pct": low * 100.0, "beyond": "below",
+                "achieved_growth_pct": _revenue_growth(bundle)[0]}
+    if value_at(high) < mcap:
+        return {"implied_growth_pct": high * 100.0, "beyond": "above",
+                "achieved_growth_pct": _revenue_growth(bundle)[0]}
+    for _ in range(60):                      # ~1e-18 on the interval; 60 is free
+        mid = (low + high) / 2.0
+        if value_at(mid) < mcap:
+            low = mid
+        else:
+            high = mid
+    return {"implied_growth_pct": (low + high) / 2.0 * 100.0, "beyond": None,
+            "achieved_growth_pct": _revenue_growth(bundle)[0]}
+
+
 BUFFETT_WINDOW_YEARS = 8        # the reference implementation's `limit=8` on annual data
 
 

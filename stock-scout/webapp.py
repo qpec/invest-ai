@@ -433,6 +433,7 @@ def public_thesis_reader(draft: dict, row: dict, detail: dict,
         "sector": row.get("sec") or "",
         "evidence": row.get("ev"),
         "market_cap": _finite_number(row.get("mc")),
+        "expectations": detail.get("ig"),
         "key_metrics": [
             {"key": key, "label": label, "unit": unit,
              "value": _finite_number((row.get("reg") or {}).get(key))}
@@ -614,6 +615,10 @@ def assemble(*, sec_data: str, prices_dir: str | None, universe: str, as_of: str
             "tier": srow.get("tier"),
             "reg": {k: _round(v) for k, v in registry.items()},
         })
+        # One DCF per name, shared by the margin of safety and the reverse (implied
+        # growth) reading — they are two views of the same arithmetic and must never
+        # be computed from different inputs.
+        mos_of = scoring.margin_of_safety(bundle) if bundle else None
         probes = {pid: {x: probe.get(x) for x in
                         ("severity", "measured", "value", "detail", "provenance")}
                   for pid, probe in (inv.get("probes") or {}).items()}
@@ -642,8 +647,14 @@ def assemble(*, sec_data: str, prices_dir: str | None, universe: str, as_of: str
                                "growth": _round(m["growth"], 4),
                                "discount_rate": _round(m.get("discount_rate"), 4),
                                "intrinsic_value": _round(m["intrinsic_value"], 0),
-                               "mos_pct": _round(m["mos_pct"], 4)} if m else None)(
-                scoring.margin_of_safety(bundle) if bundle else None),
+                               "mos_pct": _round(m["mos_pct"], 4)} if m else None)(mos_of),
+            # What the CURRENT PRICE implies, rather than what a forecast asserts —
+            # the one valuation line that differs per company and that the owner can
+            # falsify against the growth the business has actually delivered.
+            "ig": (lambda g: {"implied": _round(g["implied_growth_pct"], 1),
+                              "achieved": _round(g["achieved_growth_pct"], 1),
+                              "beyond": g["beyond"]} if g else None)(
+                scoring.implied_growth(bundle, mos_of) if mos_of else None),
             "mc": _round(bundle.get("market_cap"), 0),
             "shb": bundle.get("shares_basis"), "shn": bundle.get("shares_note"),
             "shd": bundle.get("shares_as_of"),
@@ -1097,6 +1108,15 @@ details.fold>.fbody{padding:2px 16px 14px;border-top:1px solid var(--hair)}
   overflow-wrap:anywhere}
 .km b{font-size:13px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
 .km-context{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:6px}
+/* Pillar 1's requirement, stated on the card. */
+.moat{border-left:3px solid var(--good);background:var(--good-bg);padding:7px 11px;
+  border-radius:0 8px 8px 0;margin:2px 0}
+.moat.moat-none{border-left-color:var(--warn);background:var(--warn-bg)}
+.moat label{display:block;color:var(--faint);font-size:9.5px;text-transform:uppercase;
+  letter-spacing:.05em;margin-bottom:2px}
+.moat b{font-size:13px}
+.px-note{color:var(--faint)}
+.one-signal{margin-top:6px}
 .km-chip{font-size:10px;color:var(--text2);background:var(--raised);
   border:1px solid var(--hair);border-radius:4px;padding:1px 6px}
 @media(max-width:620px){.km-strip{grid-template-columns:repeat(3,minmax(0,1fr));row-gap:9px}}
@@ -1815,6 +1835,64 @@ function keyMetricStrip(reader){
     + (context ? `<div class="km-context">${context}</div>` : '');
 }
 
+/* Pillar 1 requires "at least one durable competitive advantage, WITH EVIDENCE" — so
+   the card states the advantage and how much evidence stands behind it. Before this the
+   moat appeared only as a banner when it was ABSENT, which inverted the rule: the thing
+   the framework demands you show was the one thing the card never showed. */
+const MOAT_LABEL = {network_effects:'Network effects', switching_costs:'Switching costs',
+  cost_advantage:'Cost advantage', brand_trust:'Brand / trust', regulatory:'Regulatory',
+  none:'No durable moat'};
+
+function moatLine(reader){
+  const moat = (reader.thesis || {}).moat || {};
+  const kind = moat.kind || null;
+  const count = (moat.evidence || []).filter(e => String(e || '').trim()).length;
+  if (!kind) return `<div class="moat moat-none"><label>Moat</label>
+    <b>Not stated</b><span class="ts"> — the draft names no advantage</span></div>`;
+  if (kind === 'none') return `<div class="moat moat-none"><label>Moat</label>
+    <b>No durable moat</b><span class="ts"> — Pillar 1 makes this a PASS</span></div>`;
+  return `<div class="moat"><label>Moat</label><b>${esc(MOAT_LABEL[kind] || kind)}</b>
+    <span class="ts"> — ${count} piece${count === 1 ? '' : 's'} of evidence${
+      count < 2 ? ', thin' : ''}</span></div>`;
+}
+
+/* The price a share happens to trade at is not a judgement input — $15 is not cheaper
+   than $300 — and the old lead sentence fired identically on 47 of 48 cards, so the
+   loudest text carried no information. What the price IMPLIES does differ per company,
+   and the owner can falsify it against what the business has actually done. */
+function expectationsBlock(reader){
+  const e = reader.expectations, lens = reader.valuation_lens || {};
+  const priceNote = `<p class="ts px-note">${lens.price == null ? 'Price unavailable'
+    : '$' + Number(lens.price).toFixed(2)} · ${esc(lens.price_as_of || 'date unavailable')}${
+    lens.owner_cash_multiple_x == null ? ''
+      : ' · ' + esc(lens.owner_cash_multiple_x) + '× owner cash flow'}</p>`;
+  if (!e || e.implied == null){
+    return `<div class="judgement valuation-summary"><label>What the price implies</label>
+      <b>${esc(lens.signal || 'Valuation context unavailable')}</b>${priceNote}</div>`;
+  }
+  const implied = e.beyond === 'above' ? `more than ${e.implied}%/yr`
+    : e.beyond === 'below' ? `less than ${e.implied}%/yr` : `${e.implied}%/yr`;
+  const achieved = e.achieved == null ? null : e.achieved;
+  let read = '';
+  if (achieved != null && e.beyond == null){
+    const gap = e.implied - achieved;
+    read = gap > 5 ? 'The price is asking for an acceleration it has not shown.'
+      : gap < -5 ? 'The price is asking for less than it has delivered.'
+      : 'The price is asking for roughly what it has delivered.';
+  }
+  return `<div class="judgement valuation-summary${lens.distress ? ' valuation-distress' : ''}">
+    <label>What the price implies</label>
+    <b>${esc(implied)} owner-cash growth, for a decade</b>
+    ${achieved == null ? '<p class="ts">Achieved growth not measurable.</p>'
+      : `<p class="ts">It has grown <b>${esc(achieved)}%/yr</b>.</p>`}
+    ${read ? `<p class="ts">${esc(read)}</p>` : ''}
+    <p class="ts">Owner cash yield ${lens.owner_cash_yield_pct == null ? '—'
+      : esc(lens.owner_cash_yield_pct) + '%'} · ${lens.percentile == null ? '—'
+      : esc(lens.percentile) + 'th percentile'} in ${esc(lens.comparison_label || 'the measured universe')}</p>
+    ${priceNote}
+    ${lens.caveat_lead ? `<p class="ts caveat-lead">${esc(lens.caveat_lead)}</p>` : ''}</div>`;
+}
+
 function thesisCard(reader){
   const th = reader.thesis || {}, lens = reader.valuation_lens || {};
   const q = reader.quality || {}, verdict = reader.risk.verdict || 'Unknown';
@@ -1829,6 +1907,7 @@ function thesisCard(reader){
     ${flagged ? `<div class="risk-banner">${esc(verdict)} — fails the picks shortlist&#39;s fragility tests. Research draft, not a candidate.</div>` : ''}
     ${reader.pass_recommended ? '<div class="risk-banner">Names no durable moat — PASS recommended under Pillar 1.</div>' : ''}
     <p class="ts">${esc(th.business_model || '')}</p>
+    ${moatLine(reader)}
     ${keyMetricStrip(reader)}
     <div class="card-judgements">
       <div class="judgement"><label>Business quality</label>
@@ -1839,13 +1918,8 @@ function thesisCard(reader){
         ${pill(verdict, VERDICT_CLS[verdict])}
         ${verdict === 'Unknown' ? '<p class="ts">could not be certified — a fact about the evidence, not about safety</p>' : ''}</div>
     </div>
-    <div class="judgement valuation-summary${lens.distress ? ' valuation-distress' : ''}"><label>Current price</label>
-      <b>${lens.price == null ? 'Unavailable' : '$' + Number(lens.price).toFixed(2)}</b>
-      <span class="ts"> · ${esc(lens.price_as_of || 'date unavailable')}</span>
-      <p class="ts"><b>${esc(lens.signal || 'Valuation context unavailable')}</b></p>
-      <p class="ts">Owner cash yield ${lens.owner_cash_yield_pct == null ? '—' : esc(lens.owner_cash_yield_pct) + '%'} · ${lens.percentile == null ? '—' : esc(lens.percentile) + 'th percentile'} in ${esc(lens.comparison_label || 'the measured universe')}</p>
-      ${carriedByYield ? '<p class="ts">The quality grade above is also led by this yield — one signal, not two.</p>' : ''}
-      ${lens.caveat_lead ? `<p class="ts caveat-lead">${esc(lens.caveat_lead)}</p>` : ''}</div>
+    ${expectationsBlock(reader)}
+    ${carriedByYield ? '<p class="ts one-signal">The quality grade above is also led by this yield — one signal, not two.</p>' : ''}
     <button class="thesis-cta${flagged ? ' cta-bear' : ''}" data-thesis-symbol="${esc(reader.symbol)}">${flagged ? 'View the bear case' : 'View assessment &amp; thesis'}</button>
   </article>`;
 }
@@ -1912,7 +1986,9 @@ function openThesisReader(symbol, push = true){
       <h3>${esc((moat.kind || 'Potential moat').replaceAll('_', ' '))}</h3><ul>${(moat.evidence || []).map(item => `<li>${esc(item)}</li>`).join('')}</ul>
       ${th.ten_year_statement ? `<p>${esc(th.ten_year_statement)}</p>` : ''}</section>
     <section class="card reader-section"><h2>What do the cash economics say?</h2><p>${esc(th.owner_earnings_picture || 'The available filings do not support a reliable conclusion.')}</p></section>
-    <section class="card reader-section"><h2>What does the valuation imply?</h2><h3>Valuation context</h3>
+    <section class="card reader-section"><h2>What does the valuation imply?</h2>
+      ${expectationsBlock(reader)}
+      <h3>Valuation context</h3>
       <p><b>${esc(lens.signal || 'Valuation context unavailable')}</b></p>
       <div class="valuation-metrics">
         <div class="valuation-metric"><label>Current price</label><b>${lens.price == null ? '—' : '$' + Number(lens.price).toFixed(2)}</b><p class="ts">Quote dated ${esc(lens.price_as_of || 'unavailable')}</p></div>

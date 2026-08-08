@@ -832,3 +832,56 @@ def test_buffett_checklist_judges_a_decade_not_two():
     # and the consistency leg reads only that window too
     assert "8 annual NI periods" in items["Earnings consistency (NI non-decreasing)"]["detail"]
     assert scoring.BUFFETT_WINDOW_YEARS == 8
+
+
+# --- reverse DCF / expectations ------------------------------------------------------
+
+def test_implied_growth_reproduces_the_market_cap():
+    """The whole point: at the implied rate the DCF must value the company at exactly
+    what the market is paying. If this drifts, the number on the card is fiction."""
+    b = base_bundle()
+    mos = scoring.margin_of_safety(b)
+    ig = scoring.implied_growth(b)
+    quality = mos["intrinsic_value"] / scoring.dcf_intrinsic(
+        mos["base_fcf"], mos["growth"], mos["discount_rate"])
+    value = scoring.dcf_intrinsic(
+        mos["base_fcf"], ig["implied_growth_pct"] / 100.0, mos["discount_rate"]) * quality
+    assert value == pytest.approx(mos["market_cap"], rel=1e-6)
+
+
+def test_implied_growth_agrees_in_sign_with_the_margin_of_safety():
+    """A negative margin of safety means the price is above the DCF's value, which is the
+    same statement as: the price implies MORE growth than the DCF assumed. The two views
+    are one calculation and must never contradict each other."""
+    b = base_bundle()
+    mos, ig = scoring.margin_of_safety(b), scoring.implied_growth(b)
+    if mos["mos_pct"] < 0:
+        assert ig["implied_growth_pct"] > mos["growth"] * 100.0
+    else:
+        assert ig["implied_growth_pct"] <= mos["growth"] * 100.0
+
+
+def test_implied_growth_reports_off_the_scale_rather_than_a_fake_number():
+    """A price that implies more than the bounds can express is reported as 'more than',
+    not as a precise figure the arithmetic cannot support."""
+    b = base_bundle()
+    b["market_cap"] = 5e12                       # absurd price for the cash flows
+    ig = scoring.implied_growth(b)
+    assert ig["beyond"] == "above"
+    assert ig["implied_growth_pct"] == pytest.approx(scoring.IMPLIED_GROWTH_BOUNDS[1] * 100)
+
+    cheap = base_bundle()
+    cheap["market_cap"] = 1e6                    # absurdly cheap
+    assert scoring.implied_growth(cheap)["beyond"] == "below"
+
+
+def test_implied_growth_is_none_when_the_dcf_is_not_computable():
+    assert scoring.implied_growth(_burner(base_bundle(), ttm_positive=False)) is None
+
+
+def test_implied_growth_carries_the_achieved_rate_for_comparison():
+    """The card sets implied beside achieved; both must come from the same bundle."""
+    b = base_bundle()
+    ig = scoring.implied_growth(b)
+    assert ig["achieved_growth_pct"] == pytest.approx(
+        scoring._revenue_growth(b)[0])
