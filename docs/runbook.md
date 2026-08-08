@@ -20,6 +20,16 @@ member, unique symbols and ranks, all required assessment sections, local-only l
 paths, and the existing public-field privacy allowlist. Logo availability alone remains
 non-blocking.
 
+Every Top 48 card and reader also carries a **Valuation context** lens. Its current price
+and quote date come from the same point-in-time Scout bundle used for screening; the site
+does not fetch a second browser-side quote. Owner free-cash-flow yield is translated into
+an equivalent owner-cash multiple and ranked within the measured sector cohort. If sector
+metadata is absent or fewer than 20 sector observations are available, the lens explicitly
+falls back to the measured Scout universe. The signal is conditional on current cash flow
+being representative and remains separate from business quality and downside risk.
+Publication blocks when any Top 48 reader lacks a positive dated price, positive yield,
+valid comparison, signal, or caveat.
+
 ## 1. The dead-man rule (the only daily check)
 **No message by 08:00 Amsterdam = the box is down.** The daily letter's absence IS the
 alarm — the letter is produced 7 days a week (full letter on US market days, a two-line
