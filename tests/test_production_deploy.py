@@ -41,12 +41,6 @@ def test_wrapper_verifies_staged_artifact_before_copying_it():
     assert verify < copy
 
 
-def test_legacy_publisher_has_local_cutover_guard():
-    text = read("deploy/scout/publish.sh")
-    assert "SCOUT_LOCAL_PRODUCTION_ACTIVE" in text
-    assert "local production publisher is active" in text
-
-
 def test_thesis_runner_pins_owner_approved_max_effort_isolated_session():
     text = read("deploy/local/scout-thesis-runner.sh")
     assert "openai/gpt-5.6-sol" in text

@@ -57,8 +57,44 @@ class TestPayload:
             "comparison_scope": "sector",
             "comparison_label": "Technology sector", "comparison_count": 20,
             "percentile": 95, "signal": "Appears inexpensive on current owner cash flow",
+            "distress": False,
             "caveat": "Cash flow may normalize lower.",
+            "caveat_lead": "Cash flow may normalize lower.",
         }
+
+    @pytest.mark.parametrize("text,expected", [
+        ("Apple Inc. depends on iPhone cycles. Regulatory risk is rising.",
+         "Apple Inc. depends on iPhone cycles."),
+        ("Revenue in the U.S. fell 12%. Margins compressed.",
+         "Revenue in the U.S. fell 12%."),
+        ("Q4 margins fell vs. Q3. Guidance was cut.", "Q4 margins fell vs. Q3."),
+        ("No trailing period", "No trailing period"),
+        ("", ""),
+    ])
+    def test_the_caveat_lead_survives_abbreviations(self, text, expected):
+        """The lead is the loudest line on a card; a naive split on '. ' rendered
+        'Apple Inc.' as if that were the finding."""
+        assert webapp.first_sentence(text) == expected
+
+    def test_the_caveat_lead_is_clamped(self):
+        assert len(webapp.first_sentence("x" * 500)) == 300
+
+    def test_valuation_signal_is_two_sided_at_distress_yields(self):
+        """2026-08-08 review U-2: past the distress line, 'cheap' is the wrong read —
+        the signal must fall in confidence as the yield rises, not rise with it."""
+        assert "inexpensive" in webapp.valuation_signal(95)
+        distress = webapp.valuation_signal(95, yield_pct=webapp.DISTRESS_YIELD_PCT)
+        assert "voting no" in distress and "inexpensive" not in distress
+
+    def test_a_distress_yield_marks_the_lens_and_leads_with_the_caveat(self):
+        rows = [{"s": "AAA", "sec": "", "reg": {"owner_fcf_yield_pct": 29.4}},
+                {"s": "BBB", "sec": "", "reg": {"owner_fcf_yield_pct": 5.0}}]
+        lens = webapp.public_valuation_lens(
+            rows[0], {"px": 21.0, "pxd": "2026-08-06"}, rows,
+            caveat="The cash engine fell 97% from its peak. Loss paths also include churn.")
+        assert lens["distress"] is True
+        assert "voting no" in lens["signal"]
+        assert lens["caveat_lead"] == "The cash engine fell 97% from its peak."
 
     def test_valuation_lens_falls_back_to_measured_scout_universe(self):
         row = {"s": "AAA", "sec": "", "reg": {"owner_fcf_yield_pct": 6.0}}
@@ -138,6 +174,7 @@ class TestPayload:
              "card": {"why": ["Strong returns."]}},
         )
         assert reader["quality"] == {"score": 91.0, "grade": "Exceptional",
+                                      "score_points": None, "available_max": None,
                                       "explanation": "Strong returns."}
         assert reader["risk"]["verdict"] == "Fragile"
         assert reader["risk"]["leading_fragility"] == "Customer concentration."
@@ -355,18 +392,25 @@ class TestSite:
     def test_public_thesis_section_is_an_explicit_card_index(self, tmp_path):
         page = webapp.write_site(self._model(), tmp_path).read_text(encoding="utf-8")
 
-        assert "48 companies worth deeper research" in page
+        assert "companies worth deeper research" in page
         assert 'id="thesisSearch"' in page
         assert 'id="thesisGrid"' in page
         assert "View assessment &amp; thesis" in page
         assert 'data-thesis-symbol="${esc(reader.symbol)}"' in page
         assert "thesisTop" not in page
+        # 2026-08-08 review F-1/U-1: Fragile/Ruinous entries are partitioned and
+        # banner-labeled, never presented typographically as peers of the candidates.
+        assert "fails the picks shortlist" in page
+        assert "View the bear case" in page
+        assert "risk-banner" in page
+        # U-5: the noise floor is stated where the scores are read.
+        assert "differences under ~5 points are noise" in page
 
     def test_public_reader_contract_and_direct_route_are_present(self, tmp_path):
         page = webapp.write_site(self._model(), tmp_path).read_text(encoding="utf-8")
 
         for text in (
-            "Back to Top 48", "At a glance", "The case in one minute",
+            "Back to the Thesis Desk", "At a glance", "The case in one minute",
             "Why might this be a strong business?",
             "What do the cash economics say?", "What does the valuation imply?",
             "What could go wrong?", "What would change the thesis?",
@@ -547,3 +591,47 @@ class TestDeskActions:
             out_dir = str((Path(webapp.__file__).resolve().parent.parent / "docs"))
         assert webapp.serve(Args()) == 2
         assert "refusing to serve" in capsys.readouterr().err
+
+
+class TestCardCarriesTheJudgement:
+    """2026-08-08, owner-directed: every card must show the moat (Pillar 1 demands an
+    advantage WITH EVIDENCE), and the valuation line must differentiate — the old one
+    said 'appears inexpensive' on 47 of 48 cards, and an absolute share price is not a
+    judgement input."""
+
+    def _page(self, tmp_path):
+        return webapp.write_site(TestSite()._model(), tmp_path).read_text(encoding="utf-8")
+
+    def test_the_card_states_the_moat_and_its_evidence(self, tmp_path):
+        page = self._page(tmp_path)
+        assert "function moatLine(" in page
+        assert "${moatLine(reader)}" in page
+        assert "piece${count === 1 ? '' : 's'} of evidence" in page
+        # the absent case keeps its Pillar-1 consequence
+        assert "No durable moat" in page and "Pillar 1 makes this a PASS" in page
+        # and a moat claimed on one source is labelled thin rather than presented as proof
+        assert "', thin'" in page
+
+    def test_the_valuation_block_leads_with_implied_growth_not_the_share_price(self, tmp_path):
+        page = self._page(tmp_path)
+        assert "What the price implies" in page
+        assert "owner-cash growth, for a decade" in page
+        assert "It has grown" in page
+        # the three readings that make the line differentiate
+        for verdict in ("asking for an acceleration it has not shown",
+                        "asking for less than it has delivered",
+                        "asking for roughly what it has delivered"):
+            assert verdict in page
+        # On the CARD the price survives only as muted context, never as the headline.
+        # (The reader's drill-down grid may still show it beside yield and percentile —
+        # that is detail, not the lead.)
+        assert "px-note" in page
+        card = page[page.index("function thesisCard("):]
+        card = card[:card.index("\nfunction ")]
+        assert "<label>Current price</label>" not in card
+        assert "What the price implies" in page
+
+    def test_an_off_the_scale_implied_rate_is_not_quoted_as_precise(self, tmp_path):
+        page = self._page(tmp_path)
+        assert "more than ${e.implied}%/yr" in page
+        assert "less than ${e.implied}%/yr" in page

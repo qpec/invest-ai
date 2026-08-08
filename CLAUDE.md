@@ -5,107 +5,364 @@
 > `qpec/invest-ai-state`. Internal names (`agentcy`, `stock-scout`, this file)
 > deliberately keep the working name.
 
-A daily/weekly iterating financial-analysis system for portfolio oversight. The core object is the **investment thesis**, not the stock: every position carries a written thesis with a conviction level and pre-committed invalidation triggers. The system evaluates candidate buys through the framework below, monitors holdings against their triggers, and reports on portfolio balance.
+A daily/weekly iterating financial-analysis system for portfolio oversight. The core
+object is the **investment thesis**, not the stock: every position carries a written
+thesis with a conviction level and pre-committed invalidation triggers. The system
+evaluates candidate buys through the framework below, monitors holdings against their
+triggers, and reports on portfolio balance.
 
 **The system advises and monitors. It never executes trades.**
 
 ---
 
-## The Investment Framework (Constitution)
+# PART I — ORIENTATION FOR CODING AGENTS
 
-> Buffett teaches you what to buy. Munger teaches you what to avoid. Naval teaches you how to keep upgrading.
+Read this part first. Part II is the investment framework (the product spec — it is the
+rubric every analysis obeys). Part III is the architecture.
 
-Every analysis agent MUST apply this framework. It is the rubric for every candidate evaluation, every thesis, every re-validation, and every report. When the framework and a "great opportunity" conflict, the framework wins.
+## The 60-second model
 
-### Pillar 1 — What to Buy (Buffett)
+```
+SEC filings + prices  ──►  Bundle  ──►  scoring/scorecard/inversion  ──►  top 1%
+                                              (pure, no I/O)                 │
+                                                                             ▼
+ site (docs/)  ◄──  production run  ◄──  monitor  ◄──  committed thesis  ◄── Gate (human)
+                                                                             ▲
+                                                          agent writes draft ─┘
+```
 
-Buy wonderful businesses at fair prices, and let compounding do the heavy lifting.
+Two ideas explain most of the code:
 
-- **Circle of competence.** Only businesses the owner genuinely understands: [redacted]. If the business model and its moat cannot be explained in two sentences, PASS.
-- **Moat checklist.** Require at least one durable competitive advantage, with evidence:
-  - Network effects (each new user makes the product more valuable)
-  - Switching costs (customers locked in by data, workflows, integrations)
-  - Cost advantages (structural, not temporary)
-  - Brand / trust (especially powerful in healthcare and financial services)
-  - Regulatory barriers (relevant in Dutch/EU markets the owner understands well)
-- **Owner earnings over reported earnings.** Judge by free cash flow — how much cash the owner could pull out after maintaining competitive position — not by reported EPS.
-- **The 10-year test.** Would we hold this if the market closed for a decade? If not, it is speculation, not investment.
-- **Practical rules:**
-  - Concentrate in 10–15 high-conviction positions; do not over-diversify
-  - Reinvest dividends unless income is needed
-  - Buy more when great businesses go on sale — market panics are opportunities
-  - Default holding period is forever
+1. **The thesis drives the monitoring.** The Watchdog only ever tests triggers the
+   thesis pre-committed to. There is no open-ended news scanning.
+2. **The agent is trusted for research and prose, never for the contract.** Every
+   agent-facing task is three beats — `brief` writes a work order, the agent writes
+   artifacts, `record` re-checks every rule mechanically and exits non-zero if it
+   refuses the work.
 
-### Pillar 2 — What to Avoid (Munger)
+## Where to start reading
 
-Inversion: instead of "how do I succeed?", ask "how would I guarantee failure?" — then don't do those things.
+| To understand… | Read |
+|---|---|
+| the rubric | Part II below |
+| how a company is scored | `stock-scout/scoring.py`, then `stock-scout/scorecard.py` |
+| how it can break you | `stock-scout/inversion.py` |
+| the agent seam | `stock-scout/thesis.py` + `.claude/skills/thesis-desk/SKILL.md` |
+| a production run | `stock-scout/production.py` + `stock-scout/local_production.py` |
+| the UI | `stock-scout/webapp.py` |
+| why a thing is the way it is | `docs/plans/`, `docs/superpowers/plans/` (decision journal) |
 
-**The Hell-No filter** — run BEFORE any Buffett analysis. Failing even ONE test means automatic rejection, regardless of upside. You'll miss some winners; you'll also avoid catastrophic, compounding-ending losses.
+## Running things
 
-- Leverage on volatile assets — never borrow to invest in equities
-- Businesses we don't understand — if the thesis needs a spreadsheet with 47 assumptions, walk away
-- Management we don't trust — look for owner-operators with significant skin in the game
-- Fads disguised as trends — the "lollapalooza effect"; AI is a real trend, most AI-branded vehicles are fads
-- High-fee structures — actively managed funds, 2-and-20, frequent trading; fees compound against you
+```bash
+# tests — this container's working incantation (uv-managed CPython)
+cd stock-scout && uv run -p 3.13.7 --project .. python -m pytest tests/ -q   # 888
+cd .. &&          uv run -p 3.13.7             python -m pytest tests/ -q   # 1110
 
-**Psychology traps the system actively counters in its outputs:**
+uv run -p 3.13.7 python tools/license_gate.py    # dependency licence policy (NFR7)
+```
 
-- **Envy** — never benchmark against someone else's 10x; comparison is the thief of compounding
-- **FOMO / action bias** — doing nothing is often the highest-return decision; "no action needed" is a first-class, celebrated output
-- **Sunk cost** — if the thesis is broken, sell; recommendations must ignore cost basis (the stock doesn't know what you paid)
-- **Overconfidence after wins** — judge process separately from outcome (decision journal); a good outcome from a bad process eventually catches up
-- **Complexity addiction** — exotic derivatives, leveraged ETFs, crypto yield farming are off-path, always
+A full local production cycle:
 
-### Pillar 3 — How to Keep Upgrading (Naval)
+```bash
+cp deploy/local/scout-production.env.example ~/config/invest-ai-production.env
+SCOUT_PRODUCTION_ENV=~/config/invest-ai-production.env \
+  deploy/local/scout-production.sh manual
+```
 
-Wealth isn't just picking stocks — it's continuously increasing the capacity to generate and allocate capital.
+## Shipping a change — the published site is part of "done"
 
-- **Specific knowledge.** The owner's deepest edge is the intersection of [redacted]. Weight analysis toward this edge; build income streams around knowledge that feels like play.
-- **Leverage stack.** Capital (investments), labor (teams), code (this system itself — software that works while you sleep), media (writing, frameworks, reputation). Progressively shift income from labor-based to leverage-based.
-- **Continuous learning compounds.** Weekly time studying businesses, annual reports, and updating mental models. The most important investment is the owner's own judgment — every year pattern recognition improves and the circle of competence expands.
-- **Productize yourself.** the owner in the Netherlands with deep enterprise-AI expertise is unique positioning: consulting, content, advisory, angel investing in understood sectors.
-- **Wealth vs. status.** Status games are zero-sum; wealth games are positive-sum. Don't buy the flashy stock to discuss at dinner parties — buy the boring compounder that quietly doubles every five years. The system flags status buys.
+**Every change that can alter what the site shows must end with the site republished.**
+Code merged but not published is a lie on a public page: the desk keeps serving the last
+build, so a fixed bug still reads as broken and a new metric silently does not exist. A
+change is not done at the commit, it is done when `bot/site` carries it.
 
-### Owner context
+```bash
+# after committing a change that touches scoring, the desk loop, or the UI:
+SCOUT_PRODUCTION_ENV=~/config/invest-ai-production.env \
+  deploy/local/scout-production.sh manual      # rebuilds and pushes bot/site
+```
 
-- [redacted] (relevant for tax treatment of funds vs. individual stocks; base currency EUR, most holdings likely USD)
-- [redacted]
-- Circle of competence: [redacted]
+That one command is the whole ritual: it runs the six stages, validates, and pushes the
+built site to `bot/site`, which GitHub Pages serves. It needs the real data (SEC export,
+enrich cache, price grid, theses) — so it runs on the owner's machine, and an agent
+working in a container **cannot** complete this step. When you are that agent: say so
+explicitly in your hand-off rather than leaving the site stale and unmentioned.
+
+Publishing is skipped only when a change provably cannot reach the page — a test-only
+edit, a comment, a doc. If you are unsure, republish; it is idempotent and a no-op when
+the output is unchanged.
+
+## The invariants — break these and the system is wrong, not just broken
+
+These are enforced by tests. If a change makes one of them false, the change is wrong.
+
+1. **Never executes trades** (FR11). No broker, no order path, ever.
+2. **The two judgements are never merged.** The scorecard says how good the business
+   is; the inversion layer says how it breaks. They are never added, averaged or
+   reconciled — not in code, not in a report, not in a pixel. A name can be Exceptional
+   and Ruinous at once and every surface must show exactly that.
+3. **Owner-only fields (FR9) never reach a public surface.** `conviction` and
+   `circle_of_competence` are the owner's, asked only at the Gate. The builder's schema
+   has no field for them; `webapp.strip_owner_fields` strips them at the render layer;
+   the publisher strips them from archived theses.
+4. **The decision layer is pure.** `scoring.py`, `scorecard.py`, `inversion.py`,
+   `registry.py` do no I/O, no network, no clock. Same Bundle in ⇒ same numbers out.
+5. **Refuse, never guess.** A metric whose input is unmeasured is `None` — never 0,
+   never a default. Missing data shrinks the denominator (`48 of 67 measurable`), it
+   never silently scores zero. A verdict that cannot be certified is `Unknown`, said
+   out loud.
+6. **Supplements never enter the decision.** Registry v2's extra metrics can never
+   enter the scoring sums, and composites (Piotroski F, Altman Z) are display-only —
+   letting one fire a trigger would be the forbidden merge.
+7. **No price triggers.** A falling quote with an intact thesis is an opportunity, not
+   an invalidation. The one quote-derived registry metric (`owner_fcf_yield_pct`) is
+   display-only and refused as a trigger metric.
+8. **No LLM API client in this repo.** The agent runtime is a *subscription* CLI. No
+   `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` anywhere. `llm.py` was deleted deliberately;
+   re-adding a transport would have to re-implement `record` to get around the seam.
+9. **Four runtime pip packages** — `yfinance`, `pandas`, `scipy`, `quantstats`.
+   GPL-family licences (incl. LGPL) are banned; `certifi` (MPL-2.0) is the one
+   journaled exception. `tools/license_gate.py` enforces it.
+10. **Append-only production state.** Production runs, top-1% membership and thesis
+    evaluations are append-only; exactly one snapshot is active; a failed run leaves
+    the last known good snapshot untouched.
+11. **Ratification is human and CLI-only.** A browser button is the wrong door for the
+    one irreversible step.
+12. **Munger gates the desk feed.** A vetoed band, a Fragile/Ruinous verdict or any
+    severe probe means the name never becomes a thesis — the Hell-No filter runs BEFORE
+    the Buffett dossier, in `thesis.top_symbols`, not as a label afterwards. `Unknown` is
+    not a veto: it means the layer could not certify, which is a fact about the evidence.
+13. **The published site tracks the code.** A change that can alter the page is not done
+    until `bot/site` is republished — see "Shipping a change" above.
 
 ---
 
-## Architecture
+# PART II — THE INVESTMENT FRAMEWORK (CONSTITUTION)
 
-Functional baseline approved 2026-07-03 (`docs/plans/2026-07-08-functional-design-baseline.md`, FR1–FR14 / NFR1–NFR7). Detailed functional architecture approved 2026-07-08: **`docs/plans/2026-07-08-architecture-elaboration.md`** — schemas, trigger taxonomy, loop specifications, balance defaults, output formats. Seven components around the thesis lifecycle:
+> Buffett teaches you what to buy. Munger teaches you what to avoid. Naval teaches you
+> how to keep upgrading.
 
-1. **Portfolio Mirror** — holdings, weights, balance; source-agnostic snapshots; leverage tripwire
-2. **The Gate** — buy discipline: circle check → Hell-No veto → Buffett dossier → owner judgment → thesis + verdict
-3. **Thesis Register** — one living document per holding; versioned; goalpost guard
-4. **The Watchdog** — daily / weekly (Saturday) / event-driven / quarterly monitoring
-5. **Decision Journal** — every decision + reasoning; process judged separately from outcome
-6. **The Study** — learning loop (Naval): weekly digest, mental models
-7. **The Scout** — idea generation (FR14): human-triggered only; pre-committed universe + quality-value screen recipes
+Every analysis agent MUST apply this framework. It is the rubric for every candidate
+evaluation, every thesis, every re-validation, and every report. When the framework and
+a "great opportunity" conflict, the framework wins.
 
-Core principle: **the thesis drives the monitoring** — the Watchdog tests only pre-committed invalidation triggers, never open-ended news scanning.
+## Pillar 1 — What to Buy (Buffett)
 
-Key locked decisions (2026-07-08): FR13 benchmark = S&P 500 TR in EUR (PFIC-aware) · balance defaults per elaboration §E.3 · ETFs outside-framework by default · daily letter carries no portfolio value.
+Buy wonderful businesses at fair prices, and let compounding do the heavy lifting.
 
-**Technology/runtime decided 2026-07-08, owner-ratified 2026-07-09: `docs/plans/2026-07-08-technology-architecture.md`** (+ companion `2026-07-08-telegram-interaction-spec.md`) — always-on Ubuntu box, systemd timers + oneshot jobs + one small synchronous daemon; stdlib spine (hand-rolled 8-method Telegram client, HTML mode; GPL-family incl. LGPL banned per NFR7, certifi/MPL-2.0 the one journaled exception); two SQLite files (benchmark physically quarantined) + rendered-markdown archive in its own git repo under `/var/lib/stock-agentcy`; four runtime pip packages only (yfinance, pandas, scipy, quantstats); no LLM in the scheduled runtime (Gate/Study are desk sessions via the `agentcy` CLI); uv-pinned CPython + wheelhouse, quarterly upgrade ritual with a yfinance emergency lane; 7-day letter cadence + owner-elected external dead-man ping.
+- **Understand it or pass.** If the business model and its moat cannot be explained in
+  two sentences, PASS.
+- **Moat checklist.** Require at least one durable competitive advantage, with evidence:
+  network effects, switching costs, cost advantages, brand/trust, regulatory barriers.
+- **Owner earnings over reported earnings.** Judge by free cash flow — how much cash the
+  owner could pull out after maintaining competitive position — not by reported EPS.
+- **The 10-year test.** Would we hold this if the market closed for a decade? If not, it
+  is speculation, not investment.
+- **Practical rules:** concentrate in 10–15 high-conviction positions; reinvest
+  dividends unless income is needed; buy more when great businesses go on sale; the
+  default holding period is forever.
 
-**Implemented 2026-07-09/10** per `docs/plans/2026-07-09-implementation-plan.md` — 148 tasks across 9 phases (P0 scaffold → P8 CLI/deploy), each via fresh implementer + spec-compliance + code-quality review; then a final whole-repo adversarial review closed 3 cross-phase seam gaps (alert-resolution dispatcher, reconciliation R-asks, crashed-run re-sweep). 714 tests pass, license gate clean, end-to-end smoke green. Runnable: `agentcy run {daily,weekly,quarterly,event}` + `agentcy bot` + the desk CLI; 12 systemd units + `install.sh` + runbook ready for the Ubuntu box. Interactive system explainer at `docs/site/index.html`. Toolchain note: this repo's suite runs on the Windows desk under `uv` (uv-managed CPython 3.13); 3 tests skip on Windows (AF_UNIX/git) and run on the Linux target.
+## Pillar 2 — What to Avoid (Munger)
 
-**eToro ingestion (branch `feat/etoro-ingest`, 2026-07-10)** — automated `api_pull` ingestion via eToro's official read-only API (stdlib-only client → canonical `SnapshotIn` → the existing Portfolio Mirror pipeline unchanged; weekly-auto when both keys are set, plus on-demand `agentcy snapshot etoro`), capturing rich per-position detail (open date, cost basis, P&L, lots) in a new append-only `position_detail` table; zero new runtime dependencies.
+Inversion: instead of "how do I succeed?", ask "how would I guarantee failure?" — then
+don't do those things.
 
-**Architecture revision 2026-08-03 (owner-directed): the Scout is the starting engine, and the "no LLM in the scheduled runtime" lock is lifted** — journaled in `stock-scout/docs/THESIS-DESIGN.md` §1. The scout's top 1% feeds a thesis builder (`stock-scout/thesis.py`; edgartools (MIT) as desk-side filings-text grounding behind a guarded import); output is a DRAFT thesis (FR2 schema, machine-validatable triggers, no conviction fields — FR9) plus executive summary and extensive report; the owner ratifies at the Gate (`thesis.py ratify`) and only then does the weekly monitor (`stock-scout/monitor.py`) validate: metric triggers mechanically off `scoring.evaluate` with persistence streaks, event/narrative triggers from agent verdicts (narrative can only send to review; event breaks need high confidence; broken is sticky until the desk acts; a missing verdict ⇒ UNCHECKED, loudly). FR11 unchanged: never executes trades.
+**The Hell-No filter** — run BEFORE any Buffett analysis. Failing even ONE test means
+automatic rejection, regardless of upside.
 
-**The agent IS the runtime (2026-08-03, same-day follow-up: "run by claude code or openclaw. Not api").** There is no LLM API client in this repo — `llm.py` was deleted. Every agent-facing task runs in three beats: `python … brief` writes a work order (`stock-scout/deskwork.py`), the agent researches with its own tools and writes the artifacts, `python … record` re-checks every rule mechanically and **exits non-zero if it refuses the work**. The agent is trusted for research and prose, never for the contract. Agent-facing instructions live in `.claude/skills/thesis-desk/SKILL.md`. Runtime dependency budget unchanged (four packages); no API key, no network transport, no per-run cost model. **Metric hardening + desk site (2026-08-03, owner-directed).** `stock-scout/enrich.py` is the tiered fetch chain — tier 1 the bulk SEC export, tier 2 live EDGAR companyfacts per symbol (as-filed, `filed` dates intact so PIT survives, disk-cached, fill-only-missing at tag level with a provenance ledger; measured on the real universe: net_debt_to_ebitda went from 0% export coverage to filled for 50 of 76 enriched names), tier 3 yfinance as *display-only* vendor aggregates that never enter scoring. `monitor.py run --enrich-cache` uses the same cache so leverage-style triggers stay checkable weekly. `stock-scout/webapp.py` renders Scout · Thesis · Monitor as one self-contained interactive page (filters, sortable universe, per-name drill-down with provenance badges, thesis drafts in full, trigger safety margins) into `docs/` for GitHub Pages; owner-only FR9 fields are stripped at the render layer so they cannot reach a public page. **Registry v2 (2026-08-03, owner-ratified: "maintain within the philosophy, use metrics for a richer overview").** `stock-scout/registry.py` + a `supplements` stream in `pit.py` widen the trigger vocabulary to 26 metrics (`thesis.METRICS`: per-share owner-FCF, FCF conversion, operating margin + its MAD, incremental ROIC, interest coverage, capex/R&D intensity, goodwill share, tax gap, dividends/buybacks/acquisitions as % of OCF, …). The decision layer stays frozen — supplements can never enter the statement sections scoring sums (full-universe bit-identity proven, 1,904 names, 0 diffs), extras can never shadow an evaluate() key, and Piotroski F / Altman Z are display-only composites that never fire a trigger. FinanceToolkit (MIT) is the desk-side ratio canon + test oracle (`requirements-research.txt`); journal in `stock-scout/docs/REGISTRY-DESIGN.md`. **Best-available models only** (owner rule): `deskwork.APPROVED_MODELS` is enforced at `record` and re-checked at `ratify`, the model is read from the harness transcript rather than asked of the agent (a contradicting `--model` is refused), the monitor gates judgement but never arithmetic, and there is no override flag — widening the list is an owner-side code change.
+- Leverage on volatile assets — never borrow to invest in equities
+- Businesses we don't understand — if the thesis needs 47 assumptions, walk away
+- Management we don't trust — look for owner-operators with skin in the game
+- Fads disguised as trends — AI is a real trend, most AI-branded vehicles are fads
+- High-fee structures — fees compound against you
 
-**Distributed desk + continuous data (2026-08-04/05, owner-directed).** One DigitalOcean droplet runs two lanes that never swap jobs — mechanical (systemd timers: nightly rolling EDGAR refresh 02:15, Sat 06:00 pre-sweep, 07:00 brief, 12:00 monitor, 12:30 publish) and judgement (an `openclaw` user whose filesystem permissions ARE the guardrails: it can write `theses/drafts/` and the weekly spool, never `theses/committed/`, the SQLite files, or any credential). GitHub is the only seam: public code repo, `bot/site` for Pages, `bot/seed` for box-bootstrap data, and `qpec/invest-ai-state` for the state archive (owner elected PUBLIC 2026-08-05, so `publish.sh` strips the FR9 fields from every archived thesis — conviction and circle-of-competence never reach a public surface, same rule as `webapp.strip_owner_fields`). Universe expanded to ~7,000 via `universe.py --sec-merge` (SEC ticker+exchange map, one canonical share class per CIK); names beyond the bulk export are scored from cached companyfacts (`enrich.bootstrap_bundles`, streaming, provenance `edgar-live`); **monitored names are always refreshed immediately before the monitor tests them**. Journal: `docs/plans/2026-08-04-distributed-desk-architecture.md`, `docs/plans/2026-08-05-continuous-data-refresh.md`.
+**Psychology traps the system actively counters:** envy · FOMO/action bias ("no action
+needed" is a first-class, celebrated output) · sunk cost (recommendations ignore cost
+basis — the stock doesn't know what you paid) · overconfidence after wins (judge process
+separately from outcome) · complexity addiction.
 
-**Subscription runtimes, demo/production split, and UI editing (2026-08-05, owner-directed — locked):**
+## Pillar 3 — How to Keep Upgrading (Naval)
 
-- **Subscription, never an API key.** The agent runtime is a *subscription* CLI: Claude Pro/Max via Claude Code or OpenClaw, **or** ChatGPT via the Codex CLI. This is a deliberate cost decision and a required setup step for every user — `deploy/openclaw/SETUP.md` and `QUICKSTART.md` document it. No `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` anywhere in the fleet. The best-available rule now reads per provider (`deskwork.APPROVED_MODELS` keyed by provider); every artifact records provider **and** model, observed from the harness transcript where one exists and labelled `declared, NOT independently verified` where it does not. A provider with no approved list is refused loudly rather than guessed at.
-- **One generator, two surfaces.** `webapp.py` renders the same page for both, so a UI change lands in the public demo and the owner's production desk at once — never two codebases to drift apart.
-  - **Public demo** (GitHub Pages): pregenerated *sample* data, a persistent banner saying it is a **visual demo — nothing is executing**, and desk actions that replay real captured output instead of running (`--demo`). Fully clickable, honest about being a recording; it can never spend anyone's tokens or compute.
-  - **Production desk** (`webapp.py --serve`): real data, actions live, bound to loopback on the box and reached over an **SSH tunnel** — no public port, no new auth surface. A served build carries a capability token and therefore must never be written into the published `docs/` tree (guarded).
-- **Editable in production: desk CONTENT only** — thesis prose, triggers, notes — written back through the same validation the CLIs use (`record` refuses an untestable trigger or a forbidden field). **Conviction, circle-of-competence and ratification stay CLI + human (FR9)**: a browser button is the wrong door for the one irreversible step.
+- **Specific knowledge.** Weight analysis toward the owner's own hard-won edge — the
+  domains they know better than the market does.
+- **Leverage stack.** Capital, labour, code (this system), media. Shift income from
+  labour-based to leverage-based.
+- **Continuous learning compounds.** The most important investment is the owner's own
+  judgment.
+- **Wealth vs. status.** Status games are zero-sum. Buy the boring compounder, not the
+  dinner-party stock. The system flags status buys.
+
+---
+
+# PART III — ARCHITECTURE
+
+## Runtime model: local-first
+
+**There is no server.** (Owner-directed, 2026-08-08: the DigitalOcean box was retired
+and its whole lane deleted.) The desk runs on a machine the owner already owns:
+
+- One command, one atomic run: `deploy/local/scout-production.sh {manual|daily|weekly}`
+  takes a `flock` so runs can never overlap, writes a run-scoped artifact, and only then
+  publishes.
+- Unattended via `deploy/systemd/scout-production@.service` + daily/weekly timers.
+- **GitHub is only a publishing seam:** the built site is pushed to the `bot/site`
+  branch (GitHub Pages). Rollback is an ordinary revert on that branch.
+- The agent runtime is a subscription CLI (Claude Code / OpenClaw / Codex) logged in
+  interactively — see `deploy/local/AGENT-RUNTIME.md`.
+
+## Repo map
+
+| Path | What lives there |
+|---|---|
+| `stock-scout/` | the Scout, the scorecard, the desk loop, the monitor, the site generator |
+| `stock-scout/tests/` | the decision-layer + desk suite (888 tests) |
+| `agentcy/` | the original portfolio system: DB, schema, Telegram bot, letters, eToro ingest |
+| `tests/` | the agentcy suite (1110 tests) |
+| `deploy/local/` | the production wrapper, thesis runner, git askpass, agent-runtime setup |
+| `deploy/systemd/` | local timers/services (`scout-production*`, `agentcy-*`) |
+| `docs/` | the published site (`index.html` + `data/`), runbook, plans, research |
+| `docs/plans/`, `docs/superpowers/plans/` | the decision journal — history, never rewritten |
+| `tools/` | licence gate, fixture recorder, failure notifier |
+
+## The data flow, stage by stage
+
+**1 · Universe → facts.** `universe.py` builds the security master (~7,000 names via the
+SEC ticker+exchange map, one canonical share class per CIK). `secsv.py` loads the bulk
+SEC export; `enrich.py` is the tiered fetch chain — tier 1 bulk export, tier 2 live
+EDGAR `companyfacts` per symbol (as-filed, `filed` dates intact so point-in-time
+survives, disk-cached, fill-only-missing with a provenance ledger), tier 3 yfinance as
+**display-only** vendor aggregates that never enter scoring. `pit.py` assembles the
+point-in-time view; `prices.py`/`pricesrc.py` supply the price grid.
+
+**2 · The Bundle.** The one object the decision layer consumes: annual + quarterly
+income/balance/cashflow cells, shares series, price, market cap, sector/industry. Built
+by `pit.as_of_bundle` / `secsv.bundles`, consumed by everything downstream. No module
+below this line does I/O.
+
+**3 · Scoring (`scoring.py`) — the relative view.** TTM is assembled over one aligned
+window (the newest 4 period-ends present in *both* quarterly income and cashflow).
+Owner-FCF = `OCF − min(|capex|, D&A) − SBC`. Then:
+
+- **Composite** = `0.25·V + 0.25·Q + 0.20·G + 0.15·D + 0.15·M`, percentiles computed
+  **within sector** over survivors. V = owner-FCF yield on own EV; Q = ROIC ×
+  gross-margin level/stability × owner-FCF margin; G = revenue and per-share owner-FCF
+  CAGR, gated by a ROIC floor factor; D = net debt/EBITDA, self-funding, SBC; M = share
+  count trend, accrual divergence.
+- **Veto layer** (runs first, suppresses rather than scores): net debt/EBITDA > 4;
+  credit-loss add-backs ≥ 25% of OCF; share dilution > 20%/yr; cash destruction in every
+  annual period. Then an integrity-suspend for missing required legs (`INSUFFICIENT`).
+- **Margin of safety** — a 3-stage DCF on owner-FCF, discounted at
+  `levered_cost_of_equity` (Hamada: β_L = 1.0 × (1 + 0.75 × net-debt/market-cap), CAPM,
+  clamped [10.5%, 20%]). Owner-FCF is post-interest, so it is an *equity* flow and takes
+  an equity rate; leverage raises the discount and lowers the margin of safety. WACC is
+  still reported for reference and discounts nothing.
+
+**4 · Scorecard (`scorecard.py`) — the absolute view.** 100 points over four blocks —
+quality 35, price 25, safety 25, stewardship 15 — across 14 anchored metrics, each a
+linear ramp. Missing inputs shrink `available_max` (never a silent zero); bands are
+computed on the percentage of *available* points: Exceptional ≥80, Strong ≥65, Mixed
+≥50, Weak ≥35, else Pass, plus `VETOED` and `NO PRICE`. Evidence tiers (full/partial/
+thin) sort **before** percentage. The noise floor is 5 points — differences under it are
+not real.
+
+**5 · Inversion (`inversion.py`) — Munger's pillar.** Seven deterministic probes over
+~10 years of weekly total-return prices and up to 19 years of filings (six count toward
+the verdict; one is flag-only, its data too sparse to score). Severities are **counted,
+never averaged** (an average would let a good probe cancel a fatal one).
+Ladder: ≥3 severe → Ruinous; 2 severe or ≥4 cautions → Fragile; ≤1 severe → Ordinary;
+nothing → Robust; thin evidence collapses Robust/Ordinary → **Unknown** (a verdict that
+names a failure mode still stands — missing data can refuse to certify safety, never
+manufacture it). **This layer never adds a point to the scorecard.**
+
+**6 · Registry (`registry.py`).** 26 metrics (`thesis.METRICS`) — the entire vocabulary
+a thesis trigger may test, computed over the exact same periods `assemble_ttm` selected.
+Supplements can never enter the scoring sums; composites are display-only.
+
+**7 · The desk loop (`thesis.py`, `deskwork.py`, `monitor.py`).**
+`top_symbols` takes the best 1% of the screened universe by scorecard rank (evidence
+tier first, then percentage), above an eligibility floor (`DESK_MIN_MARKET_CAP` $300M,
+`DESK_MIN_PRICE` $5). Then the three beats:
+
+```
+thesis.py brief SYM   →  work order (packet: both judgements unmerged + registry values)
+   <agent researches, writes report.md / summary.md / thesis.json>
+thesis.py record SYM  →  mechanical validation; non-zero exit if refused
+thesis.py ratify SYM  →  THE GATE (human, FR9): conviction + circle of competence
+```
+
+`record` re-checks everything: artifacts exist and are non-empty, schema shape, the moat
+rule (a named moat needs evidence; `kind: "none"` is honest research but marks the draft
+PASS-RECOMMENDED, which `ratify` refuses without a typed override), ≥3 triggers with at
+least one mechanical, no owner-only fields, no untestable or quote-derived trigger, and
+the approved-model rule (`deskwork.APPROVED_MODELS`, keyed per provider, observed from
+the harness transcript where one exists).
+
+**8 · The monitor.** Weekly, over *committed* theses only. Metric triggers are evaluated
+mechanically off the same `scoring.evaluate` values the grader uses, with persistence
+streaks (a threshold usually must hold N consecutive checks). Event/narrative triggers
+come from agent verdicts — narrative can only ever send to *review*, never break. Broken
+is sticky until the desk acts. A missing verdict is **UNCHECKED**, reported loudly.
+Monitored names are always refreshed immediately before they are tested.
+
+**9 · The production run (`production.py` + `local_production.py`).** Six stages —
+`refresh → score → select_top → evaluate_theses → monitor → build_site` — then
+`validate` and `publish`. State lands in SQLite (`agentcy/schema/010_production_snapshot.sql`):
+append-only `production_run`, `production_top_member`, `production_thesis_evaluation`,
+and `production_snapshot` with exactly one active row. The release gate blocks
+publication on its own terms (e.g. thesis evaluations not current, privacy checks), and
+a failed run leaves the last good snapshot untouched.
+
+**10 · The site (`webapp.py`).** One generator, two surfaces, so a UI change lands on
+both at once:
+
+- **Public demo** (GitHub Pages) — real latest numbers, a persistent "visual demo —
+  nothing is executing" banner, and desk actions that replay captured output (`--demo`).
+- **Production desk** (`--serve`) — real data, actions live, bound to loopback and
+  reached over an SSH tunnel. A served build carries a capability token and must
+  therefore never be written into the published `docs/` tree (guarded).
+
+Output is `docs/index.html` plus lazy per-letter shards in `docs/data/`, entirely
+self-contained: hand-rolled CSS/JS, system fonts, no CDN, so it works from a mail
+attachment or under a strict CSP. Public projections are **allowlists**
+(`public_thesis_reader`, `public_valuation_lens`, `public_portfolio_thesis`), never
+redaction. Editable in production: desk *content* only (thesis prose, triggers, notes),
+written back through the same validation the CLIs use.
+
+## The agentcy subsystem
+
+The original seven components around the thesis lifecycle — Portfolio Mirror, The Gate,
+Thesis Register, The Watchdog, Decision Journal, The Study, The Scout — plus the SQLite
+layer, the Telegram daemon (`agentcy bot`) and the scheduled letters
+(`agentcy run {daily,weekly,quarterly,event}`). Two SQLite files, with the benchmark DB
+physically quarantined, and a rendered-markdown archive in its own git repo.
+
+It is **kept and still runs locally**, and it is not optional plumbing:
+`stock-scout/production.py` imports `agentcy.db` and `agentcy.production` for all
+production state. Locked decisions: FR13 benchmark = S&P 500 Total Return, measured in
+the portfolio's base currency; ETFs outside-framework by default (fund structures can
+carry adverse pass-through tax treatment depending on the owner's jurisdiction — the
+reasoning is journaled in `docs/plans/`, not here); the daily letter carries no
+portfolio value.
+
+## Testing
+
+Two suites, both green and both required: **888** in `stock-scout/tests/` (decision
+layer, desk loop, site) and **1110** in `tests/` (agentcy). Three scout tests skip
+unless optional research data is present locally — two need a FinanceDatabase
+`equities.bz2`, one needs `financetoolkit` (it lives in `requirements-research.txt`,
+not the runtime budget). The tests that pin the invariants above — privacy/FR9, append-only,
+no-merge of the two judgements, licence policy, never-trades — are load-bearing: treat a
+failure there as a design error, not a broken assertion.
+
+## History
+
+This file is the current state, not the changelog. The decision journal lives in
+`docs/plans/` and `docs/superpowers/plans/` — functional baseline and architecture
+elaboration (2026-07-08), implementation plan (2026-07-09), eToro ingest (2026-07-10),
+the Scout-as-starting-engine revision and "the agent IS the runtime" (2026-08-03),
+registry v2 (2026-08-03), distributed desk and continuous data refresh (2026-08-04/05),
+the local production cutover (2026-08-07), and the adversarial valuation review
+(`docs/research/2026-08-08-adversarial-valuation-review.md`). Those documents describe
+the world as it was when they were written; where they disagree with this file, this
+file wins.

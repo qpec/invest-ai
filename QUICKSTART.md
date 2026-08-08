@@ -6,7 +6,7 @@
 This gets you from clone to a running local desk in a few minutes, on a bundled
 sample dataset (13 well-known US filers, real as-filed SEC data). Every command
 below is tested against exactly this repo. The same pipeline scales to the full
-~1,900-name universe when you bring the full data; the always-on box deployment
+~1,900-name universe when you bring the full data; running it always-on, locally,
 is the last section.
 
 ## 0. What you need
@@ -146,15 +146,29 @@ whatever symbols you point it at.
 - **The model gate** (`stock-scout/deskwork.py` → `APPROVED_MODELS`) pins which
   model may do desk work. Widening it is a deliberate code change, on purpose.
 
-## 6. Going always-on (the box)
+## 6. Going always-on (local)
 
-One small VPS runs the whole weekly loop unattended — mechanical lane (systemd
-timers: scrape → brief → monitor → publish) and judgement lane (an `openclaw`
-user whose filesystem permissions ARE the guardrails), with GitHub as the only
-seam: code pulled from `main`, the site pushed to `bot/site` (GitHub Pages),
-private state archived to its own repo. `deploy/digitalocean/README.md` is the
-step-by-step; `docs/plans/2026-08-04-distributed-desk-architecture.md` is the
-full design with its security model.
+The desk is **local-first**: the machine you already own runs the whole loop.
+There is no server to rent, provision or keep patched, and no credential leaves
+the machine.
+
+One command runs a full production cycle — refresh → score → select top 1% →
+evaluate theses → monitor → build site → validate → publish:
+
+```bash
+cp deploy/local/scout-production.env.example ~/config/invest-ai-production.env
+$EDITOR ~/config/invest-ai-production.env          # paths, site branch, askpass
+SCOUT_PRODUCTION_ENV=~/config/invest-ai-production.env \
+  deploy/local/scout-production.sh manual
+```
+
+To make it unattended, install `deploy/systemd/scout-production@.service` with
+its daily and weekly timers. The run takes a `flock`, so two runs can never
+overlap; each writes an atomic artifact under the artifact root, and a failed
+run leaves the last known good snapshot untouched.
+
+GitHub stays the publishing seam only: the built site is pushed to `bot/site`
+(GitHub Pages). Rollback is an ordinary revert on that branch.
 
 ## 7. The two surfaces
 
@@ -164,6 +178,6 @@ full design with its security model.
 | **Your desk** | your real data | live, token-gated | `webapp.py --serve` on loopback |
 
 Both come out of the same generator, so a UI change lands in both at once —
-`python webapp.py --demo …` builds the first, `--serve` runs the second. On the
-box the desk runs as `scout-desk.service` and you reach it with
-`ssh -N -L 8899:127.0.0.1:8899 root@<box>`.
+`python webapp.py --demo …` builds the first, `--serve` runs the second. The
+desk binds to loopback on the machine you run it on; open it there, or forward
+the port over SSH if you want it from another device.

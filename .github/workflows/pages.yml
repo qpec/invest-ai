@@ -1,6 +1,6 @@
 # MANUAL FALLBACK ONLY. The site deploys via GitHub's classic branch mode:
 # Settings -> Pages -> Source: "Deploy from a branch" -> bot/site, /docs.
-# The box pushes bot/site every Saturday and GitHub publishes it directly —
+# The local production run pushes bot/site and GitHub publishes it directly —
 # no Actions run, no github-pages environment branch policy to reject the
 # push (which is exactly how the Actions-based deploy kept failing: the
 # auto-created environment only allowed the default branch). This workflow

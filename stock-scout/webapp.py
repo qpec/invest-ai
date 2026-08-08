@@ -236,6 +236,20 @@ PUBLIC_THESIS_FIELDS = (
     "ten_year_statement", "bear_case", "sources",
 )
 
+# The figures a card must carry to be judged against the constitution, in reading order
+# (owner-directed 2026-08-08: "I also want market cap and other essentials in there").
+# Deliberately six, and deliberately these six: size, then the price anchor, then one
+# metric per pillar the framework actually argues from — returns on capital and cash
+# margin for "wonderful business", growth for the compounding case, and leverage because
+# it is the Hell-No filter's first item. Everything else stays one click down in the
+# drill-down; a card that shows 26 metrics communicates none of them.
+CARD_METRICS = (
+    ("roic_pct", "ROIC", "%"),
+    ("owner_fcf_margin_pct", "FCF margin", "%"),
+    ("revenue_growth_pct", "Rev growth", "%/yr"),
+    ("net_debt_to_ebitda", "Net debt/EBITDA", "x"),
+)
+
 
 def _finite_number(value) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -255,7 +269,19 @@ def relative_percentile(value: float, values: list[float]) -> int:
     return round(100 * (below + equal / 2) / len(measured))
 
 
-def valuation_signal(percentile: int) -> str:
+# Above this trailing yield, "cheap" is the wrong read: the market is pricing the cash
+# flow's decline, not offering a discount (2026-08-08 review, U-2/V-1 — the two-sided
+# signal). 15% ~ 6.7x owner cash flow.
+DISTRESS_YIELD_PCT = 15.0
+
+
+def valuation_signal(percentile: int, *, yield_pct: float | None = None) -> str:
+    """Two-sided: confidence in 'cheap' FALLS once the yield passes the distress line,
+    instead of rising with it. A signal that fired identically for nearly every card
+    carried no information (measured 47 of 48 on the 2026-08-07 build)."""
+    if yield_pct is not None and yield_pct >= DISTRESS_YIELD_PCT:
+        return ("Priced as if this cash flow will not last — the market is voting no, "
+                "not offering a discount")
     if percentile >= 80:
         return "Appears inexpensive on current owner cash flow"
     if percentile >= 60:
@@ -265,6 +291,36 @@ def valuation_signal(percentile: int) -> str:
     if percentile >= 20:
         return "Looks somewhat demanding on current owner cash flow"
     return "Appears demanding on current owner cash flow"
+
+
+# Abbreviations that end in a period mid-sentence. A naive split on ". " cuts
+# "Apple Inc. depends on …" down to "Apple Inc." and puts that on the card as if it
+# were the finding — the caveat lead is the most decision-relevant line the page has,
+# so it must not be mangled by punctuation.
+# Only tokens that are almost never sentence-final. A quarter label ("… fell in Q3.")
+# ends sentences all the time, so Q1-Q4 deliberately are NOT here.
+_ABBREVIATIONS = ("Inc", "Corp", "Co", "Ltd", "plc", "LLC", "L.P", "S.A", "N.V",
+                  "U.S", "U.K", "E.U", "vs", "approx", "est", "cf", "e.g", "i.e",
+                  "Mr", "Ms", "Dr", "St", "Jr", "Sr")
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[\"'(\[]?[A-Z0-9])")
+
+
+def first_sentence(text: str, *, limit: int = 300) -> str:
+    """The leading sentence of free prose, abbreviation-aware, clamped to `limit`."""
+    text = (text or "").strip()
+    if not text:
+        return ""
+    start = 0
+    while True:
+        match = _SENTENCE_END.search(text, start)
+        if match is None:
+            return text[:limit].strip()
+        head = text[:match.start()].rstrip()
+        tail = head[:-1].rsplit(" ", 1)[-1].rstrip(".") if head.endswith(".") else ""
+        if tail in _ABBREVIATIONS or (len(tail) == 1 and tail.isupper()):
+            start = match.end()          # a mid-sentence abbreviation, keep reading
+            continue
+        return head[:limit].strip()
 
 
 def public_valuation_lens(row: dict, detail: dict, rows: list[dict],
@@ -292,13 +348,17 @@ def public_valuation_lens(row: dict, detail: dict, rows: list[dict],
         values = [v for v in values if _finite_number(v) is not None]
         scope, label = "universe", "measured Scout universe"
     percentile = relative_percentile(yield_pct, values)
+    caveat = caveat.strip()
+    lead = first_sentence(caveat)
     return {
         "price": round(price, 2), "price_as_of": str(price_as_of),
         "owner_cash_yield_pct": round(yield_pct, 2),
         "owner_cash_multiple_x": round(100 / yield_pct, 1),
         "comparison_scope": scope, "comparison_label": label,
         "comparison_count": len(values), "percentile": percentile,
-        "signal": valuation_signal(percentile), "caveat": caveat.strip(),
+        "distress": yield_pct >= DISTRESS_YIELD_PCT,
+        "signal": valuation_signal(percentile, yield_pct=yield_pct),
+        "caveat": caveat, "caveat_lead": lead[:300],
     }
 
 
@@ -358,12 +418,28 @@ def public_thesis_reader(draft: dict, row: dict, detail: dict,
     if leading is None:
         leading = next((mode.get("detail") for mode in failure_modes
                         if isinstance(mode, dict) and mode.get("detail")), "")
+    card = detail.get("card") or {}
     reader = {
         "symbol": symbol, "name": row.get("n") or symbol,
         "rank": int(row["top"]),
+        # score_points/available_max let the page render the honest denominator —
+        # "72 of 87 measurable" — instead of a hard-coded "/100" (review, U-3).
         "quality": {"score": row.get("pct"), "grade": row.get("band"),
+                    "score_points": card.get("score"),
+                    "available_max": card.get("available_max"),
                     "explanation": quality_explanation},
         "risk": {"verdict": row.get("verdict"), "leading_fragility": leading},
+        "tier": row.get("tier"),
+        "sector": row.get("sec") or "",
+        "evidence": row.get("ev"),
+        "market_cap": _finite_number(row.get("mc")),
+        "expectations": detail.get("ig"),
+        "key_metrics": [
+            {"key": key, "label": label, "unit": unit,
+             "value": _finite_number((row.get("reg") or {}).get(key))}
+            for key, label, unit in CARD_METRICS
+        ],
+        "pass_recommended": bool(draft.get("pass_recommended")),
         "thesis": public_body,
         "summary_html": draft.get("summary_html") or "",
         "report_html": draft.get("report_html") or "",
@@ -398,6 +474,12 @@ def load_thesis_dir(theses_dir: Path, registry_by_symbol: dict) -> dict:
                 "built_at": doc.get("built_at"),
                 "agent": doc.get("agent") or {},
                 "accepted": not doc.get("validation_problems"),
+                # Pillar 1's consequence, carried onto the page: a no-moat draft is
+                # research, not a candidate (thesis.record sets this).
+                "pass_recommended": bool(
+                    doc.get("pass_recommended")
+                    or (isinstance(body.get("moat"), dict)
+                        and body["moat"].get("kind") == "none")),
                 "thesis": body,
                 "summary_html": md_html(summary.read_text(encoding="utf-8"))
                 if summary.exists() else "",
@@ -491,8 +573,14 @@ def assemble(*, sec_data: str, prices_dir: str | None, universe: str, as_of: str
     scored = {row["symbol"]: row for row in scoring.score_universe(bundles)}
 
     pick_set = {r["symbol"] for r in picks.shortlist(rows)}
+    # The inversion result, market cap and price ride along so top_symbols can apply the
+    # constitution's order itself: Munger's veto BEFORE the Buffett dossier (owner-
+    # directed 2026-08-08), then the desk eligibility floor (review V-6).
     top_rows = thesis_mod.top_symbols(
-        [{"symbol": r["symbol"], "card": r["card"]} for r in rows], len(rows))
+        [{"symbol": r["symbol"], "card": r["card"], "inversion": r["inversion"],
+          "market_cap": (bundle_by_symbol.get(r["symbol"]) or {}).get("market_cap"),
+          "price": (bundle_by_symbol.get(r["symbol"]) or {}).get("price")}
+         for r in rows], len(rows))
     top_rank = {r["symbol"]: i + 1 for i, r in enumerate(top_rows)}
 
     import registry as registry_mod
@@ -524,8 +612,13 @@ def assemble(*, sec_data: str, prices_dir: str | None, universe: str, as_of: str
             "sev": coverage.get("severe", 0), "cau": coverage.get("caution", 0),
             "pick": symbol in pick_set, "top": top_rank.get(symbol),
             "rk": rank_index.get(symbol, 10 ** 6), "grade": srow.get("grade"),
+            "tier": srow.get("tier"),
             "reg": {k: _round(v) for k, v in registry.items()},
         })
+        # One DCF per name, shared by the margin of safety and the reverse (implied
+        # growth) reading — they are two views of the same arithmetic and must never
+        # be computed from different inputs.
+        mos_of = scoring.margin_of_safety(bundle) if bundle else None
         probes = {pid: {x: probe.get(x) for x in
                         ("severity", "measured", "value", "detail", "provenance")}
                   for pid, probe in (inv.get("probes") or {}).items()}
@@ -545,6 +638,23 @@ def assemble(*, sec_data: str, prices_dir: str | None, universe: str, as_of: str
             "vendor": {k: v for k, v in (vendor_display.get(symbol) or {}).items()
                        if registry.get(k) is None},
             "composites": composites_by_symbol.get(symbol),
+            # The DCF's inputs, so a scored margin of safety is inspectable on the page
+            # rather than an unexplained percentage (2026-08-08 review, U-7). Same
+            # arithmetic the scorecard scored (scorecard.py reads the identical
+            # scoring.margin_of_safety), recomputed here because score_universe rows do
+            # not carry it.
+            "mos": (lambda m: {"base_fcf": _round(m["base_fcf"], 0),
+                               "growth": _round(m["growth"], 4),
+                               "discount_rate": _round(m.get("discount_rate"), 4),
+                               "intrinsic_value": _round(m["intrinsic_value"], 0),
+                               "mos_pct": _round(m["mos_pct"], 4)} if m else None)(mos_of),
+            # What the CURRENT PRICE implies, rather than what a forecast asserts —
+            # the one valuation line that differs per company and that the owner can
+            # falsify against the growth the business has actually delivered.
+            "ig": (lambda g: {"implied": _round(g["implied_growth_pct"], 1),
+                              "achieved": _round(g["achieved_growth_pct"], 1),
+                              "beyond": g["beyond"]} if g else None)(
+                scoring.implied_growth(bundle, mos_of) if mos_of else None),
             "mc": _round(bundle.get("market_cap"), 0),
             "shb": bundle.get("shares_basis"), "shn": bundle.get("shares_note"),
             "shd": bundle.get("shares_as_of"),
@@ -572,13 +682,28 @@ def assemble(*, sec_data: str, prices_dir: str | None, universe: str, as_of: str
         if theses_dir and Path(theses_dir).exists() else {"drafts": [], "committed": []}
     drafts_by_symbol = {d["symbol"]: d for d in theses["drafts"]}
     compact_by_symbol = {row["s"]: row for row in compact}
+    def _draft_status(symbol):
+        draft = drafts_by_symbol.get(symbol)
+        if draft is None:
+            return "no work order yet"
+        if not draft.get("accepted"):
+            return "draft refused"
+        if draft.get("pass_recommended"):
+            return "PASS recommended (no moat)"
+        return "draft accepted"
+
+    # The inversion verdict rides on every Top-48 entry so the desk feed and the picks
+    # shortlist can no longer state opposite editorial positions about the same name
+    # (2026-08-08 review, F-1): the page partitions Fragile/Ruinous entries instead of
+    # presenting them typographically as peers. The judgements stay unmerged — this
+    # labels, it never reconciles.
     top_list = [{"rank": top_rank[r["symbol"]], "sym": r["symbol"],
                  "name": by_symbol[r["symbol"]].get("name") or "",
                  "band": r["card"].get("band"), "pct": r["card"].get("pct"),
-                 "status": ("draft accepted" if drafts_by_symbol.get(
-                     r["symbol"], {}).get("accepted")
-                     else "draft refused" if r["symbol"] in drafts_by_symbol
-                     else "no work order yet")}
+                 "verdict": compact_by_symbol[r["symbol"]].get("verdict"),
+                 "sev": compact_by_symbol[r["symbol"]].get("sev", 0),
+                 "tier": compact_by_symbol[r["symbol"]].get("tier"),
+                 "status": _draft_status(r["symbol"])}
                 for r in top_rows]
     readers = [public_thesis_reader(
         drafts_by_symbol[r["symbol"]], compact_by_symbol[r["symbol"]],
@@ -778,7 +903,12 @@ header.top{position:sticky;top:0;z-index:30;background:var(--page);
 .p-serious{background:var(--serious-bg);color:var(--serious)}
 .p-crit{background:var(--crit-bg);color:var(--crit)}
 .p-quiet{background:var(--raised);color:var(--text2)}
-.p-ghost{background:none;border:1px dashed var(--border);color:var(--faint)}
+/* Unknown is the layer REFUSING to certify — a majority state on some builds. It must
+   read as "not settled", never as ignorable: solid border, hatched ground, full-strength
+   text (2026-08-08 review, U-4). */
+.p-ghost{border:1px solid var(--border);color:var(--text2);
+  background:repeating-linear-gradient(45deg,transparent,transparent 3px,
+  var(--raised) 3px,var(--raised) 6px)}
 .p-acc{background:var(--accent-tint);color:var(--accent)}
 .src{font-size:10px;border-radius:4px;padding:0 5px;border:1px solid var(--border);
   color:var(--faint);white-space:nowrap}
@@ -968,6 +1098,41 @@ details.fold>.fbody{padding:2px 16px 14px;border-top:1px solid var(--hair)}
   font-weight:700;color:var(--accent)}
 .company-title{min-width:0}.company-title b{display:block;font-size:16px}.company-title span{color:var(--text2)}
 .card-judgements{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+/* The essentials strip: size first, then one metric per pillar the framework argues
+   from. Tabular figures so the column of numbers scans vertically. */
+.km-strip{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:6px;
+  border-top:1px solid var(--hair);border-bottom:1px solid var(--hair);padding:9px 0;margin:2px 0 4px}
+.km{min-width:0}
+.km label{display:block;color:var(--faint);font-size:9.5px;text-transform:uppercase;
+  letter-spacing:.04em;margin-bottom:3px;line-height:1.25;min-height:2.5em;
+  overflow-wrap:anywhere}
+.km b{font-size:13px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.km-context{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:6px}
+/* Pillar 1's requirement, stated on the card. */
+.moat{border-left:3px solid var(--good);background:var(--good-bg);padding:7px 11px;
+  border-radius:0 8px 8px 0;margin:2px 0}
+.moat.moat-none{border-left-color:var(--warn);background:var(--warn-bg)}
+.moat label{display:block;color:var(--faint);font-size:9.5px;text-transform:uppercase;
+  letter-spacing:.05em;margin-bottom:2px}
+.moat b{font-size:13px}
+.px-note{color:var(--faint)}
+.one-signal{margin-top:6px}
+.km-chip{font-size:10px;color:var(--text2);background:var(--raised);
+  border:1px solid var(--hair);border-radius:4px;padding:1px 6px}
+@media(max-width:620px){.km-strip{grid-template-columns:repeat(3,minmax(0,1fr));row-gap:9px}}
+/* Verdict-conditional treatment (review U-1): a named failure mode outranks the score. */
+.thesis-flagged{border-color:var(--crit)}
+.risk-banner{border-left:3px solid var(--crit);background:var(--crit-bg);color:var(--text);
+  padding:8px 11px;border-radius:0 8px 8px 0;font-size:12.5px;font-weight:600}
+.muted-score{color:var(--text2);font-weight:500}
+.cta-bear{background:var(--raised);color:var(--text);border:1px solid var(--crit)}
+.tier-chip{display:inline-block;font-size:10px;font-weight:600;letter-spacing:.04em;
+  text-transform:uppercase;color:var(--text2);border:1px solid var(--border);
+  border-radius:4px;padding:0 5px;vertical-align:.08em}
+.flag-divider{grid-column:1/-1;border-top:2px solid var(--crit);color:var(--text2);
+  font-size:12.5px;padding:12px 2px 0;margin-top:6px}
+.caveat-lead{border-left:3px solid var(--warn);padding-left:8px}
+.valuation-distress{border-left-color:var(--crit);background:var(--crit-bg)}
 .valuation-summary{border-left:3px solid var(--accent);background:var(--accent-tint)}
 .valuation-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;
   margin:12px 0}.valuation-metric{background:var(--raised);padding:12px;border-radius:8px;
@@ -1024,6 +1189,10 @@ const fmtMc = v => {
     : a >= 1e9 ? '$' + (a / 1e9).toFixed(1) + 'B'
     : a >= 1e6 ? '$' + (a / 1e6).toFixed(0) + 'M' : '$' + Math.round(a));
 };
+/* One decimal below 100, none above: 34.2% and 1,240% both read at a glance, and
+   neither claims precision the noise floor denies. */
+const fmtNum = v => v == null ? '—'
+  : (Math.abs(v) < 100 ? v.toFixed(1) : Math.round(v).toLocaleString());
 const fmtV = (v, unit) => {
   if (v == null) return '—';
   if (unit && unit.startsWith('USD/share')) return '$' + v.toFixed(2);
@@ -1274,6 +1443,13 @@ function renderPanel(sym, row, d){
     ${blockRows}
     <details class="fold"><summary>Every scored metric, with its sentence</summary>
       <div class="fbody">${metricRows || '<div class="mdet">nothing measured</div>'}</div></details>
+    ${d.mos ? `<details class="fold"><summary>DCF assumptions behind the scored margin of safety</summary>
+      <div class="fbody"><div class="mdet">base owner-FCF ${fmtMc(d.mos.base_fcf)} = max(TTM, 0.85 × 3-yr avg)
+        · growth ${d.mos.growth == null ? '—' : (d.mos.growth * 100).toFixed(1) + '%/yr'} (trailing revenue CAGR, capped)
+        · discount ${d.mos.discount_rate == null ? '—' : (d.mos.discount_rate * 100).toFixed(1) + '%'} (cost of equity — owner-FCF is post-interest; beta fixed at 1.0, a declared simplification)
+        · 3-stage DCF → intrinsic ${fmtMc(d.mos.intrinsic_value)} vs market cap ${fmtMc(d.mc)}
+        → margin of safety ${d.mos.mos_pct == null ? '—' : (d.mos.mos_pct * 100).toFixed(0) + '%'}.
+        A single-point estimate, not a range — read it as an anchor, never as precision.</div></div></details>` : ''}
     <h3>The Inversion Layer — ${esc(inv.verdict || '')}</h3>
     <div style="font-size:12px;color:var(--text2)">${esc(inv.verdict_meaning || '')}${inv.verdict_rule ? ' · ' + esc(inv.verdict_rule) : ''}</div>
     <div class="prose">${failures}</div>
@@ -1627,6 +1803,127 @@ const companyMark = reader => reader.logo
   ? `<img class="company-logo" src="${esc(reader.logo)}" alt="" loading="lazy">`
   : `<span class="company-initials" aria-hidden="true">${esc(initials(reader))}</span>`;
 
+/* A card whose risk verdict names a failure mode is rendered as what it is: a research
+   draft the picks shortlist would refuse, never a peer of the candidates. The two
+   judgements stay unmerged — this is labeling, not reconciliation. */
+const isFlagged = reader =>
+  reader.risk.verdict === 'Fragile' || reader.risk.verdict === 'Ruinous';
+
+function qualityScoreLabel(q){
+  if (q.score == null) return '—';
+  // Points are ramp sums and come out fractional; a card that reads "74.82 of 87"
+  // claims a precision the ±5-point noise floor denies. Round, never truncate.
+  if (q.available_max != null && q.available_max < 100)
+    return `${q.score_points == null ? '—' : Math.round(q.score_points)} of `
+      + `${Math.round(q.available_max)} measurable (${Math.round(q.score)}%)`;
+  return `${Math.round(q.score)}/100`;
+}
+
+/* Market cap first because it is the one number that says what KIND of thing this is —
+   a $5B compounder and a $300M microcap are not the same decision. Then the four
+   pillar metrics. A missing value renders as an em dash and says so; it never renders
+   as zero. */
+function keyMetricStrip(reader){
+  const cells = [
+    `<div class="km"><label>Market cap</label><b>${reader.market_cap == null ? '—' : fmtMc(reader.market_cap)}</b></div>`,
+  ].concat((reader.key_metrics || []).map(m =>
+    `<div class="km"><label>${esc(m.label)}</label><b>${m.value == null ? '—'
+      : esc(fmtNum(m.value)) + (m.unit === 'x' ? '×' : m.unit === '%/yr' ? '%/yr' : '%')}</b></div>`));
+  const context = [reader.sector, reader.evidence ? reader.evidence + ' evidence' : '']
+    .filter(Boolean).map(t => `<span class="km-chip">${esc(t)}</span>`).join('');
+  return `<div class="km-strip">${cells.join('')}</div>`
+    + (context ? `<div class="km-context">${context}</div>` : '');
+}
+
+/* Pillar 1 requires "at least one durable competitive advantage, WITH EVIDENCE" — so
+   the card states the advantage and how much evidence stands behind it. Before this the
+   moat appeared only as a banner when it was ABSENT, which inverted the rule: the thing
+   the framework demands you show was the one thing the card never showed. */
+const MOAT_LABEL = {network_effects:'Network effects', switching_costs:'Switching costs',
+  cost_advantage:'Cost advantage', brand_trust:'Brand / trust', regulatory:'Regulatory',
+  none:'No durable moat'};
+
+function moatLine(reader){
+  const moat = (reader.thesis || {}).moat || {};
+  const kind = moat.kind || null;
+  const count = (moat.evidence || []).filter(e => String(e || '').trim()).length;
+  if (!kind) return `<div class="moat moat-none"><label>Moat</label>
+    <b>Not stated</b><span class="ts"> — the draft names no advantage</span></div>`;
+  if (kind === 'none') return `<div class="moat moat-none"><label>Moat</label>
+    <b>No durable moat</b><span class="ts"> — Pillar 1 makes this a PASS</span></div>`;
+  return `<div class="moat"><label>Moat</label><b>${esc(MOAT_LABEL[kind] || kind)}</b>
+    <span class="ts"> — ${count} piece${count === 1 ? '' : 's'} of evidence${
+      count < 2 ? ', thin' : ''}</span></div>`;
+}
+
+/* The price a share happens to trade at is not a judgement input — $15 is not cheaper
+   than $300 — and the old lead sentence fired identically on 47 of 48 cards, so the
+   loudest text carried no information. What the price IMPLIES does differ per company,
+   and the owner can falsify it against what the business has actually done. */
+function expectationsBlock(reader){
+  const e = reader.expectations, lens = reader.valuation_lens || {};
+  const priceNote = `<p class="ts px-note">${lens.price == null ? 'Price unavailable'
+    : '$' + Number(lens.price).toFixed(2)} · ${esc(lens.price_as_of || 'date unavailable')}${
+    lens.owner_cash_multiple_x == null ? ''
+      : ' · ' + esc(lens.owner_cash_multiple_x) + '× owner cash flow'}</p>`;
+  if (!e || e.implied == null){
+    return `<div class="judgement valuation-summary"><label>What the price implies</label>
+      <b>${esc(lens.signal || 'Valuation context unavailable')}</b>${priceNote}</div>`;
+  }
+  const implied = e.beyond === 'above' ? `more than ${e.implied}%/yr`
+    : e.beyond === 'below' ? `less than ${e.implied}%/yr` : `${e.implied}%/yr`;
+  const achieved = e.achieved == null ? null : e.achieved;
+  let read = '';
+  if (achieved != null && e.beyond == null){
+    const gap = e.implied - achieved;
+    read = gap > 5 ? 'The price is asking for an acceleration it has not shown.'
+      : gap < -5 ? 'The price is asking for less than it has delivered.'
+      : 'The price is asking for roughly what it has delivered.';
+  }
+  return `<div class="judgement valuation-summary${lens.distress ? ' valuation-distress' : ''}">
+    <label>What the price implies</label>
+    <b>${esc(implied)} owner-cash growth, for a decade</b>
+    ${achieved == null ? '<p class="ts">Achieved growth not measurable.</p>'
+      : `<p class="ts">It has grown <b>${esc(achieved)}%/yr</b>.</p>`}
+    ${read ? `<p class="ts">${esc(read)}</p>` : ''}
+    <p class="ts">Owner cash yield ${lens.owner_cash_yield_pct == null ? '—'
+      : esc(lens.owner_cash_yield_pct) + '%'} · ${lens.percentile == null ? '—'
+      : esc(lens.percentile) + 'th percentile'} in ${esc(lens.comparison_label || 'the measured universe')}</p>
+    ${priceNote}
+    ${lens.caveat_lead ? `<p class="ts caveat-lead">${esc(lens.caveat_lead)}</p>` : ''}</div>`;
+}
+
+function thesisCard(reader){
+  const th = reader.thesis || {}, lens = reader.valuation_lens || {};
+  const q = reader.quality || {}, verdict = reader.risk.verdict || 'Unknown';
+  const flagged = isFlagged(reader);
+  const carried = q.explanation || '';
+  const carriedByYield = /owner-FCF yield/i.test(carried);
+  const tierChip = reader.tier && reader.tier !== 'Core'
+    ? ` · <span class="tier-chip">${esc(reader.tier === 'Outside' ? 'outside circle' : 'adjacent')}</span>` : '';
+  return `<article class="thesis-card${flagged ? ' thesis-flagged' : ''}" data-thesis-symbol="${esc(reader.symbol)}">
+    <div class="company-head">${companyMark(reader)}<div class="company-title">
+      <b>#${reader.rank} · ${esc(reader.name)}</b><span>${esc(reader.symbol)}${tierChip}</span></div></div>
+    ${flagged ? `<div class="risk-banner">${esc(verdict)} — fails the picks shortlist&#39;s fragility tests. Research draft, not a candidate.</div>` : ''}
+    ${reader.pass_recommended ? '<div class="risk-banner">Names no durable moat — PASS recommended under Pillar 1.</div>' : ''}
+    <p class="ts">${esc(th.business_model || '')}</p>
+    ${moatLine(reader)}
+    ${keyMetricStrip(reader)}
+    <div class="card-judgements">
+      <div class="judgement"><label>Business quality</label>
+        <b${flagged ? ' class="muted-score"' : ''}>${esc(qualityScoreLabel(q))}</b><br>
+        ${pill(q.grade || 'Unknown', BAND_CLS[q.grade])}
+        ${carried ? `<p class="ts">${esc(carried)}</p>` : ''}</div>
+      <div class="judgement"><label>Downside risk</label>
+        ${pill(verdict, VERDICT_CLS[verdict])}
+        ${verdict === 'Unknown' ? '<p class="ts">could not be certified — a fact about the evidence, not about safety</p>' : ''}</div>
+    </div>
+    ${expectationsBlock(reader)}
+    ${carriedByYield ? '<p class="ts one-signal">The quality grade above is also led by this yield — one signal, not two.</p>' : ''}
+    <button class="thesis-cta${flagged ? ' cta-bear' : ''}" data-thesis-symbol="${esc(reader.symbol)}">${flagged ? 'View the bear case' : 'View assessment &amp; thesis'}</button>
+  </article>`;
+}
+
 function renderThesisIndex(){
   state.thesisOpen = null;
   const q = state.thesisQuery.trim().toUpperCase();
@@ -1637,28 +1934,19 @@ function renderThesisIndex(){
     && (!state.thesisRisk || reader.risk.verdict === state.thesisRisk));
   $('#thesisIndex').style.display = '';
   $('#thesisReader').style.display = 'none';
-  $('#thesisResultCount').textContent = `${readers.length} of ${thesisReaders().length} companies`;
-  $('#thesisGrid').innerHTML = readers.map(reader => {
-    const th = reader.thesis || {}, valuation = th.valuation_anchor || {}, lens = reader.valuation_lens || {};
-    return `<article class="thesis-card" data-thesis-symbol="${esc(reader.symbol)}">
-      <div class="company-head">${companyMark(reader)}<div class="company-title">
-        <b>#${reader.rank} · ${esc(reader.name)}</b><span>${esc(reader.symbol)}</span></div></div>
-      <p class="ts">${esc(th.business_model || '')}</p>
-      <div class="card-judgements">
-        <div class="judgement"><label>Business quality</label>
-          <b>${reader.quality.score == null ? '—' : esc(reader.quality.score) + '/100'}</b><br>
-          ${pill(reader.quality.grade || 'Unknown', BAND_CLS[reader.quality.grade])}</div>
-        <div class="judgement"><label>Downside risk</label>
-          ${pill(reader.risk.verdict || 'Unknown', VERDICT_CLS[reader.risk.verdict])}</div>
-      </div>
-      <div class="judgement valuation-summary"><label>Current price</label>
-        <b>${lens.price == null ? 'Unavailable' : '$' + Number(lens.price).toFixed(2)}</b>
-        <span class="ts"> · ${esc(lens.price_as_of || 'date unavailable')}</span>
-        <p class="ts"><b>${esc(lens.signal || 'Valuation context unavailable')}</b></p>
-        <p class="ts">Owner cash yield ${lens.owner_cash_yield_pct == null ? '—' : esc(lens.owner_cash_yield_pct) + '%'} · ${lens.percentile == null ? '—' : esc(lens.percentile) + 'th percentile'} in ${esc(lens.comparison_label || 'the measured universe')}</p></div>
-      <button class="thesis-cta" data-thesis-symbol="${esc(reader.symbol)}">View assessment &amp; thesis</button>
-    </article>`;
-  }).join('') || '<div class="empty"><b>No companies match these filters</b>Clear one or more filters.</div>';
+  const all = thesisReaders();
+  const flaggedAll = all.filter(isFlagged).length;
+  const unknownAll = all.filter(r => (r.risk.verdict || 'Unknown') === 'Unknown').length;
+  $('#thesisResultCount').textContent = `${readers.length} of ${all.length} companies`
+    + (flaggedAll ? ` · ${flaggedAll} fail the fragility tests` : '')
+    + (unknownAll ? ` · ${unknownAll} could not be risk-certified` : '');
+  const candidates = readers.filter(reader => !isFlagged(reader));
+  const flagged = readers.filter(isFlagged);
+  $('#thesisGrid').innerHTML = (candidates.map(thesisCard).join('')
+    + (flagged.length ? `<div class="flag-divider">Rated highly by the scorecard, refused by the risk layer —
+        the picks shortlist excludes these. Read them for the bear case, not the buy case.</div>`
+      + flagged.map(thesisCard).join('') : ''))
+    || '<div class="empty"><b>No companies match these filters</b>Clear one or more filters.</div>';
   $$('#thesisGrid .thesis-cta').forEach(button =>
     button.onclick = () => openThesisReader(button.dataset.thesisSymbol));
 }
@@ -1682,20 +1970,25 @@ function openThesisReader(symbol, push = true){
   $('#thesisIndex').style.display = 'none';
   const host = $('#thesisReader'); host.style.display = '';
   host.innerHTML = `<div class="thesis-reader">
-    <button class="btn reader-back" id="readerBack">← Back to Top 48</button>
+    <button class="btn reader-back" id="readerBack">← Back to the Thesis Desk</button>
     <header class="card reader-hero"><div class="company-head">${companyMark(reader)}
-      <div class="company-title"><span>#${reader.rank} · ${esc(reader.symbol)}</span>
+      <div class="company-title"><span>#${reader.rank} · ${esc(reader.symbol)}${reader.tier && reader.tier !== 'Core' ? ` · <span class="tier-chip">${esc(reader.tier === 'Outside' ? 'outside circle' : 'adjacent')}</span>` : ''}</span>
       <h1>${esc(reader.name)}</h1></div></div>
+      ${isFlagged(reader) ? `<div class="risk-banner">${esc(reader.risk.verdict)} — fails the picks shortlist&#39;s fragility tests. This is a research draft; read it for the bear case.</div>` : ''}
+      ${reader.pass_recommended ? '<div class="risk-banner">Names no durable moat — PASS recommended under Pillar 1.</div>' : ''}
+      ${keyMetricStrip(reader)}
       <div class="glance" aria-label="At a glance"><div class="judgement"><label>What is it?</label>${esc(th.business_model || '')}</div>
-      <div class="judgement"><label>How strong is the business?</label><b>${esc(reader.quality.grade || 'Unknown')} · ${esc(reader.quality.score ?? '—')}/100</b><p class="ts">${esc(reader.quality.explanation || '')}</p></div>
-      <div class="judgement"><label>How can it hurt you?</label><b>${esc(reader.risk.verdict || 'Unknown')}</b><p class="ts">${esc(reader.risk.leading_fragility || '')}</p></div>
+      <div class="judgement"><label>How strong is the business?</label><b>${esc(reader.quality.grade || 'Unknown')} · ${esc(qualityScoreLabel(reader.quality))}</b><p class="ts">${esc(reader.quality.explanation || '')}</p></div>
+      <div class="judgement"><label>How can it hurt you?</label><b>${esc(reader.risk.verdict || 'Unknown')}</b><p class="ts">${esc(reader.risk.leading_fragility || ((reader.risk.verdict || 'Unknown') === 'Unknown' ? 'Could not be certified — a fact about the evidence, not about safety.' : ''))}</p></div>
       <div class="judgement"><label>What does valuation imply?</label><b>${esc(lens.signal || 'Unavailable')}</b><p class="ts">${esc(valuation.statement || '')}</p></div></div></header>
     <section class="card reader-section prose"><h2>The case in one minute</h2>${reader.summary_html || '<p>No summary available.</p>'}</section>
     <section class="card reader-section"><h2>Why might this be a strong business?</h2><p>${esc(th.business_model || '')}</p>
       <h3>${esc((moat.kind || 'Potential moat').replaceAll('_', ' '))}</h3><ul>${(moat.evidence || []).map(item => `<li>${esc(item)}</li>`).join('')}</ul>
       ${th.ten_year_statement ? `<p>${esc(th.ten_year_statement)}</p>` : ''}</section>
     <section class="card reader-section"><h2>What do the cash economics say?</h2><p>${esc(th.owner_earnings_picture || 'The available filings do not support a reliable conclusion.')}</p></section>
-    <section class="card reader-section"><h2>What does the valuation imply?</h2><h3>Valuation context</h3>
+    <section class="card reader-section"><h2>What does the valuation imply?</h2>
+      ${expectationsBlock(reader)}
+      <h3>Valuation context</h3>
       <p><b>${esc(lens.signal || 'Valuation context unavailable')}</b></p>
       <div class="valuation-metrics">
         <div class="valuation-metric"><label>Current price</label><b>${lens.price == null ? '—' : '$' + Number(lens.price).toFixed(2)}</b><p class="ts">Quote dated ${esc(lens.price_as_of || 'unavailable')}</p></div>
@@ -1703,6 +1996,7 @@ function openThesisReader(symbol, push = true){
         <div class="valuation-metric"><label>Relative position</label><b>${lens.percentile == null ? '—' : esc(lens.percentile) + 'th percentile'}</b><p class="ts">Among ${esc(lens.comparison_count ?? '—')} companies in the ${esc(lens.comparison_label || 'measured Scout universe')}</p></div>
       </div>
       <p>${esc(valuation.statement || '')}</p>
+      ${/owner-FCF yield/i.test(reader.quality.explanation || '') ? '<p class="ts">The quality grade is also led by this yield — the two boxes above are one signal, not two independent confirmations.</p>' : ''}
       <p class="valuation-caveat"><b>What could distort this signal?</b><br>${esc(lens.caveat || 'Current owner cash flow may not represent normal earning power.')}</p>
       <p class="ts">Relative valuation context only; current cash flow may not be normal.</p></section>
     <section class="card reader-section"><h2>What could go wrong?</h2><p>${esc(th.bear_case || '')}</p></section>
@@ -2012,11 +2306,14 @@ TEMPLATE = """<!DOCTYPE html>
 <!-- ============ 2 · THESIS ============ -->
 <section class="tabpane" id="tab-thesis" style="display:none">
   <div id="thesisIndex">
-    <p class="intro"><b>2 · 48 companies worth deeper research.</b> Each company has
-    a separate business-quality assessment, downside-risk verdict, valuation anchor and
-    evidence-led thesis. Open any card for the plain-English walkthrough.</p>
+    <p class="intro"><b>2 · The Scout's top 1% — companies worth deeper research.</b>
+    Each company has a separate business-quality assessment, downside-risk verdict,
+    valuation anchor and evidence-led thesis. Open any card for the plain-English
+    walkthrough. Scores are bands, not rankings — differences under ~5 points are noise,
+    and most candidates <em>should</em> fail the Gate: passing is the expected outcome,
+    not a disappointment.</p>
     <div class="thesis-tools">
-      <input id="thesisSearch" type="search" placeholder="Search company or ticker" aria-label="Search the Top 48">
+      <input id="thesisSearch" type="search" placeholder="Search company or ticker" aria-label="Search the thesis desk">
       <select id="thesisQuality" aria-label="Filter by business quality"><option value="">All quality grades</option><option>Exceptional</option><option>Strong</option><option>Mixed</option><option>Weak</option><option>Pass</option></select>
       <select id="thesisRisk" aria-label="Filter by downside risk"><option value="">All risk verdicts</option><option>Robust</option><option>Ordinary</option><option>Fragile</option><option>Ruinous</option><option>Unknown</option></select>
       <span class="muted" id="thesisResultCount"></span>
@@ -2158,8 +2455,8 @@ def write_site(model: dict, out_dir: Path, *, shard: bool = True,
                 raise
     # Atomic: the desk server serves this very directory while a `rebuild` rewrites it,
     # and a truncate-then-write would hand a reader a blank page. The temp name is
-    # dot-prefixed and removed on failure so a crashed build can never be rsynced into
-    # the published site by deploy/scout/publish.sh.
+    # dot-prefixed and removed on failure so a crashed build can never be rsynced
+    # into the published site by the local publisher (deploy/local/scout-production.sh).
     out = out_dir / "index.html"
     tmp = out_dir / ".index.html.tmp"
     try:

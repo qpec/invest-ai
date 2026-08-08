@@ -672,6 +672,61 @@ def test_margin_of_safety_none_for_burner():
     assert scoring.margin_of_safety(_burner(base_bundle(), ttm_positive=False)) is None
 
 
+def test_margin_of_safety_falls_as_leverage_rises():
+    """2026-08-08 valuation review V-3 and its follow-up. Owner-FCF is post-interest
+    (equity-level), so the DCF discounts at a cost of EQUITY — but a flat unlevered rate
+    would make the margin of safety blind to the balance sheet, handing a distressed
+    name the same Price-block points as a net-cash one. STRICT inequalities, because the
+    first version of this test compared two values that a shared constant made identical
+    and therefore could not fail."""
+    unlevered = base_bundle()                              # net cash: debt 100M, cash 300M
+    levered = base_bundle()
+    set_all_balances(levered, **{"Total Debt": 4e9, "Cash And Cash Equivalents": 0.0})
+    heavy = base_bundle()
+    set_all_balances(heavy, **{"Total Debt": 12e9, "Cash And Cash Equivalents": 0.0})
+    mos_u, mos_l, mos_h = (scoring.margin_of_safety(b)
+                           for b in (unlevered, levered, heavy))
+
+    # Cash flows are identical across the three; only the balance sheet differs.
+    assert mos_u["base_fcf"] == mos_l["base_fcf"] == mos_h["base_fcf"]
+    assert mos_h["mos_pct"] < mos_l["mos_pct"] < mos_u["mos_pct"]
+    assert mos_h["discount_rate"] > mos_l["discount_rate"] > mos_u["discount_rate"]
+    # A net-cash name sits at the unlevered floor; nothing discounts below it.
+    assert mos_u["discount_rate"] == pytest.approx(scoring.COST_OF_EQUITY)
+    assert mos_h["discount_rate"] <= scoring.EQUITY_RATE_CEILING
+
+
+def test_levered_cost_of_equity_anchors():
+    """The Hamada ramp, stated as numbers so a future edit has to argue with them."""
+    coe = scoring.COST_OF_EQUITY
+    assert scoring.levered_cost_of_equity(market_cap=1e9, net_debt=0) == pytest.approx(coe)
+    # net cash is floored at zero debt, never a discount below the unlevered rate
+    assert scoring.levered_cost_of_equity(market_cap=1e9, net_debt=-5e8) == pytest.approx(coe)
+    # D/E = 1 -> beta 1.75 -> 4.5% + 10.5% = 15%
+    assert scoring.levered_cost_of_equity(market_cap=1e9, net_debt=1e9) == pytest.approx(0.15)
+    # D/E = 4 -> beta 4.0 -> 28.5%, clamped
+    assert scoring.levered_cost_of_equity(
+        market_cap=1e9, net_debt=4e9) == pytest.approx(scoring.EQUITY_RATE_CEILING)
+    # an unusable market cap degrades to the unlevered rate rather than dividing by zero
+    assert scoring.levered_cost_of_equity(market_cap=0, net_debt=1e9) == pytest.approx(coe)
+
+
+def test_the_discount_rate_is_decoupled_from_the_reference_wacc():
+    """The inherited `rf + 10/coverage` cost of debt makes WACC hit its 20% clamp for
+    any name with measurable interest — which is why WACC must not discount an equity
+    flow. WACC stays reported; it drives nothing."""
+    assert scoring.wacc_estimate(market_cap=2e9, total_debt=6e9, cash=0,
+                                 interest_coverage=2) == pytest.approx(0.20)
+    levered = base_bundle()
+    set_all_balances(levered, **{"Total Debt": 4e9, "Cash And Cash Equivalents": 0.0})
+    mos = scoring.margin_of_safety(levered)
+    assert mos["discount_rate"] != mos["wacc"]
+    assert mos["intrinsic_value"] == pytest.approx(
+        scoring.dcf_intrinsic(mos["base_fcf"], mos["growth"], mos["discount_rate"])
+        * max(0.7, 1.0 - 0.5 * scoring._fcf_volatility(
+            [v for _, v in reversed(scoring._annual_owner_fcf_points(levered))])))
+
+
 def test_margin_of_safety_mega_cap_growth_cap():
     b = base_bundle()
     b["market_cap"] = 250e9
@@ -777,3 +832,56 @@ def test_buffett_checklist_judges_a_decade_not_two():
     # and the consistency leg reads only that window too
     assert "8 annual NI periods" in items["Earnings consistency (NI non-decreasing)"]["detail"]
     assert scoring.BUFFETT_WINDOW_YEARS == 8
+
+
+# --- reverse DCF / expectations ------------------------------------------------------
+
+def test_implied_growth_reproduces_the_market_cap():
+    """The whole point: at the implied rate the DCF must value the company at exactly
+    what the market is paying. If this drifts, the number on the card is fiction."""
+    b = base_bundle()
+    mos = scoring.margin_of_safety(b)
+    ig = scoring.implied_growth(b)
+    quality = mos["intrinsic_value"] / scoring.dcf_intrinsic(
+        mos["base_fcf"], mos["growth"], mos["discount_rate"])
+    value = scoring.dcf_intrinsic(
+        mos["base_fcf"], ig["implied_growth_pct"] / 100.0, mos["discount_rate"]) * quality
+    assert value == pytest.approx(mos["market_cap"], rel=1e-6)
+
+
+def test_implied_growth_agrees_in_sign_with_the_margin_of_safety():
+    """A negative margin of safety means the price is above the DCF's value, which is the
+    same statement as: the price implies MORE growth than the DCF assumed. The two views
+    are one calculation and must never contradict each other."""
+    b = base_bundle()
+    mos, ig = scoring.margin_of_safety(b), scoring.implied_growth(b)
+    if mos["mos_pct"] < 0:
+        assert ig["implied_growth_pct"] > mos["growth"] * 100.0
+    else:
+        assert ig["implied_growth_pct"] <= mos["growth"] * 100.0
+
+
+def test_implied_growth_reports_off_the_scale_rather_than_a_fake_number():
+    """A price that implies more than the bounds can express is reported as 'more than',
+    not as a precise figure the arithmetic cannot support."""
+    b = base_bundle()
+    b["market_cap"] = 5e12                       # absurd price for the cash flows
+    ig = scoring.implied_growth(b)
+    assert ig["beyond"] == "above"
+    assert ig["implied_growth_pct"] == pytest.approx(scoring.IMPLIED_GROWTH_BOUNDS[1] * 100)
+
+    cheap = base_bundle()
+    cheap["market_cap"] = 1e6                    # absurdly cheap
+    assert scoring.implied_growth(cheap)["beyond"] == "below"
+
+
+def test_implied_growth_is_none_when_the_dcf_is_not_computable():
+    assert scoring.implied_growth(_burner(base_bundle(), ttm_positive=False)) is None
+
+
+def test_implied_growth_carries_the_achieved_rate_for_comparison():
+    """The card sets implied beside achieved; both must come from the same bundle."""
+    b = base_bundle()
+    ig = scoring.implied_growth(b)
+    assert ig["achieved_growth_pct"] == pytest.approx(
+        scoring._revenue_growth(b)[0])

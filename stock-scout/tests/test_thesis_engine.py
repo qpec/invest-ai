@@ -125,6 +125,62 @@ class TestValidate:
         for name in thesis.METRICS:
             assert "price" not in name and "drawdown" not in name
 
+    def test_a_quote_derived_metric_cannot_fire_a_trigger(self):
+        """2026-08-08 review V-8: owner-FCF yield embeds the market cap, so a price move
+        alone could trip it — it stays in packets/display but is refused as a trigger."""
+        bad = draft(triggers=[metric_trigger(metric="owner_fcf_yield_pct"),
+                              metric_trigger("T1b"), question_trigger()])
+        assert any("quote-derived" in p for p in thesis.validate(bad))
+
+    def test_a_named_moat_without_evidence_is_refused(self):
+        """Pillar 1: 'at least one durable competitive advantage, WITH EVIDENCE.'"""
+        doc = draft()
+        doc["moat"] = {"kind": "switching_costs", "evidence": []}
+        assert any("no evidence" in p for p in thesis.validate(doc))
+        doc["moat"] = {"kind": "brand_trust", "evidence": ["  "]}
+        assert any("no evidence" in p for p in thesis.validate(doc))
+
+    def test_an_honest_no_moat_finding_still_validates(self):
+        """kind 'none' is a finding, not a formatting error — record accepts it as
+        research and marks it PASS-RECOMMENDED; the refusal happens at ratify."""
+        doc = draft()
+        doc["moat"] = {"kind": "none", "evidence": []}
+        assert thesis.validate(doc, symbol="AAA") == []
+
+    @pytest.mark.parametrize("moat", [
+        None,                                        # the key omitted entirely
+        {},                                          # present but empty
+        {"kind": "", "evidence": []},                # blank kind
+        {"kind": "moat-ish", "evidence": ["x"]},     # off-enum kind
+        "switching costs",                           # a string, not an object
+        ["switching costs"],                         # a list
+        {"kind": "brand_trust", "evidence": "text"}, # evidence not a list
+    ])
+    def test_a_malformed_moat_is_refused_not_waved_through_or_crashed(self, moat):
+        """The schema is prose in the work order, not a validator, so validate() holds
+        the shape. Before this check an omitted moat passed with zero problems (skipping
+        the Pillar-1 door entirely) and a string moat raised AttributeError instead of
+        producing a refusal."""
+        doc = draft()
+        if moat is None:
+            doc.pop("moat")
+        else:
+            doc["moat"] = moat
+        problems = thesis.validate(doc, symbol="AAA")      # must not raise
+        assert problems and any("moat" in p for p in problems)
+
+    def test_a_moatless_draft_cannot_reach_the_gate_by_omission(self, tmp_path):
+        """The omission path all the way through: no moat key -> record refuses."""
+        out = tmp_path / "drafts" / "AAA"
+        out.mkdir(parents=True)
+        doc = draft()
+        doc.pop("moat")
+        (out / "thesis.json").write_text(json.dumps(doc))
+        for name in ("report.md", "summary.md"):
+            (out / name).write_text(f"{thesis.SUMMARY_HEADING}\nbody")
+        with pytest.raises(deskwork.OrderError, match="moat"):
+            thesis.record("AAA", theses_dir=tmp_path, model=APPROVED)
+
 
 # --- thesis.ratify (the Gate) -------------------------------------------------------------
 
@@ -151,6 +207,26 @@ class TestRatify:
         answers = iter(["high", ""])
         with pytest.raises(ValueError, match="circle of competence"):
             thesis.ratify("AAA", theses_dir=tmp_path, ask=lambda _: next(answers))
+
+    def test_a_no_moat_draft_is_a_pass_without_an_explicit_override(self, tmp_path):
+        """Pillar 1's consequence at the last door: moat kind 'none' refuses the commit
+        unless the owner types the override — the goalpost guard's 're-arm' shape."""
+        doc = draft()
+        doc["moat"] = {"kind": "none", "evidence": []}
+        self._write_draft(tmp_path, {"symbol": "AAA", "status": "draft", "thesis": doc})
+        answers = iter([""])                       # decline the override
+        with pytest.raises(ValueError, match="no durable moat"):
+            thesis.ratify("AAA", theses_dir=tmp_path, ask=lambda _: next(answers))
+        assert not (tmp_path / "committed" / "AAA.json").exists()
+
+    def test_a_no_moat_override_is_deliberate_and_typed(self, tmp_path):
+        doc = draft()
+        doc["moat"] = {"kind": "none", "evidence": []}
+        self._write_draft(tmp_path, {"symbol": "AAA", "status": "draft", "thesis": doc})
+        answers = iter(["override", "low", "my day job"])
+        committed = thesis.ratify("AAA", theses_dir=tmp_path,
+                                  ask=lambda _: next(answers))
+        assert committed["status"] == "committed"
 
     def test_re_ratifying_a_broken_thesis_demands_an_explicit_re_arm(self, tmp_path):
         """A broken thesis is standing sell advice. Silently overwriting it — which the
@@ -335,6 +411,40 @@ class TestBriefAndRecord:
         top = thesis.top_symbols(rows, len(rows))
         assert len(top) == 3                      # ceil(201 * 0.01)
         assert all(r["card"]["pct"] is not None for r in top)
+
+    def test_top_symbols_applies_the_desk_eligibility_floor(self):
+        """V-6: a microcap or penny name stays scored and visible on the site, but does
+        not consume a desk work order. A row carrying no figure is never excluded."""
+        card = {"pct": 90, "band": "Exceptional", "evidence": "full",
+                "score": 90, "available_max": 100}
+        rows = [
+            {"symbol": "BIG", "card": dict(card), "market_cap": 5e9, "price": 100.0},
+            {"symbol": "TINY", "card": dict(card, pct=99),
+             "market_cap": thesis.DESK_MIN_MARKET_CAP - 1, "price": 100.0},
+            {"symbol": "PENNY", "card": dict(card, pct=99), "market_cap": 5e9,
+             "price": thesis.DESK_MIN_PRICE - 0.01},
+            {"symbol": "NODATA", "card": dict(card, pct=80)},
+            {"symbol": "BUNDLED", "card": dict(card, pct=99),
+             "bundle": {"market_cap": thesis.DESK_MIN_MARKET_CAP - 1}},
+        ]
+        top = thesis.top_symbols(rows, 400)       # ceil(400 * 0.01) = 4 slots
+        symbols = [r["symbol"] for r in top]
+        assert "TINY" not in symbols and "PENNY" not in symbols
+        assert "BUNDLED" not in symbols
+        assert "BIG" in symbols and "NODATA" in symbols
+
+    def test_the_floor_reads_the_bundle_shape_the_cli_actually_builds(self):
+        """_load_rows carries price only INSIDE the bundle, so a bundle-only fallback
+        for market cap but not price made `thesis.py batch` and the site compute
+        different top-1% sets: a $3 stock got a work order the site then hid."""
+        card = {"pct": 90, "band": "Exceptional", "evidence": "full",
+                "score": 90, "available_max": 100}
+        cli_row = {"symbol": "PENNY", "card": card,
+                   "bundle": {"market_cap": 5e9, "price": 3.00}}
+        assert thesis._clears_desk_floor(cli_row) is False
+        ok_row = {"symbol": "BIG", "card": card,
+                  "bundle": {"market_cap": 5e9, "price": 50.0}}
+        assert thesis._clears_desk_floor(ok_row) is True
 
 
 # --- monitor ------------------------------------------------------------------------------
@@ -846,3 +956,60 @@ class TestProductionThesisFreshness:
             ("REFRESHED", "INPUTS_CHANGED")
         assert thesis.evaluation_decision("a", "a", True) == \
             ("REFRESHED", "RESEARCH_STALE")
+
+
+class TestMungerGatesTheDeskFeed:
+    """Owner-directed 2026-08-08: "omitted or munger vetos should not be a thesis."
+
+    The constitution's order is circle -> Hell-No -> Buffett dossier. Before this, the
+    desk feed ranked on the scorecard alone, so names the inversion layer had already
+    named a failure mode for still consumed work orders.
+    """
+
+    CARD = {"pct": 95, "band": "Exceptional", "evidence": "full",
+            "score": 95, "available_max": 100}
+
+    def _row(self, symbol, verdict, severe=0, caution=0):
+        return {"symbol": symbol, "card": dict(self.CARD),
+                "inversion": {"verdict": verdict,
+                              "coverage": {"severe": severe, "caution": caution}}}
+
+    def test_ruinous_and_fragile_names_never_reach_the_feed(self):
+        rows = [
+            self._row("GOOD", "Ordinary"),
+            self._row("RUIN", "Ruinous", severe=3),
+            self._row("FRAG", "Fragile", severe=2),
+            self._row("ROBUST", "Robust"),
+        ]
+        chosen = [r["symbol"] for r in thesis.top_symbols(rows, 400)]
+        assert "RUIN" not in chosen and "FRAG" not in chosen
+        assert "GOOD" in chosen and "ROBUST" in chosen
+
+    def test_one_severe_probe_is_enough_to_refuse_even_inside_ordinary(self):
+        """The calibrated ladder puts a single severe finding inside Ordinary. A named
+        way to lose money must not reach a thesis just because the ladder is lenient."""
+        rows = [self._row("KEEP", "Ordinary", severe=0),
+                self._row("NAMED", "Ordinary", severe=1)]
+        chosen = [r["symbol"] for r in thesis.top_symbols(rows, 400)]
+        assert chosen == ["KEEP"]
+
+    def test_unknown_is_not_a_veto(self):
+        """Unknown means the layer could not certify — a fact about the evidence, not a
+        named failure mode. It still has to clear every other gate."""
+        rows = [self._row("UNK", "Unknown")]
+        assert [r["symbol"] for r in thesis.top_symbols(rows, 400)] == ["UNK"]
+
+    def test_a_row_without_an_inversion_result_is_not_excluded(self):
+        """Absence of evidence is not a veto — 'refuse, never guess' cuts both ways."""
+        rows = [{"symbol": "NOINV", "card": dict(self.CARD)}]
+        assert [r["symbol"] for r in thesis.top_symbols(rows, 400)] == ["NOINV"]
+
+    def test_the_gate_runs_before_the_rank_is_taken(self):
+        """A refused name must not consume one of the 1% slots: the survivors backfill
+        it, rather than the feed coming back one short."""
+        rows = [self._row("RUIN", "Ruinous", severe=3),      # would rank first
+                self._row("A", "Ordinary"), self._row("B", "Ordinary")]
+        rows[0]["card"]["pct"] = 99
+        chosen = [r["symbol"] for r in thesis.top_symbols(rows, 100)]   # 1 slot
+        assert chosen == ["A"] or chosen == ["B"]
+        assert "RUIN" not in chosen

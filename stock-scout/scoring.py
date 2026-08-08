@@ -3,7 +3,7 @@
 grade.py (live yfinance cache) and backtest*.py (EDGAR point-in-time) both feed
 score_universe() the same Bundle (§4.1) and must get bit-identical scores (§1 msg 44).
 No I/O, no clock, no network. Percentile machinery, veto layer, composite weights and
-tiering are semantically identical to vendor/scout_grade.py; the v2.1-v2.3 amendments
+tiering are semantically identical to agentcy/scout_grade.py; the v2.1-v2.3 amendments
 (own EV, TTM assembly, cash-flow-quality/dilution vetoes, flags, shadow layers) and the
 frozen v3 owner-mode constants follow §4.2-§4.8.
 """
@@ -15,7 +15,7 @@ from datetime import date
 
 from scipy.stats import percentileofscore
 
-# --- Composite / grading constants (§4.6 — identical to vendor/scout_grade.py) ----------
+# --- Composite / grading constants (§4.6 — identical to agentcy/scout_grade.py) ---------
 W_V, W_Q, W_G, W_D, W_M = 0.25, 0.25, 0.20, 0.15, 0.15
 _GRADE_BANDS = ((80.0, "A"), (65.0, "B"), (50.0, "C"), (35.0, "D"))
 QV_ROIC_MIN = 0.15          # the >15% ROIC reference line, as a ratio (vendored RF4)
@@ -113,7 +113,7 @@ def _deferred_revenue(bal: dict) -> float | None:
 
 def _owner_fcf(cell: dict) -> float | None:
     """§4.2 per-period normalized owner-FCF: OCF - min(|CapEx|, D&A) - SBC; D&A absent ->
-    maintenance proxy = |CapEx| (vendored scout_grade lines 34-76). None when OCF/CapEx missing."""
+    maintenance proxy = |CapEx| (scout_grade lines 34-76). None when OCF/CapEx missing."""
     ocf = _row(cell, "ocf")
     capex = _row(cell, "capex")
     if ocf is None or capex is None:
@@ -469,7 +469,7 @@ def quality_score(*, q: float, g: float, d: float, m: float) -> float:
                  + W_QUALITY["d"] * d + W_QUALITY["m"] * m, 4)
 
 
-# --- Circle-of-competence tiering (vendored scout_grade tier_of, RF10 sets) --------------
+# --- Circle-of-competence tiering (scout_grade tier_of, RF10 sets) ----------------------
 _CORE_INDUSTRIES = frozenset({"software", "health care technology"})
 _ADJACENT_INDUSTRIES = frozenset({
     "it services", "semiconductors & semiconductor equipment",
@@ -788,12 +788,43 @@ def score_universe(bundles: list[dict]) -> list[dict]:
 
 # --- v2.3 shadow layers (§4.8 — never enter the composite) -------------------------------
 
+# CAPM inputs shared by wacc_estimate and the DCF discount rate (rf 4.5%, unlevered
+# beta 1.0, MRP 6%). The uniform UNLEVERED beta is a declared simplification, not an
+# estimate — the 2026-08-08 valuation review (V-3) records it as a known limitation.
+RISK_FREE = 0.045
+MARKET_RISK_PREMIUM = 0.06
+UNLEVERED_BETA = 1.0
+COST_OF_EQUITY = RISK_FREE + UNLEVERED_BETA * MARKET_RISK_PREMIUM
+EQUITY_RATE_CEILING = 0.20      # same clamp the WACC estimate uses
+
+
+def levered_cost_of_equity(*, market_cap, net_debt) -> float:
+    """Hamada: beta_L = beta_U x (1 + (1 - tax) x D/E), then CAPM, clamped to
+    [COST_OF_EQUITY, EQUITY_RATE_CEILING].
+
+    Why this exists (2026-08-08 review follow-up). The margin-of-safety DCF discounts
+    owner-FCF, which is post-interest and therefore an EQUITY flow, so its rate is a
+    cost of equity rather than WACC. Discounting every name at the flat unlevered
+    COST_OF_EQUITY would make intrinsic value completely insensitive to the balance
+    sheet — a company carrying 3x its market cap in net debt would be valued exactly
+    like a net-cash one, and the Price block would hand it the same points. Leverage
+    raises the risk borne by equity; the discount rate has to say so. `net_debt` is
+    floored at 0 by the caller, so a net-cash name sits at the unlevered floor."""
+    equity = market_cap if market_cap and market_cap > 0 else None
+    if equity is None:
+        return COST_OF_EQUITY
+    beta = UNLEVERED_BETA * (1.0 + 0.75 * (max(net_debt or 0.0, 0.0) / equity))
+    return min(max(RISK_FREE + beta * MARKET_RISK_PREMIUM, COST_OF_EQUITY),
+               EQUITY_RATE_CEILING)
+
+
 def wacc_estimate(*, market_cap, total_debt, cash, interest_coverage=None) -> float:
     """§4.8 WACC per ai-hedge-fund calculate_wacc: CAPM cost of equity (rf 4.5%, beta 1.0,
     MRP 6%), cost of debt from interest coverage (default spread when unknown), 25% tax
-    shield, clamped to [6%, 20%]."""
-    rf, mrp = 0.045, 0.06
-    coe = rf + 1.0 * mrp
+    shield, clamped to [6%, 20%]. Reported for reference; the margin-of-safety DCF
+    discounts at COST_OF_EQUITY, not here (see margin_of_safety)."""
+    rf, mrp = RISK_FREE, MARKET_RISK_PREMIUM
+    coe = COST_OF_EQUITY
     if interest_coverage is not None and interest_coverage > 0:
         cod = max(rf + 0.01, rf + 10.0 / interest_coverage)
     else:
@@ -819,31 +850,48 @@ def _fcf_volatility(history: list[float]) -> float:
     return min(statistics.stdev(pos) / mean, 1.0)
 
 
-def dcf_intrinsic(base_fcf: float, growth: float, wacc: float) -> float:
+def dcf_intrinsic(base_fcf: float, growth: float, discount: float) -> float:
     """§4.8 3-stage DCF present value (ai-hedge-fund calculate_enhanced_dcf_value, without
     the volatility quality factor): years 1-3 at `growth`, years 4-7 declining transition
-    ((growth+3%)/2 fading to 0), terminal min(3%, 0.6*growth) (adjusted to 0.8*wacc when
-    wacc <= terminal)."""
+    ((growth+3%)/2 fading to 0), terminal min(3%, 0.6*growth) (adjusted to 0.8*discount
+    when discount <= terminal). `discount` must match the cash flow's level — owner-FCF
+    is post-interest, so its rate is the cost of equity (margin_of_safety)."""
     transition = (growth + 0.03) / 2.0
     terminal = min(0.03, growth * 0.6)
     pv = 0.0
     for year in range(1, 4):
-        pv += base_fcf * (1 + growth) ** year / (1 + wacc) ** year
+        pv += base_fcf * (1 + growth) ** year / (1 + discount) ** year
     for year in range(4, 8):
         rate = transition * (8 - year) / 4.0
-        pv += base_fcf * (1 + growth) ** 3 * (1 + rate) ** (year - 3) / (1 + wacc) ** year
+        pv += base_fcf * (1 + growth) ** 3 * (1 + rate) ** (year - 3) / (1 + discount) ** year
     final = base_fcf * (1 + growth) ** 3 * (1 + transition) ** 4
-    if wacc <= terminal:
-        terminal = wacc * 0.8
-    return pv + final * (1 + terminal) / (wacc - terminal) / (1 + wacc) ** 7
+    if discount <= terminal:
+        terminal = discount * 0.8
+    return pv + final * (1 + terminal) / (discount - terminal) / (1 + discount) ** 7
 
 
 def margin_of_safety(bundle: dict) -> dict | None:
-    """§4.8 shadow margin of safety — never scored. base FCF = max(TTM owner-FCF,
+    """§4.8 margin of safety — scored by the scorecard's Price block (10 of 25 points),
+    so its assumptions are load-bearing, not shadow. base FCF = max(TTM owner-FCF,
     0.85 x 3-yr average annual owner-FCF); growth = annual revenue CAGR capped at 25%
     (10% above $200B market cap; None/0 -> 5% default); intrinsic = 3-stage DCF x
     volatility quality factor max(0.7, 1 - 0.5*CV). None when market cap is unusable or
-    base FCF <= 0. mos_pct = (intrinsic - market_cap) / market_cap."""
+    base FCF <= 0. mos_pct = (intrinsic - market_cap) / market_cap.
+
+    Discount rate: `levered_cost_of_equity`, not WACC (2026-08-08 valuation review V-3,
+    corrected by its own follow-up review). Owner-FCF comes from US-GAAP OCF, which is
+    after cash interest — an equity-level flow — so discounting it at WACC mismatched the
+    level. The direction of that error was NOT uniform, and the first version of this fix
+    described it wrongly: `wacc_estimate`'s inherited cost of debt is `rf + 10/coverage`,
+    which returns 23.7% at coverage 52 and 504% at coverage 2, so for any name whose
+    interest expense is measurable the old WACC sat ABOVE the cost of equity (usually at
+    the 20% clamp) and UNDERstated intrinsic value; only where coverage was unknown
+    (cod 9.5% x 0.75 < coe) did it overstate. Discounting everything at a flat unlevered
+    10.5% therefore raised leveraged names ~1.8-2.3x and made the margin of safety
+    completely blind to the balance sheet. The levered rate restores the one property
+    that matters here: more net debt, higher equity discount, lower margin of safety.
+
+    WACC is still computed and reported for reference; it discounts nothing."""
     mcap = _num(bundle.get("market_cap"))
     if mcap is None or mcap <= 0:
         return None
@@ -865,11 +913,59 @@ def margin_of_safety(bundle: dict) -> dict | None:
     coverage = ebit / abs(interest) if ebit is not None and interest else None
     wacc = wacc_estimate(market_cap=mcap, total_debt=_row(bal, "total_debt"),
                          cash=_row(bal, "cash"), interest_coverage=coverage)
+    net_debt = max((_row(bal, "total_debt") or 0.0) - (_row(bal, "cash") or 0.0), 0.0)
+    discount = levered_cost_of_equity(market_cap=mcap, net_debt=net_debt)
     quality = max(0.7, 1.0 - 0.5 * _fcf_volatility(hist))
-    intrinsic = dcf_intrinsic(base, growth, wacc) * quality
+    intrinsic = dcf_intrinsic(base, growth, discount) * quality
     return {"intrinsic_value": intrinsic, "market_cap": mcap,
             "mos_pct": (intrinsic - mcap) / mcap, "wacc": wacc,
+            "discount_rate": discount, "net_debt": net_debt,
             "growth": growth, "base_fcf": base}
+
+
+IMPLIED_GROWTH_BOUNDS = (-0.40, 0.60)   # the rates worth reporting; outside is "off the scale"
+
+
+def implied_growth(bundle: dict, mos: dict | None = None) -> dict | None:
+    """Reverse the margin-of-safety DCF: what owner-FCF growth does TODAY'S PRICE imply?
+
+    Expectations investing (Mauboussin & Rappaport): rather than forecast growth and
+    compare the answer to the price, read the growth the price already embeds and judge
+    whether it is plausible. For a screen this is the more honest direction — a single
+    forecast is one person's guess presented as a valuation, whereas the implied rate is
+    arithmetic the owner can falsify against what the business has actually achieved.
+
+    `dcf_intrinsic` is monotonically increasing in growth (pinned by test), so this is a
+    bisection on the same function, base flow and discount rate the margin of safety
+    uses — the two can never disagree. Returns the implied rate plus the achieved
+    revenue CAGR so the caller can put them side by side, and a `beyond` flag when the
+    price implies a rate outside IMPLIED_GROWTH_BOUNDS (the answer is then "more than
+    this", not a number to quote). None when the DCF itself is not computable.
+    """
+    mos = mos if mos is not None else margin_of_safety(bundle)
+    if mos is None:
+        return None
+    base, mcap, discount = mos["base_fcf"], mos["market_cap"], mos["discount_rate"]
+    quality = mos["intrinsic_value"] / dcf_intrinsic(base, mos["growth"], discount)
+
+    def value_at(rate: float) -> float:
+        return dcf_intrinsic(base, rate, discount) * quality
+
+    low, high = IMPLIED_GROWTH_BOUNDS
+    if value_at(low) > mcap:
+        return {"implied_growth_pct": low * 100.0, "beyond": "below",
+                "achieved_growth_pct": _revenue_growth(bundle)[0]}
+    if value_at(high) < mcap:
+        return {"implied_growth_pct": high * 100.0, "beyond": "above",
+                "achieved_growth_pct": _revenue_growth(bundle)[0]}
+    for _ in range(60):                      # ~1e-18 on the interval; 60 is free
+        mid = (low + high) / 2.0
+        if value_at(mid) < mcap:
+            low = mid
+        else:
+            high = mid
+    return {"implied_growth_pct": (low + high) / 2.0 * 100.0, "beyond": None,
+            "achieved_growth_pct": _revenue_growth(bundle)[0]}
 
 
 BUFFETT_WINDOW_YEARS = 8        # the reference implementation's `limit=8` on annual data

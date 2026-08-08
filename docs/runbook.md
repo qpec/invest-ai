@@ -31,11 +31,10 @@ Publication blocks when any Top 48 reader lacks a positive dated price, positive
 valid comparison, signal, or caveat.
 
 ## 1. The dead-man rule (the only daily check)
-**No message by 08:00 Amsterdam = the box is down.** The daily letter's absence IS the
+**No message by 08:00 Amsterdam = the desk is down.** The daily letter's absence IS the
 alarm — the letter is produced 7 days a week (full letter on US market days, a two-line
 pulse Sun/Mon), so silence is loud. If nothing arrived:
 
-    ssh the box
     systemctl status 'agentcy-*'
     journalctl -u agentcy-daily -u agentcy-bot --since -1d
 
@@ -75,7 +74,7 @@ alert — it never tight-loops. To recover: fix or delete the file, then
     systemctl reset-failed agentcy-event
 
 ## 5. Restore drill (standalone, also step 1 above)
-Latest backup is under `/var/lib/stock-agentcy/backups` and mirrored to
+Latest backup is under `$AGENTCY_HOME/backups` and mirrored to
 `/mnt/agentcy-backup`. Open it read-only, run `PRAGMA integrity_check` (expect `ok`),
 sanity-check row counts, and confirm the toolchain artifacts (uv binary, wheelhouse,
 python-build-standalone tarball) exist and hash-match — a year-8 rebuild on a fresh
