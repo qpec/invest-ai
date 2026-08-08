@@ -235,6 +235,27 @@ and its whole lane deleted.) The desk runs on a machine the owner already owns:
 - The agent runtime is a subscription CLI (Claude Code / OpenClaw / Codex) logged in
   interactively — see `deploy/local/AGENT-RUNTIME.md`.
 
+## Branches — there is one
+
+**`main` is the only long-lived branch.** Everything is on it: the code, the decision
+journal, the seed universe (`data/universe.csv`) and the built site (`docs/`), which is
+what GitHub Pages serves. Feature branches are merged and then deleted; nothing else is
+expected to persist.
+
+The repo briefly carried five extra branches, all artefacts of the retired DigitalOcean
+box, and they are the reason this section exists:
+
+| Branch | What it was | Fate |
+|---|---|---|
+| `bot/seed` | bootstrap data the box fetched at first boot — it held the ONLY copy of the 7,033-name universe | migrated to `data/universe.csv`, then retired |
+| `bot/deploy-log` | a `status.txt` the box wrote on first boot | retired |
+| `bot/site` | the box's publish target — which Pages never served | retired; Pages serves `main/docs` |
+| `claude/*` | merged feature branches nobody deleted | retired |
+
+If you are about to create a branch that outlives a pull request, don't: put the thing on
+`main`, or accept that in six months nobody will know whether it holds the only copy of
+something. That is exactly what happened with `bot/seed`.
+
 ## Repo map
 
 | Path | What lives there |
