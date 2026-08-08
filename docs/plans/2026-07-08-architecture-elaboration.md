@@ -292,7 +292,7 @@ Daily returns **in local currency** (a common EUR/USD factor must not fuse all U
 
 ### E.6 FR13 benchmark (approved 2026-07-08)
 
-**S&P 500 Total Return, measured in EUR** (`^SP500TR` × daily USDEUR; portfolio series likewise EUR). Rationale: (1) **PFIC reality** — under the owner's tax residency, UCITS trackers are punitively taxed; the realistic passive counterfactual is a US-domiciled fund; (2) opportunity-set match — the book is predominantly USD US large-cap; (3) EUR on both sides keeps FX out of the process comparison. Documented alternative: VT (US-domiciled total-world) in EUR. One benchmark only; config change requires a journaled reason.
+**S&P 500 Total Return, measured in EUR** (`^SP500TR` × daily USDEUR; portfolio series likewise EUR). Rationale: (1) **pass-through fund tax reality** — under the owner's tax residency, UCITS trackers are punitively taxed; the realistic passive counterfactual is a US-domiciled fund; (2) opportunity-set match — the book is predominantly USD US large-cap; (3) EUR on both sides keeps FX out of the process comparison. Documented alternative: VT (US-domiciled total-world) in EUR. One benchmark only; config change requires a journaled reason.
 
 ---
 

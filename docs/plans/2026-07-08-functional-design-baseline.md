@@ -111,7 +111,7 @@ See `docs/research/2026-07-03-repo-evaluations.md` for evidence and verdicts.
 ## Open items (carried forward)
 
 1. ~~**Balance targets**~~ — **Resolved 2026-07-08:** defaults approved (cash 5–15%, position 15%/20% soft/hard, cluster 40%, N_eff ≥ 4.0, 10–15 positions, outside-framework cap 10%, opportunity discount 20%, 7-day alert window). See elaboration doc §E.3.
-2. ~~**Benchmark choice for FR13**~~ — **Resolved 2026-07-08:** S&P 500 Total Return measured in EUR (PFIC rules make UCITS trackers punitive under the owner's tax residency; US-domiciled fund is the honest counterfactual). See elaboration doc §E.6.
+2. ~~**Benchmark choice for FR13**~~ — **Resolved 2026-07-08:** S&P 500 Total Return measured in EUR (pass-through fund rules make UCITS trackers punitive under the owner's tax residency; US-domiciled fund is the honest counterfactual). See elaboration doc §E.6.
 3. **eToro API verification** — portfolio read access, auth model, rate limits; requires a real account key. The elaboration's source-agnostic snapshot contract (§E.1) makes this a swap-in, not a blocker.
 4. ~~**Detailed architecture elaboration**~~ — **Resolved 2026-07-08:** `docs/plans/2026-07-08-architecture-elaboration.md` (components A–H incl. the new Scout component, trigger taxonomy, loop specs, output formats, gap resolutions).
 5. **Technology/runtime choice** — deliberately parked until the functional design is agreed (owner steer, 2026-07-03). Next open design step.
