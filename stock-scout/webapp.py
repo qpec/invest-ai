@@ -236,6 +236,20 @@ PUBLIC_THESIS_FIELDS = (
     "ten_year_statement", "bear_case", "sources",
 )
 
+# The figures a card must carry to be judged against the constitution, in reading order
+# (owner-directed 2026-08-08: "I also want market cap and other essentials in there").
+# Deliberately six, and deliberately these six: size, then the price anchor, then one
+# metric per pillar the framework actually argues from — returns on capital and cash
+# margin for "wonderful business", growth for the compounding case, and leverage because
+# it is the Hell-No filter's first item. Everything else stays one click down in the
+# drill-down; a card that shows 26 metrics communicates none of them.
+CARD_METRICS = (
+    ("roic_pct", "ROIC", "%"),
+    ("owner_fcf_margin_pct", "FCF margin", "%"),
+    ("revenue_growth_pct", "Rev growth", "%/yr"),
+    ("net_debt_to_ebitda", "Net debt/EBITDA", "x"),
+)
+
 
 def _finite_number(value) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -416,6 +430,14 @@ def public_thesis_reader(draft: dict, row: dict, detail: dict,
                     "explanation": quality_explanation},
         "risk": {"verdict": row.get("verdict"), "leading_fragility": leading},
         "tier": row.get("tier"),
+        "sector": row.get("sec") or "",
+        "evidence": row.get("ev"),
+        "market_cap": _finite_number(row.get("mc")),
+        "key_metrics": [
+            {"key": key, "label": label, "unit": unit,
+             "value": _finite_number((row.get("reg") or {}).get(key))}
+            for key, label, unit in CARD_METRICS
+        ],
         "pass_recommended": bool(draft.get("pass_recommended")),
         "thesis": public_body,
         "summary_html": draft.get("summary_html") or "",
@@ -550,10 +572,11 @@ def assemble(*, sec_data: str, prices_dir: str | None, universe: str, as_of: str
     scored = {row["symbol"]: row for row in scoring.score_universe(bundles)}
 
     pick_set = {r["symbol"] for r in picks.shortlist(rows)}
-    # market_cap and price ride along so top_symbols can apply the desk eligibility
-    # floor (thesis.DESK_MIN_MARKET_CAP / DESK_MIN_PRICE — 2026-08-08 review, V-6).
+    # The inversion result, market cap and price ride along so top_symbols can apply the
+    # constitution's order itself: Munger's veto BEFORE the Buffett dossier (owner-
+    # directed 2026-08-08), then the desk eligibility floor (review V-6).
     top_rows = thesis_mod.top_symbols(
-        [{"symbol": r["symbol"], "card": r["card"],
+        [{"symbol": r["symbol"], "card": r["card"], "inversion": r["inversion"],
           "market_cap": (bundle_by_symbol.get(r["symbol"]) or {}).get("market_cap"),
           "price": (bundle_by_symbol.get(r["symbol"]) or {}).get("price")}
          for r in rows], len(rows))
@@ -1064,6 +1087,19 @@ details.fold>.fbody{padding:2px 16px 14px;border-top:1px solid var(--hair)}
   font-weight:700;color:var(--accent)}
 .company-title{min-width:0}.company-title b{display:block;font-size:16px}.company-title span{color:var(--text2)}
 .card-judgements{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+/* The essentials strip: size first, then one metric per pillar the framework argues
+   from. Tabular figures so the column of numbers scans vertically. */
+.km-strip{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:6px;
+  border-top:1px solid var(--hair);border-bottom:1px solid var(--hair);padding:9px 0;margin:2px 0 4px}
+.km{min-width:0}
+.km label{display:block;color:var(--faint);font-size:9.5px;text-transform:uppercase;
+  letter-spacing:.04em;margin-bottom:3px;line-height:1.25;min-height:2.5em;
+  overflow-wrap:anywhere}
+.km b{font-size:13px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.km-context{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:6px}
+.km-chip{font-size:10px;color:var(--text2);background:var(--raised);
+  border:1px solid var(--hair);border-radius:4px;padding:1px 6px}
+@media(max-width:620px){.km-strip{grid-template-columns:repeat(3,minmax(0,1fr));row-gap:9px}}
 /* Verdict-conditional treatment (review U-1): a named failure mode outranks the score. */
 .thesis-flagged{border-color:var(--crit)}
 .risk-banner{border-left:3px solid var(--crit);background:var(--crit-bg);color:var(--text);
@@ -1133,6 +1169,10 @@ const fmtMc = v => {
     : a >= 1e9 ? '$' + (a / 1e9).toFixed(1) + 'B'
     : a >= 1e6 ? '$' + (a / 1e6).toFixed(0) + 'M' : '$' + Math.round(a));
 };
+/* One decimal below 100, none above: 34.2% and 1,240% both read at a glance, and
+   neither claims precision the noise floor denies. */
+const fmtNum = v => v == null ? '—'
+  : (Math.abs(v) < 100 ? v.toFixed(1) : Math.round(v).toLocaleString());
 const fmtV = (v, unit) => {
   if (v == null) return '—';
   if (unit && unit.startsWith('USD/share')) return '$' + v.toFixed(2);
@@ -1759,6 +1799,22 @@ function qualityScoreLabel(q){
   return `${Math.round(q.score)}/100`;
 }
 
+/* Market cap first because it is the one number that says what KIND of thing this is —
+   a $5B compounder and a $300M microcap are not the same decision. Then the four
+   pillar metrics. A missing value renders as an em dash and says so; it never renders
+   as zero. */
+function keyMetricStrip(reader){
+  const cells = [
+    `<div class="km"><label>Market cap</label><b>${reader.market_cap == null ? '—' : fmtMc(reader.market_cap)}</b></div>`,
+  ].concat((reader.key_metrics || []).map(m =>
+    `<div class="km"><label>${esc(m.label)}</label><b>${m.value == null ? '—'
+      : esc(fmtNum(m.value)) + (m.unit === 'x' ? '×' : m.unit === '%/yr' ? '%/yr' : '%')}</b></div>`));
+  const context = [reader.sector, reader.evidence ? reader.evidence + ' evidence' : '']
+    .filter(Boolean).map(t => `<span class="km-chip">${esc(t)}</span>`).join('');
+  return `<div class="km-strip">${cells.join('')}</div>`
+    + (context ? `<div class="km-context">${context}</div>` : '');
+}
+
 function thesisCard(reader){
   const th = reader.thesis || {}, lens = reader.valuation_lens || {};
   const q = reader.quality || {}, verdict = reader.risk.verdict || 'Unknown';
@@ -1773,6 +1829,7 @@ function thesisCard(reader){
     ${flagged ? `<div class="risk-banner">${esc(verdict)} — fails the picks shortlist&#39;s fragility tests. Research draft, not a candidate.</div>` : ''}
     ${reader.pass_recommended ? '<div class="risk-banner">Names no durable moat — PASS recommended under Pillar 1.</div>' : ''}
     <p class="ts">${esc(th.business_model || '')}</p>
+    ${keyMetricStrip(reader)}
     <div class="card-judgements">
       <div class="judgement"><label>Business quality</label>
         <b${flagged ? ' class="muted-score"' : ''}>${esc(qualityScoreLabel(q))}</b><br>
@@ -1845,6 +1902,7 @@ function openThesisReader(symbol, push = true){
       <h1>${esc(reader.name)}</h1></div></div>
       ${isFlagged(reader) ? `<div class="risk-banner">${esc(reader.risk.verdict)} — fails the picks shortlist&#39;s fragility tests. This is a research draft; read it for the bear case.</div>` : ''}
       ${reader.pass_recommended ? '<div class="risk-banner">Names no durable moat — PASS recommended under Pillar 1.</div>' : ''}
+      ${keyMetricStrip(reader)}
       <div class="glance" aria-label="At a glance"><div class="judgement"><label>What is it?</label>${esc(th.business_model || '')}</div>
       <div class="judgement"><label>How strong is the business?</label><b>${esc(reader.quality.grade || 'Unknown')} · ${esc(qualityScoreLabel(reader.quality))}</b><p class="ts">${esc(reader.quality.explanation || '')}</p></div>
       <div class="judgement"><label>How can it hurt you?</label><b>${esc(reader.risk.verdict || 'Unknown')}</b><p class="ts">${esc(reader.risk.leading_fragility || ((reader.risk.verdict || 'Unknown') === 'Unknown' ? 'Could not be certified — a fact about the evidence, not about safety.' : ''))}</p></div>

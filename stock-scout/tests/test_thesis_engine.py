@@ -956,3 +956,60 @@ class TestProductionThesisFreshness:
             ("REFRESHED", "INPUTS_CHANGED")
         assert thesis.evaluation_decision("a", "a", True) == \
             ("REFRESHED", "RESEARCH_STALE")
+
+
+class TestMungerGatesTheDeskFeed:
+    """Owner-directed 2026-08-08: "omitted or munger vetos should not be a thesis."
+
+    The constitution's order is circle -> Hell-No -> Buffett dossier. Before this, the
+    desk feed ranked on the scorecard alone, so names the inversion layer had already
+    named a failure mode for still consumed work orders.
+    """
+
+    CARD = {"pct": 95, "band": "Exceptional", "evidence": "full",
+            "score": 95, "available_max": 100}
+
+    def _row(self, symbol, verdict, severe=0, caution=0):
+        return {"symbol": symbol, "card": dict(self.CARD),
+                "inversion": {"verdict": verdict,
+                              "coverage": {"severe": severe, "caution": caution}}}
+
+    def test_ruinous_and_fragile_names_never_reach_the_feed(self):
+        rows = [
+            self._row("GOOD", "Ordinary"),
+            self._row("RUIN", "Ruinous", severe=3),
+            self._row("FRAG", "Fragile", severe=2),
+            self._row("ROBUST", "Robust"),
+        ]
+        chosen = [r["symbol"] for r in thesis.top_symbols(rows, 400)]
+        assert "RUIN" not in chosen and "FRAG" not in chosen
+        assert "GOOD" in chosen and "ROBUST" in chosen
+
+    def test_one_severe_probe_is_enough_to_refuse_even_inside_ordinary(self):
+        """The calibrated ladder puts a single severe finding inside Ordinary. A named
+        way to lose money must not reach a thesis just because the ladder is lenient."""
+        rows = [self._row("KEEP", "Ordinary", severe=0),
+                self._row("NAMED", "Ordinary", severe=1)]
+        chosen = [r["symbol"] for r in thesis.top_symbols(rows, 400)]
+        assert chosen == ["KEEP"]
+
+    def test_unknown_is_not_a_veto(self):
+        """Unknown means the layer could not certify — a fact about the evidence, not a
+        named failure mode. It still has to clear every other gate."""
+        rows = [self._row("UNK", "Unknown")]
+        assert [r["symbol"] for r in thesis.top_symbols(rows, 400)] == ["UNK"]
+
+    def test_a_row_without_an_inversion_result_is_not_excluded(self):
+        """Absence of evidence is not a veto — 'refuse, never guess' cuts both ways."""
+        rows = [{"symbol": "NOINV", "card": dict(self.CARD)}]
+        assert [r["symbol"] for r in thesis.top_symbols(rows, 400)] == ["NOINV"]
+
+    def test_the_gate_runs_before_the_rank_is_taken(self):
+        """A refused name must not consume one of the 1% slots: the survivors backfill
+        it, rather than the feed coming back one short."""
+        rows = [self._row("RUIN", "Ruinous", severe=3),      # would rank first
+                self._row("A", "Ordinary"), self._row("B", "Ordinary")]
+        rows[0]["card"]["pct"] = 99
+        chosen = [r["symbol"] for r in thesis.top_symbols(rows, 100)]   # 1 slot
+        assert chosen == ["A"] or chosen == ["B"]
+        assert "RUIN" not in chosen

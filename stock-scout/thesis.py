@@ -37,6 +37,7 @@ from pathlib import Path
 
 import deskwork
 import inversion
+import picks
 import scorecard
 import scoring
 
@@ -531,15 +532,51 @@ def _clears_desk_floor(row: dict) -> bool:
     return True
 
 
+def _survives_inversion(row: dict) -> bool:
+    """Munger's layer as a GATE on the desk feed (owner-directed 2026-08-08: "omitted or
+    munger vetos should not be a thesis").
+
+    The same two tests `picks.shortlist` applies, and it takes both on purpose: asking
+    only "is the verdict good?" lets a name through carrying one severe finding, because
+    the calibrated ladder puts a single severe probe inside Ordinary — and a named way to
+    lose money is exactly what must not reach a thesis. Asking only "no severe probe?"
+    lets through a name carrying four separate cautions, which the ladder calls Fragile
+    precisely because that is clear ways this breaks you.
+
+    A row with no inversion result is NOT excluded: absence of evidence is not a veto,
+    and the constitution's refusal rule ("refuse, never guess") cuts both ways. Such a
+    name still has to clear every other gate.
+    """
+    inv = row.get("inversion")
+    if not isinstance(inv, dict):
+        return True
+    if inv.get("verdict") in picks.SHORTLIST_EXCLUDE_VERDICTS:
+        return False
+    coverage = inv.get("coverage") or {}
+    return coverage.get("severe", 0) <= picks.SHORTLIST_MAX_SEVERE
+
+
 def top_symbols(rows: list[dict], universe_size: int) -> list[dict]:
-    """The best 1% of the screened universe: scoreable names above the desk's
-    eligibility floor, ranked the scorecard's own way (evidence tier first, then
-    percentage). Names under the floor stay scored and visible on the site — they just
-    do not consume the desk's work orders (2026-08-08 valuation review, V-6)."""
+    """The best 1% of the screened universe: scoreable names that survive Munger's layer
+    and clear the desk's eligibility floor, ranked the scorecard's own way (evidence tier
+    first, then percentage).
+
+    The order here IS the constitution's order — the Hell-No filter runs BEFORE the
+    Buffett dossier. A vetoed band, a named failure mode or a sub-floor listing never
+    becomes a thesis; those names stay scored and visible on the site (and in
+    `picks.strong_but_fragile`, which is where a highly-rated fragile name belongs), they
+    simply do not consume the desk's research budget.
+
+    Note for anyone changing this: the set of names this returns feeds `rank`, which is
+    material to `research_fingerprint`. Narrowing or widening it re-ranks the survivors,
+    so existing drafts re-record once as INPUTS_CHANGED. That is the intended cost of a
+    ratified policy change, not a bug.
+    """
     import math
     scoreable = [r for r in rows if r["card"].get("pct") is not None
                  and r["card"]["band"] not in (scorecard.VETOED_BAND,
                                                scorecard.NO_PRICE_BAND)
+                 and _survives_inversion(r)
                  and _clears_desk_floor(r)]
     count = max(1, math.ceil(universe_size * TOP_FRACTION))
     return sorted(scoreable, key=lambda r: scorecard.rank_key(r["card"]))[:count]

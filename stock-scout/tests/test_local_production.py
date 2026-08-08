@@ -205,3 +205,94 @@ def test_evaluate_theses_runs_missing_draft_then_reuses_unchanged_acceptance(
     assert second["reason_code"] == "INPUTS_UNCHANGED"
     assert prepared == []
     assert executed == []
+
+
+def _promoted_price_run(conn, *, bar_date, close, scheduled_for, split_ratio=None):
+    """One promoted price-refresh run carrying a single bar for AAA.
+
+    Deliberately one bar: `market_prices._append_frame` retains only the newest bar of
+    the fetched frame plus split events, so this is exactly what production sees.
+    """
+    run_id = db.append_market_price_run(conn, {
+        "scheduled_for": scheduled_for, "attempt": 1,
+        "started_at": f"{scheduled_for}T00:00:00Z", "status": "RUNNING",
+        "selected_count": 1,
+    })
+    db.append_market_price_observation(conn, {
+        "refresh_run_id": run_id, "security_key": "AAA", "provider": "yahoo",
+        "provider_symbol": "AAA", "bar_date": bar_date, "raw_close": close,
+        "adjusted_close": close, "dividend": 0.0, "split_ratio": split_ratio,
+        "currency": "USD", "fetched_at": f"{scheduled_for}T00:00:01Z",
+        "payload_hash": f"hash-{bar_date}",
+    })
+    db.finish_market_price_run(
+        conn, run_id, finished_at=f"{scheduled_for}T00:00:02Z", status="SUCCEEDED",
+        ok_count=1, terminal_count=0, failed_count=0, promoted=True)
+    conn.commit()
+    return run_id
+
+
+def test_price_grid_export_extends_history_instead_of_replacing_it(tmp_path):
+    """2026-08-08 regression. The export used to write the promoted bar over the grid
+    file, leaving a ONE-BAR history. inversion.probe_price_drawdown needs 52 weekly bars
+    and is a REQUIRED probe, so an unmeasurable one collapses every verdict to Unknown —
+    and the grid also looked frozen, because each run replaced it rather than extending
+    it. The grid file IS the history; the export appends to it."""
+    conn = db.open_db(tmp_path / "state")
+    db.migrate(conn)
+    grid = tmp_path / "prices"
+    grid.mkdir()
+    # A seeded history, as prices.py refresh would leave it.
+    (grid / "AAA.json").write_text(json.dumps({
+        "symbol": "AAA",
+        "bars": {"2026-07-27": {"close": 90.0, "adj_close": 90.0},
+                 "2026-08-03": {"close": 95.0, "adj_close": 95.0}},
+        "splits": {"2026-07-27": 2.0},
+        "source": "yahoo", "price_basis": "raw",
+    }), encoding="utf-8")
+
+    _promoted_price_run(conn, bar_date="2026-08-10", close=100.0,
+                        scheduled_for="2026-08-10")
+    assert local_production.export_price_grid(conn, grid) == 1
+
+    payload = json.loads((grid / "AAA.json").read_text(encoding="utf-8"))
+    assert sorted(payload["bars"]) == ["2026-07-27", "2026-08-03", "2026-08-10"]
+    assert payload["bars"]["2026-08-10"]["adj_close"] == 100.0
+    assert payload["bars"]["2026-07-27"]["adj_close"] == 90.0   # history survives
+    assert payload["splits"] == {"2026-07-27": 2.0}             # and so do splits
+
+
+def test_price_grid_export_is_idempotent_and_accumulates_across_runs(tmp_path):
+    conn = db.open_db(tmp_path / "state")
+    db.migrate(conn)
+    grid = tmp_path / "prices"
+
+    _promoted_price_run(conn, bar_date="2026-08-10", close=100.0,
+                        scheduled_for="2026-08-10")
+    local_production.export_price_grid(conn, grid)
+    local_production.export_price_grid(conn, grid)          # same run twice
+    payload = json.loads((grid / "AAA.json").read_text(encoding="utf-8"))
+    assert sorted(payload["bars"]) == ["2026-08-10"]
+
+    # A later promoted run adds its bar rather than replacing the previous one.
+    _promoted_price_run(conn, bar_date="2026-08-17", close=110.0,
+                        scheduled_for="2026-08-17", split_ratio=3.0)
+    local_production.export_price_grid(conn, grid)
+    payload = json.loads((grid / "AAA.json").read_text(encoding="utf-8"))
+    assert sorted(payload["bars"]) == ["2026-08-10", "2026-08-17"]
+    assert payload["splits"] == {"2026-08-17": 3.0}
+
+
+def test_price_grid_export_survives_a_corrupt_grid_file(tmp_path):
+    """A half-written grid file must not abort the run: the export rebuilds from the
+    promoted bar rather than raising."""
+    conn = db.open_db(tmp_path / "state")
+    db.migrate(conn)
+    grid = tmp_path / "prices"
+    grid.mkdir()
+    (grid / "AAA.json").write_text("{not json", encoding="utf-8")
+    _promoted_price_run(conn, bar_date="2026-08-10", close=100.0,
+                        scheduled_for="2026-08-10")
+    assert local_production.export_price_grid(conn, grid) == 1
+    payload = json.loads((grid / "AAA.json").read_text(encoding="utf-8"))
+    assert sorted(payload["bars"]) == ["2026-08-10"]

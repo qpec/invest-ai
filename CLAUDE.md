@@ -70,6 +70,29 @@ SCOUT_PRODUCTION_ENV=~/config/invest-ai-production.env \
   deploy/local/scout-production.sh manual
 ```
 
+## Shipping a change — the published site is part of "done"
+
+**Every change that can alter what the site shows must end with the site republished.**
+Code merged but not published is a lie on a public page: the desk keeps serving the last
+build, so a fixed bug still reads as broken and a new metric silently does not exist. A
+change is not done at the commit, it is done when `bot/site` carries it.
+
+```bash
+# after committing a change that touches scoring, the desk loop, or the UI:
+SCOUT_PRODUCTION_ENV=~/config/invest-ai-production.env \
+  deploy/local/scout-production.sh manual      # rebuilds and pushes bot/site
+```
+
+That one command is the whole ritual: it runs the six stages, validates, and pushes the
+built site to `bot/site`, which GitHub Pages serves. It needs the real data (SEC export,
+enrich cache, price grid, theses) — so it runs on the owner's machine, and an agent
+working in a container **cannot** complete this step. When you are that agent: say so
+explicitly in your hand-off rather than leaving the site stale and unmentioned.
+
+Publishing is skipped only when a change provably cannot reach the page — a test-only
+edit, a comment, a doc. If you are unsure, republish; it is idempotent and a no-op when
+the output is unchanged.
+
 ## The invariants — break these and the system is wrong, not just broken
 
 These are enforced by tests. If a change makes one of them false, the change is wrong.
@@ -106,6 +129,12 @@ These are enforced by tests. If a change makes one of them false, the change is 
     the last known good snapshot untouched.
 11. **Ratification is human and CLI-only.** A browser button is the wrong door for the
     one irreversible step.
+12. **Munger gates the desk feed.** A vetoed band, a Fragile/Ruinous verdict or any
+    severe probe means the name never becomes a thesis — the Hell-No filter runs BEFORE
+    the Buffett dossier, in `thesis.top_symbols`, not as a label afterwards. `Unknown` is
+    not a veto: it means the layer could not certify, which is a fact about the evidence.
+13. **The published site tracks the code.** A change that can alter the page is not done
+    until `bot/site` is republished — see "Shipping a change" above.
 
 ---
 

@@ -36,24 +36,46 @@ class LocalProductionConfig:
 
 
 def export_price_grid(conn: sqlite3.Connection, directory: Path) -> int:
+    """Merge the promoted current bar into each symbol's price grid file.
+
+    MERGE, never replace (2026-08-08). `market_price_observation` is a price EVIDENCE
+    ledger, not a price history: `market_prices._append_frame` deliberately retains only
+    the newest bar of the fetched frame plus split events, and `v_current_market_price`
+    then exposes exactly one row per security. Writing that straight over the grid file
+    left every symbol with a ONE-BAR history — and the inversion layer needs 52 weekly
+    bars before `price_drawdown` can measure anything. `price_drawdown` is one of the two
+    REQUIRED probes, so an unmeasurable one collapses the verdict to Unknown: measured on
+    the sample universe, every name went Robust/Ordinary -> Unknown. It also made the
+    grid look frozen, because each run overwrote the file with a single bar instead of
+    extending it.
+
+    The grid file is therefore the history and this function appends to it. Seeding the
+    history is a separate job (`prices.py refresh`); this keeps it current and growing.
+    """
     directory.mkdir(parents=True, exist_ok=True)
     count = 0
     for row in conn.execute(
         "SELECT provider_symbol, bar_date, raw_close, adjusted_close, split_ratio,"
         " provider FROM v_current_market_price ORDER BY provider_symbol"
     ):
-        payload = {
-            "symbol": row["provider_symbol"],
-            "bars": {row["bar_date"]: {
-                "close": float(row["raw_close"]),
-                "adj_close": float(row["adjusted_close"]),
-            }},
-            "splits": ({row["bar_date"]: float(row["split_ratio"])}
-                       if row["split_ratio"] else {}),
-            "source": row["provider"],
-            "price_basis": "raw",
-        }
         target = directory / f"{row['provider_symbol']}.json"
+        payload = {"symbol": row["provider_symbol"], "bars": {}, "splits": {},
+                   "source": row["provider"], "price_basis": "raw"}
+        if target.exists():
+            try:
+                existing = json.loads(target.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                existing = {}
+            if isinstance(existing.get("bars"), dict):
+                payload["bars"] = dict(existing["bars"])
+            if isinstance(existing.get("splits"), dict):
+                payload["splits"] = dict(existing["splits"])
+        payload["bars"][row["bar_date"]] = {
+            "close": float(row["raw_close"]),
+            "adj_close": float(row["adjusted_close"]),
+        }
+        if row["split_ratio"]:
+            payload["splits"][row["bar_date"]] = float(row["split_ratio"])
         temporary = target.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
         temporary.replace(target)
