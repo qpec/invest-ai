@@ -2,6 +2,24 @@
 
 The system runs itself. This page is for the four things a human ever does.
 
+## Public Top 48 thesis reader
+
+Section 2 of the GitHub Pages site presents every accepted Top 1% thesis as a
+plain-English company card. The visible **View assessment & thesis** action opens a
+focused reader. Direct links use `#thesis/<SYMBOL>` and browser Back returns to the
+previous search, filters, and list position. Top 48 rows in Scout expose the same action.
+
+The production build downloads decorative company images from the generic Financial
+Modeling Prep ticker-image endpoint into the local company-logo cache. `webapp.py`
+copies validated images into `docs/data/logos/`; the public browser never contacts the
+provider. Invalid, unavailable, oversized, or corrupt images render as deterministic
+initials tiles and do not block publication.
+
+Reader integrity is fail-closed. Publication requires one accepted reader per Top 48
+member, unique symbols and ranks, all required assessment sections, local-only logo
+paths, and the existing public-field privacy allowlist. Logo availability alone remains
+non-blocking.
+
 ## 1. The dead-man rule (the only daily check)
 **No message by 08:00 Amsterdam = the box is down.** The daily letter's absence IS the
 alarm — the letter is produced 7 days a week (full letter on US market days, a two-line
