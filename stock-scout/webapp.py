@@ -968,6 +968,13 @@ details.fold>.fbody{padding:2px 16px 14px;border-top:1px solid var(--hair)}
   font-weight:700;color:var(--accent)}
 .company-title{min-width:0}.company-title b{display:block;font-size:16px}.company-title span{color:var(--text2)}
 .card-judgements{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.valuation-summary{border-left:3px solid var(--accent);background:var(--accent-tint)}
+.valuation-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;
+  margin:12px 0}.valuation-metric{background:var(--raised);padding:12px;border-radius:8px;
+  overflow-wrap:anywhere}.valuation-metric label{display:block;color:var(--faint);font-size:10px;
+  text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px}.valuation-metric b{font-size:17px}
+.valuation-caveat{border-left:3px solid var(--warn);padding:9px 12px;background:var(--warn-bg);
+  border-radius:0 8px 8px 0}
 .judgement{background:var(--raised);border-radius:8px;padding:9px;overflow-wrap:anywhere}.judgement label{display:block;
   color:var(--faint);font-size:10px;text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px}
 .thesis-cta{width:100%;justify-content:center;min-height:42px;background:var(--accent);color:#fff;
@@ -981,7 +988,7 @@ details.fold>.fbody{padding:2px 16px 14px;border-top:1px solid var(--hair)}
   padding:0;font-size:10px;cursor:pointer;text-decoration:underline}
 @media(max-width:900px){.thesis-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:620px){.thesis-grid{grid-template-columns:1fr}.glance{grid-template-columns:1fr}
-  .reader-section,.reader-hero{padding:15px}}
+  .reader-section,.reader-hero{padding:15px}.valuation-metrics{grid-template-columns:1fr}}
 .empty{padding:34px 16px;text-align:center;color:var(--text2);font-size:13px}
 .empty b{display:block;font-size:15px;color:var(--text);margin-bottom:6px}
 .cmd{background:var(--raised);border:1px solid var(--hair);border-radius:8px;
@@ -1632,7 +1639,7 @@ function renderThesisIndex(){
   $('#thesisReader').style.display = 'none';
   $('#thesisResultCount').textContent = `${readers.length} of ${thesisReaders().length} companies`;
   $('#thesisGrid').innerHTML = readers.map(reader => {
-    const th = reader.thesis || {}, valuation = th.valuation_anchor || {};
+    const th = reader.thesis || {}, valuation = th.valuation_anchor || {}, lens = reader.valuation_lens || {};
     return `<article class="thesis-card" data-thesis-symbol="${esc(reader.symbol)}">
       <div class="company-head">${companyMark(reader)}<div class="company-title">
         <b>#${reader.rank} · ${esc(reader.name)}</b><span>${esc(reader.symbol)}</span></div></div>
@@ -1644,7 +1651,11 @@ function renderThesisIndex(){
         <div class="judgement"><label>Downside risk</label>
           ${pill(reader.risk.verdict || 'Unknown', VERDICT_CLS[reader.risk.verdict])}</div>
       </div>
-      <div class="judgement"><label>Valuation anchor</label>${esc(valuation.statement || 'No reliable anchor')}</div>
+      <div class="judgement valuation-summary"><label>Current price</label>
+        <b>${lens.price == null ? 'Unavailable' : '$' + Number(lens.price).toFixed(2)}</b>
+        <span class="ts"> · ${esc(lens.price_as_of || 'date unavailable')}</span>
+        <p class="ts"><b>${esc(lens.signal || 'Valuation context unavailable')}</b></p>
+        <p class="ts">Owner cash yield ${lens.owner_cash_yield_pct == null ? '—' : esc(lens.owner_cash_yield_pct) + '%'} · ${lens.percentile == null ? '—' : esc(lens.percentile) + 'th percentile'} in ${esc(lens.comparison_label || 'the measured universe')}</p></div>
       <button class="thesis-cta" data-thesis-symbol="${esc(reader.symbol)}">View assessment &amp; thesis</button>
     </article>`;
   }).join('') || '<div class="empty"><b>No companies match these filters</b>Clear one or more filters.</div>';
@@ -1666,7 +1677,8 @@ function openThesisReader(symbol, push = true){
   state.thesisScroll = window.scrollY;
   state.thesisOpen = symbol;
   setTab('thesis', false);
-  const th = reader.thesis || {}, moat = th.moat || {}, valuation = th.valuation_anchor || {};
+  const th = reader.thesis || {}, moat = th.moat || {}, valuation = th.valuation_anchor || {},
+    lens = reader.valuation_lens || {};
   $('#thesisIndex').style.display = 'none';
   const host = $('#thesisReader'); host.style.display = '';
   host.innerHTML = `<div class="thesis-reader">
@@ -1677,13 +1689,22 @@ function openThesisReader(symbol, push = true){
       <div class="glance" aria-label="At a glance"><div class="judgement"><label>What is it?</label>${esc(th.business_model || '')}</div>
       <div class="judgement"><label>How strong is the business?</label><b>${esc(reader.quality.grade || 'Unknown')} · ${esc(reader.quality.score ?? '—')}/100</b><p class="ts">${esc(reader.quality.explanation || '')}</p></div>
       <div class="judgement"><label>How can it hurt you?</label><b>${esc(reader.risk.verdict || 'Unknown')}</b><p class="ts">${esc(reader.risk.leading_fragility || '')}</p></div>
-      <div class="judgement"><label>What does valuation imply?</label>${esc(valuation.statement || '')}</div></div></header>
+      <div class="judgement"><label>What does valuation imply?</label><b>${esc(lens.signal || 'Unavailable')}</b><p class="ts">${esc(valuation.statement || '')}</p></div></div></header>
     <section class="card reader-section prose"><h2>The case in one minute</h2>${reader.summary_html || '<p>No summary available.</p>'}</section>
     <section class="card reader-section"><h2>Why might this be a strong business?</h2><p>${esc(th.business_model || '')}</p>
       <h3>${esc((moat.kind || 'Potential moat').replaceAll('_', ' '))}</h3><ul>${(moat.evidence || []).map(item => `<li>${esc(item)}</li>`).join('')}</ul>
       ${th.ten_year_statement ? `<p>${esc(th.ten_year_statement)}</p>` : ''}</section>
     <section class="card reader-section"><h2>What do the cash economics say?</h2><p>${esc(th.owner_earnings_picture || 'The available filings do not support a reliable conclusion.')}</p></section>
-    <section class="card reader-section"><h2>What does the valuation imply?</h2><p>${esc(valuation.statement || '')}</p></section>
+    <section class="card reader-section"><h2>What does the valuation imply?</h2><h3>Valuation context</h3>
+      <p><b>${esc(lens.signal || 'Valuation context unavailable')}</b></p>
+      <div class="valuation-metrics">
+        <div class="valuation-metric"><label>Current price</label><b>${lens.price == null ? '—' : '$' + Number(lens.price).toFixed(2)}</b><p class="ts">Quote dated ${esc(lens.price_as_of || 'unavailable')}</p></div>
+        <div class="valuation-metric"><label>Owner cash yield</label><b>${lens.owner_cash_yield_pct == null ? '—' : esc(lens.owner_cash_yield_pct) + '%'}</b><p class="ts">Equivalent to roughly ${lens.owner_cash_multiple_x == null ? '—' : esc(lens.owner_cash_multiple_x) + '×'} current owner cash flow</p></div>
+        <div class="valuation-metric"><label>Relative position</label><b>${lens.percentile == null ? '—' : esc(lens.percentile) + 'th percentile'}</b><p class="ts">Among ${esc(lens.comparison_count ?? '—')} companies in the ${esc(lens.comparison_label || 'measured Scout universe')}</p></div>
+      </div>
+      <p>${esc(valuation.statement || '')}</p>
+      <p class="valuation-caveat"><b>What could distort this signal?</b><br>${esc(lens.caveat || 'Current owner cash flow may not represent normal earning power.')}</p>
+      <p class="ts">Relative valuation context only; current cash flow may not be normal.</p></section>
     <section class="card reader-section"><h2>What could go wrong?</h2><p>${esc(th.bear_case || '')}</p></section>
     <section class="card reader-section"><h2>What would change the thesis?</h2>${(reader.triggers || []).map(watchItem).join('') || '<p>No monitor conditions recorded.</p>'}</section>
     <details class="card reader-section"><summary><b>Sources and full research</b></summary>

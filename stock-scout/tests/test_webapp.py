@@ -276,6 +276,14 @@ class TestSite:
                 "symbol": "AAA", "name": "Alpha", "rank": 1, "logo": None,
                 "quality": {"score": 90, "grade": "Exceptional", "explanation": "Strong."},
                 "risk": {"verdict": "Ordinary", "leading_fragility": "Competition."},
+                "valuation_lens": {
+                    "price": 25.5, "price_as_of": "2026-08-06",
+                    "owner_cash_yield_pct": 8.0, "owner_cash_multiple_x": 12.5,
+                    "comparison_scope": "sector", "comparison_label": "IT sector",
+                    "comparison_count": 42, "percentile": 83,
+                    "signal": "Appears inexpensive on current owner cash flow",
+                    "caveat": "Demand can fall.",
+                },
                 "thesis": {"business_model": "Makes widgets.",
                            "valuation_anchor": {"statement": "Yield anchor."},
                            "bear_case": "Demand can fall.", "triggers": []},
@@ -368,6 +376,18 @@ class TestSite:
         assert "function openThesisReader" in page
         assert "function closeThesisReader" in page
         assert "#thesis/" in page
+
+    def test_valuation_lens_card_and_reader_contract(self, tmp_path):
+        page = webapp.write_site(self._model(), tmp_path).read_text(encoding="utf-8")
+        for text in (
+            "Current price", "Owner cash yield", "current owner cash flow",
+            "comparison_label", "comparison_count", "Valuation context",
+            "Relative valuation context only; current cash flow may not be normal.",
+        ):
+            assert text in page
+        assert "owner_cash_multiple_x" in page
+        assert "price_as_of" in page
+        assert "buy recommendation" not in page.lower()
 
     def test_closed_scout_panel_cannot_expand_the_mobile_page(self, tmp_path):
         webapp.write_site(self._model(), tmp_path)
