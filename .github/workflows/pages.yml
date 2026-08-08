@@ -1,6 +1,13 @@
 # MANUAL FALLBACK ONLY. The site deploys via GitHub's classic branch mode:
-# Settings -> Pages -> Source: "Deploy from a branch" -> bot/site, /docs.
-# The local production run pushes bot/site and GitHub publishes it directly —
+# Settings -> Pages -> Source: "Deploy from a branch".
+# VERIFIED 2026-08-08: this repo serves **main /docs**, not bot/site. The comment
+# here claimed bot/site for months while Pages served main, so every production
+# run published to a branch nobody read and the public page silently went stale.
+# deploy/local/scout-production.sh now reads SCOUT_SITE_URL back after pushing and
+# fails if the live page is not serving the snapshot it just published, so the two
+# can never drift apart again unnoticed. Keep SCOUT_SITE_BRANCH equal to whatever
+# Settings -> Pages says.
+# The local production run pushes that branch and GitHub publishes it directly —
 # no Actions run, no github-pages environment branch policy to reject the
 # push (which is exactly how the Actions-based deploy kept failing: the
 # auto-created environment only allowed the default branch). This workflow

@@ -59,3 +59,45 @@ def test_production_wrapper_requires_and_passes_thesis_runner():
     assert '--thesis-model "${SCOUT_THESIS_MODEL:-gpt-5.6-sol}"' in wrapper
     assert "SCOUT_THESIS_RUNNER=" in environment
     assert "SCOUT_THESIS_MODEL=gpt-5.6-sol" in environment
+
+
+def test_publication_is_verified_against_the_live_page():
+    """2026-08-08 incident. The publisher targeted bot/site while GitHub Pages served
+    main/docs, so every run "succeeded" while the public page went months stale —
+    nothing in the pipeline ever looked at the site, so nothing could notice.
+
+    A push proves bytes left the machine; only reading the page back proves
+    publication. The run must fetch SCOUT_SITE_URL, look for the snapshot id it just
+    built, and refuse to record the publication if it cannot see it — which catches the
+    branch mismatch and every other fail-open mode (Pages off, stuck deploy, stale CDN).
+    """
+    text = read("deploy/local/scout-production.sh")
+    assert "SCOUT_SITE_URL" in text
+    assert "snapshot_id" in text                       # what it looks for
+    assert "curl" in text and "grep -qF" in text       # how it looks
+    assert "PUBLISH VERIFICATION FAILED" in text
+
+    # The check must GATE mark-published: recording a publication the world cannot see
+    # is exactly the failure this exists to prevent.
+    assert text.index("PUBLISH VERIFICATION FAILED") < text.index("mark-published")
+    # ...and it must be able to fail the run, not merely warn.
+    verify = text[text.index("PUBLISH VERIFICATION FAILED"):text.index("mark-published")]
+    assert "exit 1" in verify
+
+
+def test_the_site_url_is_required_configuration():
+    """An unset URL must stop the run at the top, not silently skip verification."""
+    text = read("deploy/local/scout-production.sh")
+    assert ': "${SCOUT_SITE_URL:?' in text
+    environment = read("deploy/local/scout-production.env.example")
+    assert "SCOUT_SITE_URL=" in environment
+    assert "SCOUT_SITE_BRANCH=" in environment
+
+
+def test_the_publish_branch_matches_what_pages_serves():
+    """The example config and the workflow comment must agree on the served branch.
+    They disagreed for months, which is what caused the incident."""
+    environment = read("deploy/local/scout-production.env.example")
+    assert "SCOUT_SITE_BRANCH=main" in environment
+    workflow = read(".github/workflows/pages.yml")
+    assert "main /docs" in workflow and "not bot/site" in workflow

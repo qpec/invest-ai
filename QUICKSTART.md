@@ -167,8 +167,10 @@ its daily and weekly timers. The run takes a `flock`, so two runs can never
 overlap; each writes an atomic artifact under the artifact root, and a failed
 run leaves the last known good snapshot untouched.
 
-GitHub stays the publishing seam only: the built site is pushed to `bot/site`
-(GitHub Pages). Rollback is an ordinary revert on that branch.
+GitHub stays the publishing seam only: the built site is pushed to the branch
+GitHub Pages serves (today `main`, folder `/docs`), and the run then reads the
+live page back — a push is not a publication, and the run fails if the page is
+not serving the snapshot it just built. Rollback is an ordinary revert.
 
 ## 7. The two surfaces
 

@@ -75,19 +75,40 @@ SCOUT_PRODUCTION_ENV=~/config/invest-ai-production.env \
 **Every change that can alter what the site shows must end with the site republished.**
 Code merged but not published is a lie on a public page: the desk keeps serving the last
 build, so a fixed bug still reads as broken and a new metric silently does not exist. A
-change is not done at the commit, it is done when `bot/site` carries it.
+change is not done at the commit, it is done when the live page carries it.
 
 ```bash
 # after committing a change that touches scoring, the desk loop, or the UI:
 SCOUT_PRODUCTION_ENV=~/config/invest-ai-production.env \
-  deploy/local/scout-production.sh manual      # rebuilds and pushes bot/site
+  deploy/local/scout-production.sh manual      # rebuild, publish, verify live
 ```
 
-That one command is the whole ritual: it runs the six stages, validates, and pushes the
-built site to `bot/site`, which GitHub Pages serves. It needs the real data (SEC export,
-enrich cache, price grid, theses) — so it runs on the owner's machine, and an agent
-working in a container **cannot** complete this step. When you are that agent: say so
-explicitly in your hand-off rather than leaving the site stale and unmentioned.
+That one command is the whole ritual: it runs the six stages, validates, pushes the built
+site to the branch GitHub Pages serves, **and then reads the live page back to prove the
+publication happened.** It needs the real data (SEC export, enrich cache, price grid,
+theses), so it runs on the owner's machine.
+
+**Publication is the page, not the push** (learned the hard way, 2026-08-08). The
+publisher targeted `bot/site` while Pages was actually serving `main/docs`: every run
+reported success, and the public page silently went months out of date. Nothing in the
+pipeline could catch it, because nothing ever looked at the site. So:
+
+- `SCOUT_SITE_BRANCH` must equal whatever *Settings → Pages → Source* says. Today that
+  is **`main`, folder `/docs`** — verified by fetching the live page and finding it
+  byte-identical to `main:docs/index.html`.
+- `SCOUT_SITE_URL` is required config, and after pushing the run polls it for the
+  `snapshot_id` it just built. If the live page does not serve that snapshot, the run
+  **fails** and does not record a publication. This catches the branch mismatch and every
+  other way publishing fails open — Pages disabled, a stuck deploy, a stale CDN.
+- If you ever move the Pages source, change `SCOUT_SITE_BRANCH` in the same commit. The
+  verification will tell you immediately if you forget, which is the point.
+
+An agent working in a container cannot run the full cycle (no real data). It *can*
+re-render an existing published snapshot through the current renderer when only the
+template changed — same data, same `snapshot_id`, new projections — but it must never
+approximate a figure the pipeline would compute from source bundles (that is
+"refuse, never guess"). When you are that agent and cannot publish: say so explicitly in
+your hand-off rather than leaving the site stale and unmentioned.
 
 Publishing is skipped only when a change provably cannot reach the page — a test-only
 edit, a comment, a doc. If you are unsure, republish; it is idempotent and a no-op when
@@ -133,8 +154,10 @@ These are enforced by tests. If a change makes one of them false, the change is 
     severe probe means the name never becomes a thesis — the Hell-No filter runs BEFORE
     the Buffett dossier, in `thesis.top_symbols`, not as a label afterwards. `Unknown` is
     not a veto: it means the layer could not certify, which is a fact about the evidence.
-13. **The published site tracks the code.** A change that can alter the page is not done
-    until `bot/site` is republished — see "Shipping a change" above.
+13. **The published site tracks the code, and publication is verified.** A change that
+    can alter the page is not done until the live page serves it. The production run
+    reads `SCOUT_SITE_URL` back and fails if it is not serving the snapshot just built —
+    a push is not a publication. See "Shipping a change" above.
 
 ---
 
@@ -206,8 +229,9 @@ and its whole lane deleted.) The desk runs on a machine the owner already owns:
   takes a `flock` so runs can never overlap, writes a run-scoped artifact, and only then
   publishes.
 - Unattended via `deploy/systemd/scout-production@.service` + daily/weekly timers.
-- **GitHub is only a publishing seam:** the built site is pushed to the `bot/site`
-  branch (GitHub Pages). Rollback is an ordinary revert on that branch.
+- **GitHub is only a publishing seam:** the built site is pushed to the branch Pages
+  serves (today `main`, folder `/docs` — see "Shipping a change"), and the run then
+  verifies the live page. Rollback is an ordinary revert on that branch.
 - The agent runtime is a subscription CLI (Claude Code / OpenClaw / Codex) logged in
   interactively — see `deploy/local/AGENT-RUNTIME.md`.
 

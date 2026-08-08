@@ -84,7 +84,7 @@ production dashboard. One fail-atomic job owns the complete snapshot:
 flowchart LR
     L["Local control plane<br/>refresh · score · top 1% · theses · monitor"]
     V["Release gates<br/>one snapshot · privacy · data quality"]
-    G["bot/site<br/>static public projection"]
+    G["published branch (main /docs)<br/>static public projection"]
     P["GitHub Pages<br/>production dashboard"]
     L --> V --> G --> P
 ```
@@ -121,7 +121,7 @@ SCOUT_PRODUCTION_ENV=/home/openclaw/config/invest-ai-production.env \
 ```
 
 Install `deploy/systemd/scout-production@.service` with its daily and weekly
-timers after the first validated publication. Rollback is a normal revert on `bot/site`; the local append-only run
+timers after the first validated publication. Rollback is a normal revert on the published branch; the local append-only run
 history remains intact. Paid data providers are documented as inactive options
 in [the completeness research](docs/research/2026-08-07-paid-data-completeness-options.md).
 
