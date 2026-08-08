@@ -795,8 +795,8 @@ table.data tbody tr.open{background:var(--accent-tint);
 .panel{position:fixed;top:0;right:0;bottom:0;width:min(480px,100vw);z-index:50;
   background:var(--surface);border-left:1px solid var(--border);
   transform:translateX(102%);transition:transform .15s ease;display:flex;
-  flex-direction:column;box-shadow:-12px 0 32px rgba(0,0,0,.18)}
-.panel.open{transform:none}
+  flex-direction:column;box-shadow:-12px 0 32px rgba(0,0,0,.18);visibility:hidden}
+.panel.open{transform:none;visibility:visible}
 .panel .phd{display:flex;gap:10px;align-items:center;padding:14px 16px;
   border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--surface)}
 .panel .phd .tick{font-size:16px}
