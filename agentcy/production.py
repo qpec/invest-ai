@@ -89,6 +89,34 @@ def _reader_logos_local(readers: list[dict[str, Any]]) -> bool:
     return True
 
 
+def _reader_valuations_complete(readers: list[dict[str, Any]]) -> bool:
+    for reader in readers:
+        lens = reader.get("valuation_lens") or {}
+        price = lens.get("price")
+        yield_pct = lens.get("owner_cash_yield_pct")
+        multiple = lens.get("owner_cash_multiple_x")
+        percentile = lens.get("percentile")
+        count = lens.get("comparison_count")
+        if not (isinstance(price, (int, float)) and not isinstance(price, bool)
+                and math.isfinite(price) and price > 0
+                and isinstance(yield_pct, (int, float)) and not isinstance(yield_pct, bool)
+                and math.isfinite(yield_pct) and yield_pct > 0
+                and isinstance(multiple, (int, float)) and not isinstance(multiple, bool)
+                and math.isfinite(multiple) and multiple > 0
+                and isinstance(percentile, int) and not isinstance(percentile, bool)
+                and 0 <= percentile <= 100
+                and isinstance(count, int) and not isinstance(count, bool) and count > 0
+                and lens.get("comparison_scope") in {"sector", "universe"}
+                and isinstance(lens.get("price_as_of"), str)
+                and re.fullmatch(r"\d{4}-\d{2}-\d{2}", lens["price_as_of"])
+                and isinstance(lens.get("comparison_label"), str)
+                and lens["comparison_label"].strip()
+                and isinstance(lens.get("signal"), str) and lens["signal"].strip()
+                and isinstance(lens.get("caveat"), str) and lens["caveat"].strip()):
+            return False
+    return True
+
+
 def validate_release(value: ReleaseInput) -> ReleaseResult:
     expected_top = max(1, math.ceil(value.eligible * 0.01)) if value.eligible else 0
     readers = _public_readers(value.public_model)
@@ -104,6 +132,7 @@ def validate_release(value: ReleaseInput) -> ReleaseResult:
         "top_thesis_reader_routes_unique": _reader_routes_unique(readers),
         "top_thesis_reader_sections_complete": _reader_sections_complete(readers),
         "top_thesis_reader_logos_local": _reader_logos_local(readers),
+        "top_thesis_reader_valuations_complete": _reader_valuations_complete(readers),
     }
     failed = tuple(name for name, passed in checks.items() if not passed)
     return ReleaseResult(passed=not failed, checks=checks, failed=failed)

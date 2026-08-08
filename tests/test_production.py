@@ -12,6 +12,14 @@ def valid_readers():
                    "valuation_anchor": {"statement": "V"}, "triggers": []},
         "quality": {"score": 90, "grade": "Exceptional"},
         "risk": {"verdict": "Ordinary", "leading_fragility": "F"},
+        "valuation_lens": {
+            "price": 25.5, "price_as_of": "2026-08-06",
+            "owner_cash_yield_pct": 8.0, "owner_cash_multiple_x": 12.5,
+            "comparison_scope": "sector", "comparison_label": "IT sector",
+            "comparison_count": 42, "percentile": 83,
+            "signal": "Appears inexpensive on current owner cash flow",
+            "caveat": "Cash flow may normalize.",
+        },
         "summary_html": "<p>S</p>", "report_html": "<p>R</p>",
         "triggers": [],
     }
@@ -83,6 +91,32 @@ def test_release_rejects_invalid_public_reader_model(mutation, check):
     result = production.validate_release(valid_release(public_model=model))
 
     assert not result.checks[check]
+
+
+@pytest.mark.parametrize("field", [
+    "price", "price_as_of", "owner_cash_yield_pct", "owner_cash_multiple_x",
+    "comparison_scope", "comparison_label", "comparison_count", "percentile",
+    "signal", "caveat",
+])
+def test_release_rejects_incomplete_reader_valuation(field):
+    readers = valid_readers()
+    readers[0]["valuation_lens"] = dict(readers[0]["valuation_lens"])
+    readers[0]["valuation_lens"].pop(field)
+    model = {"portfolio_monitor": [], "thesis": {"readers": readers}}
+    result = production.validate_release(valid_release(public_model=model))
+    assert not result.checks["top_thesis_reader_valuations_complete"]
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("price", 0), ("owner_cash_yield_pct", 0), ("percentile", 101),
+    ("comparison_count", 0), ("comparison_scope", "peers"),
+])
+def test_release_rejects_invalid_reader_valuation(field, value):
+    readers = valid_readers()
+    readers[0]["valuation_lens"] = dict(readers[0]["valuation_lens"], **{field: value})
+    model = {"portfolio_monitor": [], "thesis": {"readers": readers}}
+    result = production.validate_release(valid_release(public_model=model))
+    assert not result.checks["top_thesis_reader_valuations_complete"]
 
 
 @pytest.mark.parametrize("field", sorted(production.PRIVATE_FIELDS))
