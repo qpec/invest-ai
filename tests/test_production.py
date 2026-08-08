@@ -5,6 +5,20 @@ import pytest
 from agentcy import production
 
 
+def valid_readers():
+    base = {
+        "logo": None,
+        "thesis": {"business_model": "A", "bear_case": "B",
+                   "valuation_anchor": {"statement": "V"}, "triggers": []},
+        "quality": {"score": 90, "grade": "Exceptional"},
+        "risk": {"verdict": "Ordinary", "leading_fragility": "F"},
+        "summary_html": "<p>S</p>", "report_html": "<p>R</p>",
+        "triggers": [],
+    }
+    return [dict(base, symbol="AAA", rank=1),
+            dict(base, symbol="BBB", rank=2, logo="data/logos/BBB.png")]
+
+
 def valid_release(**overrides):
     values = dict(
         snapshot_id="snap-1",
@@ -13,7 +27,8 @@ def valid_release(**overrides):
         committed_symbols=frozenset({"AAA"}),
         monitored_symbols=frozenset({"AAA"}),
         component_snapshot_ids=frozenset({"snap-1"}),
-        public_model={"portfolio_monitor": [{"symbol": "AAA"}]},
+        public_model={"portfolio_monitor": [{"symbol": "AAA"}],
+                      "thesis": {"readers": valid_readers()}},
         index_exists=True,
         manifest_exists=True,
         data_quality_passed=True,
@@ -26,7 +41,7 @@ def valid_release(**overrides):
 def test_validate_requires_exact_top_fraction():
     result = production.validate_release(valid_release(top_members=1))
     assert not result.passed
-    assert result.failed == ("top_fraction_exact",)
+    assert not result.checks["top_fraction_exact"]
 
 
 def test_validate_requires_monitor_result_for_every_committed_thesis():
@@ -44,6 +59,30 @@ def test_validate_rejects_failed_top_thesis_evaluation():
     result = production.validate_release(valid_release(
         thesis_evaluations_passed=False))
     assert not result.checks["thesis_evaluations_passed"]
+
+
+@pytest.mark.parametrize("mutation,check", [
+    ("missing_reader", "top_thesis_readers_complete"),
+    ("duplicate_rank", "top_thesis_reader_routes_unique"),
+    ("missing_section", "top_thesis_reader_sections_complete"),
+    ("external_logo", "top_thesis_reader_logos_local"),
+])
+def test_release_rejects_invalid_public_reader_model(mutation, check):
+    readers = valid_readers()
+    if mutation == "missing_reader":
+        readers.pop()
+    elif mutation == "duplicate_rank":
+        readers[1]["rank"] = 1
+    elif mutation == "missing_section":
+        readers[1]["thesis"] = dict(readers[1]["thesis"])
+        readers[1]["thesis"].pop("bear_case")
+    elif mutation == "external_logo":
+        readers[1]["logo"] = "https://example.com/logo.png"
+    model = {"portfolio_monitor": [], "thesis": {"readers": readers}}
+
+    result = production.validate_release(valid_release(public_model=model))
+
+    assert not result.checks[check]
 
 
 @pytest.mark.parametrize("field", sorted(production.PRIVATE_FIELDS))

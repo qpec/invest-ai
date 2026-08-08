@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,8 +49,49 @@ def _contains_private_field(value: Any) -> bool:
     return False
 
 
+def _public_readers(model: dict[str, Any]) -> list[dict[str, Any]]:
+    readers = (model.get("thesis") or {}).get("readers") or []
+    return readers if isinstance(readers, list) else []
+
+
+def _reader_routes_unique(readers: list[dict[str, Any]]) -> bool:
+    symbols = [reader.get("symbol") for reader in readers]
+    ranks = [reader.get("rank") for reader in readers]
+    return (all(isinstance(symbol, str) and
+                re.fullmatch(r"[A-Z0-9.-]{1,15}", symbol) for symbol in symbols)
+            and len(symbols) == len(set(symbols))
+            and all(isinstance(rank, int) for rank in ranks)
+            and set(ranks) == set(range(1, len(readers) + 1)))
+
+
+def _reader_sections_complete(readers: list[dict[str, Any]]) -> bool:
+    for reader in readers:
+        thesis = reader.get("thesis") or {}
+        quality = reader.get("quality") or {}
+        risk = reader.get("risk") or {}
+        if not (thesis.get("business_model") and thesis.get("bear_case")
+                and (thesis.get("valuation_anchor") or {}).get("statement")
+                and quality.get("grade") and risk.get("verdict")
+                and "summary_html" in reader and "report_html" in reader
+                and isinstance(reader.get("triggers"), list)):
+            return False
+    return True
+
+
+def _reader_logos_local(readers: list[dict[str, Any]]) -> bool:
+    for reader in readers:
+        logo = reader.get("logo")
+        if logo is None:
+            continue
+        if (not isinstance(logo, str) or not logo.startswith("data/logos/")
+                or ".." in Path(logo).parts or "://" in logo):
+            return False
+    return True
+
+
 def validate_release(value: ReleaseInput) -> ReleaseResult:
     expected_top = max(1, math.ceil(value.eligible * 0.01)) if value.eligible else 0
+    readers = _public_readers(value.public_model)
     checks = {
         "top_fraction_exact": value.top_members == expected_top,
         "all_committed_monitored": value.committed_symbols == value.monitored_symbols,
@@ -58,6 +100,10 @@ def validate_release(value: ReleaseInput) -> ReleaseResult:
         "site_complete": value.index_exists and value.manifest_exists,
         "data_quality_passed": value.data_quality_passed,
         "thesis_evaluations_passed": value.thesis_evaluations_passed,
+        "top_thesis_readers_complete": len(readers) == value.top_members,
+        "top_thesis_reader_routes_unique": _reader_routes_unique(readers),
+        "top_thesis_reader_sections_complete": _reader_sections_complete(readers),
+        "top_thesis_reader_logos_local": _reader_logos_local(readers),
     }
     failed = tuple(name for name, passed in checks.items() if not passed)
     return ReleaseResult(passed=not failed, checks=checks, failed=failed)
