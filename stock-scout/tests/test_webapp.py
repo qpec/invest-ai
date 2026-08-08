@@ -304,8 +304,8 @@ class TestSite:
     def test_closed_scout_panel_cannot_expand_the_mobile_page(self, tmp_path):
         webapp.write_site(self._model(), tmp_path)
         page = (tmp_path / "index.html").read_text(encoding="utf-8")
-        assert "visibility:hidden" in page
-        assert ".panel.open{transform:none;visibility:visible}" in page
+        assert "transition:transform .15s ease;display:none" in page
+        assert ".panel.open{transform:none;display:flex}" in page
         assert 'aria-live="polite"' in page
 
     def test_scout_top_rows_expose_thesis_action_only_for_candidates(self, tmp_path):
