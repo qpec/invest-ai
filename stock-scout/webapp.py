@@ -872,6 +872,35 @@ details.fold>.fbody{padding:2px 16px 14px;border-top:1px solid var(--hair)}
 .trig .dtrack{flex:1;min-width:90px;max-width:260px;height:6px;background:var(--raised);
   border-radius:3px;overflow:hidden}
 .trig .dfill{height:100%;border-radius:3px}
+.thesis-tools{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 0 16px}
+.thesis-tools input,.thesis-tools select{min-height:42px;border:1px solid var(--border);
+  border-radius:8px;background:var(--surface);color:var(--text);padding:8px 11px}
+.thesis-tools input{flex:1;min-width:220px}
+.thesis-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.thesis-card{border:1px solid var(--border);border-radius:12px;background:var(--surface);
+  padding:16px;display:flex;flex-direction:column;gap:12px;box-shadow:var(--shadow)}
+.thesis-card:focus-within{outline:3px solid var(--accent-tint);border-color:var(--accent)}
+.company-head{display:flex;gap:11px;align-items:center}
+.company-logo,.company-initials{width:44px;height:44px;border-radius:10px;flex:0 0 44px;
+  object-fit:contain;background:var(--raised);border:1px solid var(--hair)}
+.company-initials{display:flex;align-items:center;justify-content:center;font-family:var(--mono);
+  font-weight:700;color:var(--accent)}
+.company-title{min-width:0}.company-title b{display:block;font-size:16px}.company-title span{color:var(--text2)}
+.card-judgements{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.judgement{background:var(--raised);border-radius:8px;padding:9px}.judgement label{display:block;
+  color:var(--faint);font-size:10px;text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px}
+.thesis-cta{width:100%;justify-content:center;min-height:42px;background:var(--accent);color:#fff;
+  border:0;border-radius:8px;font-weight:650;cursor:pointer}
+.thesis-reader{max-width:820px;margin:0 auto}.reader-back{position:sticky;top:8px;z-index:20;
+  min-height:42px;margin-bottom:12px}.reader-hero{padding:20px}.reader-hero h1{margin:5px 0}
+.glance{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:16px}
+.reader-section{padding:20px;margin-top:12px}.reader-section h2{font-size:20px;margin:0 0 10px}
+.watch-item{border-left:3px solid var(--warn);padding:8px 12px;margin:8px 0;background:var(--raised)}
+.scout-thesis{display:block;margin-top:4px;border:0;background:none;color:var(--accent);
+  padding:0;font-size:10px;cursor:pointer;text-decoration:underline}
+@media(max-width:900px){.thesis-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:620px){.thesis-grid{grid-template-columns:1fr}.glance{grid-template-columns:1fr}
+  .reader-section,.reader-hero{padding:15px}}
 .empty{padding:34px 16px;text-align:center;color:var(--text2);font-size:13px}
 .empty b{display:block;font-size:15px;color:var(--text);margin-bottom:6px}
 .cmd{background:var(--raised);border:1px solid var(--hair);border-radius:8px;
@@ -944,7 +973,8 @@ const srcBadge = src => src == null ? '' :
 
 /* ---------- state ---------- */
 const state = {tab:'scout', q:'', sec:new Set(), band:new Set(), verdict:new Set(),
-  ev:new Set(), picksOnly:false, minPct:0, sort:{col:'rk', dir:1}, open:null, view:[]};
+  ev:new Set(), picksOnly:false, minPct:0, sort:{col:'rk', dir:1}, open:null, view:[],
+  thesisOpen:null, thesisQuery:'', thesisQuality:'', thesisRisk:'', thesisScroll:0};
 const detailCache = Object.assign({}, S.details);
 
 /* ---------- filtering + sorting ---------- */
@@ -986,7 +1016,7 @@ function renderRows(reset){
     Math.max(0, (state.view.length - start - slice.length) * ROWH) + 'px';
   $('#tbody').innerHTML = slice.map(r => `
     <tr data-s="${esc(r.s)}" class="${state.open === r.s ? 'open' : ''}" tabindex="0">
-      <td class="tick">${esc(r.s)}${r.pick ? ' <span class="pill p-good" title="passes the shortlist rules: top-two band, zero severe findings, verdict not Fragile/Ruinous">pick</span>' : ''}${r.top ? ` <span class="pill p-acc" title="top 1% by scorecard rank — thesis desk candidate">#${r.top}</span>` : ''}</td>
+      <td class="tick">${esc(r.s)}${r.pick ? ' <span class="pill p-good" title="passes the shortlist rules: top-two band, zero severe findings, verdict not Fragile/Ruinous">pick</span>' : ''}${r.top ? ` <span class="pill p-acc" title="top 1% by scorecard rank — thesis desk candidate">#${r.top}</span><button class="scout-thesis" data-thesis-symbol="${esc(r.s)}">View assessment & thesis</button>` : ''}</td>
       <td class="nm hide-m">${esc(r.n)}</td>
       <td class="hide-m">${esc(r.sec || '—')}</td>
       <td class="r num">${fmtMc(r.mc)}</td>
@@ -1501,66 +1531,102 @@ function trigCard(t){
     ${t.question ? `<p class="ts" style="color:var(--faint)">Q: ${esc(t.question)}</p>` : ''}
   </div>`;
 }
-function renderThesisTab(){
-  const deskHost = $('#thesisDesk');
-  if (deskHost){
-    deskHost.innerHTML = deskBlock([
-      {id: 'thesis-batch', label: '✎ Draft the top 1%',
-       hint: 'work orders for every top-1% name without one'},
-      {id: 'rebuild', label: '⟳ Rebuild site', hint: 'regenerate this page from disk'},
-    ], `A batch writes one work order per name; your agent executes them and
-        <code>record</code> refuses anything it cannot validate.`);
-    bindDeskActions(deskHost);
-  }
-  const host = $('#thesisTop tbody');
-  host.innerHTML = S.thesis.top.map(t => `
-    <tr data-s="${esc(t.sym)}" tabindex="0">
-      <td class="r num">#${t.rank}</td><td class="tick">${esc(t.sym)}</td>
-      <td class="nm">${esc(t.name)}</td>
-      <td>${t.pct != null ? `<span class="num">${t.pct}%</span> ` : ''}${pill(t.band, BAND_CLS[t.band])}</td>
-      <td>${t.status === 'draft accepted' ? pill('draft accepted — awaits the Gate', 'p-good')
-        : t.status === 'draft refused' ? pill('draft refused by record', 'p-crit')
-        : pill('no work order yet', 'p-ghost')}</td>
-    </tr>`).join('');
-  $$('#thesisTop tbody tr').forEach(tr => tr.onclick = () => openPanel(tr.dataset.s));
-  const host2 = $('#draftHost');
-  host2.innerHTML = S.thesis.drafts.map(d => {
-    const th = d.thesis || {};
-    const moat = th.moat || {};
-    const agent = d.agent || {};
-    return `<div class="card">
-      <div class="hd"><h2>Draft thesis — ${esc(d.symbol)}</h2>
-        ${pill(d.accepted ? 'accepted by record' : 'refused', d.accepted ? 'p-good' : 'p-crit')}
-        ${agent.id ? pill('written by ' + agent.id + (agent.provenance === 'observed' ? ' · verified from the harness' : ' · declared'), 'p-acc') : ''}
-        <span class="muted">built ${esc(d.built_at || '')} · a draft carries no conviction and no buy call — those are the owner's at the Gate (FR9)</span>
+const thesisReaders = () => S.thesis.readers || [];
+const readerBySymbol = symbol => thesisReaders().find(r => r.symbol === symbol);
+const initials = reader => (reader.name || reader.symbol).split(/\s+/).slice(0, 2)
+  .map(word => word[0] || '').join('').toUpperCase();
+const companyMark = reader => reader.logo
+  ? `<img class="company-logo" src="${esc(reader.logo)}" alt="" loading="lazy">`
+  : `<span class="company-initials" aria-hidden="true">${esc(initials(reader))}</span>`;
+
+function renderThesisIndex(){
+  state.thesisOpen = null;
+  const q = state.thesisQuery.trim().toUpperCase();
+  const readers = thesisReaders().filter(reader =>
+    (!q || reader.symbol.toUpperCase().includes(q)
+      || reader.name.toUpperCase().includes(q))
+    && (!state.thesisQuality || reader.quality.grade === state.thesisQuality)
+    && (!state.thesisRisk || reader.risk.verdict === state.thesisRisk));
+  $('#thesisIndex').style.display = '';
+  $('#thesisReader').style.display = 'none';
+  $('#thesisResultCount').textContent = `${readers.length} of ${thesisReaders().length} companies`;
+  $('#thesisGrid').innerHTML = readers.map(reader => {
+    const th = reader.thesis || {}, valuation = th.valuation_anchor || {};
+    return `<article class="thesis-card" data-thesis-symbol="${esc(reader.symbol)}">
+      <div class="company-head">${companyMark(reader)}<div class="company-title">
+        <b>#${reader.rank} · ${esc(reader.name)}</b><span>${esc(reader.symbol)}</span></div></div>
+      <p class="ts">${esc(th.business_model || '')}</p>
+      <div class="card-judgements">
+        <div class="judgement"><label>Business quality</label>
+          <b>${reader.quality.score == null ? '—' : esc(reader.quality.score) + '/100'}</b><br>
+          ${pill(reader.quality.grade || 'Unknown', BAND_CLS[reader.quality.grade])}</div>
+        <div class="judgement"><label>Downside risk</label>
+          ${pill(reader.risk.verdict || 'Unknown', VERDICT_CLS[reader.risk.verdict])}</div>
       </div>
-      <div class="bd prose">
-        ${d.summary_html}
-        <h3>Business model</h3><p>${esc(th.business_model || '')}</p>
-        <h3>Moat — ${esc((moat.kind || '').replace('_', ' / '))}</h3>
-        <ul>${(moat.evidence || []).map(e => `<li>${md_inline(e)}</li>`).join('')}</ul>
-        <h3>Owner earnings</h3><p>${md_inline(th.owner_earnings_picture || '')}</p>
-        <h3>Valuation anchor — an observation, not a target</h3>
-        <blockquote>${esc((th.valuation_anchor || {}).statement || '')}</blockquote>
-        <h3>The 10-year test</h3><p>${esc(th.ten_year_statement || '')}</p>
-        <details class="fold"><summary>The bear case, in full</summary>
-          <div class="fbody prose"><p>${esc(th.bear_case || '')}</p></div></details>
-        <details class="fold"><summary>The extensive research report</summary>
-          <div class="fbody prose">${d.report_html}</div></details>
-        <h3>Pre-committed invalidation triggers (${(d.triggers || []).length})</h3>
-        ${(d.triggers || []).map(trigCard).join('')}
-        ${editBlock('thesis', d.symbol, JSON.stringify(th, null, 2), {
-          title: 'Edit this draft', code: true,
-          hint: 'validated on save — an untestable trigger is refused, conviction is the Gate\'s (FR9)'})}
-        <h3>Sources</h3>
-        <ul style="font-size:12px">${(th.sources || []).map(s =>
-          /^https?:\/\//.test(s)
-            ? `<li><a href="${esc(s)}" target="_blank" rel="noopener">${esc(s)}</a></li>`
-            : `<li>${esc(s)}</li>`).join('')}</ul>
-      </div></div>`;
-  }).join('') || `<div class="card"><div class="empty"><b>No drafts yet</b>
-      Run the batch below; each work order lands in theses/drafts/&lt;SYM&gt;/.</div></div>`;
-  bindEdits(host2);
+      <div class="judgement"><label>Valuation anchor</label>${esc(valuation.statement || 'No reliable anchor')}</div>
+      <button class="thesis-cta" data-thesis-symbol="${esc(reader.symbol)}">View assessment &amp; thesis</button>
+    </article>`;
+  }).join('') || '<div class="empty"><b>No companies match these filters</b>Clear one or more filters.</div>';
+  $$('#thesisGrid .thesis-cta').forEach(button =>
+    button.onclick = () => openThesisReader(button.dataset.thesisSymbol));
+}
+
+function watchItem(trigger){
+  const condition = trigger.kind === 'metric' && trigger.metric
+    ? `Watch ${REG_SHORT[trigger.metric] || trigger.metric}: review if it is ${esc(trigger.op)} ${fmtV(trigger.threshold, S.units[trigger.metric])}.`
+    : (trigger.question || trigger.statement || 'Watch for a material change.');
+  return `<div class="watch-item"><b>${trigger.action === 'break' ? 'Thesis-breaking signal' : 'Review signal'}</b>
+    <p class="ts">${esc(trigger.statement || '')}</p><p class="ts">${esc(condition)}</p></div>`;
+}
+
+function openThesisReader(symbol, push = true){
+  const reader = readerBySymbol(symbol);
+  if (!reader) return;
+  state.thesisScroll = window.scrollY;
+  state.thesisOpen = symbol;
+  setTab('thesis', false);
+  const th = reader.thesis || {}, moat = th.moat || {}, valuation = th.valuation_anchor || {};
+  $('#thesisIndex').style.display = 'none';
+  const host = $('#thesisReader'); host.style.display = '';
+  host.innerHTML = `<div class="thesis-reader">
+    <button class="btn reader-back" id="readerBack">← Back to Top 48</button>
+    <header class="card reader-hero"><div class="company-head">${companyMark(reader)}
+      <div class="company-title"><span>#${reader.rank} · ${esc(reader.symbol)}</span>
+      <h1>${esc(reader.name)}</h1></div></div>
+      <div class="glance" aria-label="At a glance"><div class="judgement"><label>What is it?</label>${esc(th.business_model || '')}</div>
+      <div class="judgement"><label>How strong is the business?</label><b>${esc(reader.quality.grade || 'Unknown')} · ${esc(reader.quality.score ?? '—')}/100</b><p class="ts">${esc(reader.quality.explanation || '')}</p></div>
+      <div class="judgement"><label>How can it hurt you?</label><b>${esc(reader.risk.verdict || 'Unknown')}</b><p class="ts">${esc(reader.risk.leading_fragility || '')}</p></div>
+      <div class="judgement"><label>What does valuation imply?</label>${esc(valuation.statement || '')}</div></div></header>
+    <section class="card reader-section prose"><h2>The case in one minute</h2>${reader.summary_html || '<p>No summary available.</p>'}</section>
+    <section class="card reader-section"><h2>Why might this be a strong business?</h2><p>${esc(th.business_model || '')}</p>
+      <h3>${esc((moat.kind || 'Potential moat').replaceAll('_', ' '))}</h3><ul>${(moat.evidence || []).map(item => `<li>${esc(item)}</li>`).join('')}</ul>
+      ${th.ten_year_statement ? `<p>${esc(th.ten_year_statement)}</p>` : ''}</section>
+    <section class="card reader-section"><h2>What do the cash economics say?</h2><p>${esc(th.owner_earnings_picture || 'The available filings do not support a reliable conclusion.')}</p></section>
+    <section class="card reader-section"><h2>What does the valuation imply?</h2><p>${esc(valuation.statement || '')}</p></section>
+    <section class="card reader-section"><h2>What could go wrong?</h2><p>${esc(th.bear_case || '')}</p></section>
+    <section class="card reader-section"><h2>What would change the thesis?</h2>${(reader.triggers || []).map(watchItem).join('') || '<p>No monitor conditions recorded.</p>'}</section>
+    <details class="card reader-section"><summary><b>Sources and full research</b></summary>
+      <div class="prose">${reader.report_html || ''}</div><ul>${(th.sources || []).map(source =>
+        /^https?:\/\//.test(source) ? `<li><a href="${esc(source)}" target="_blank" rel="noopener">${esc(source)}</a></li>` : `<li>${esc(source)}</li>`).join('')}</ul></details>
+  </div>`;
+  $('#readerBack').onclick = () => closeThesisReader();
+  if (push) location.hash = '#thesis/' + encodeURIComponent(symbol);
+  window.scrollTo(0, 0);
+}
+
+function closeThesisReader(push = true){
+  state.thesisOpen = null;
+  renderThesisIndex();
+  if (push) location.hash = '#thesis';
+  requestAnimationFrame(() => window.scrollTo(0, state.thesisScroll));
+}
+
+function renderThesisTab(){
+  renderThesisIndex();
+  $('#thesisSearch').value = state.thesisQuery;
+  $('#thesisSearch').oninput = event => { state.thesisQuery = event.target.value; renderThesisIndex(); };
+  $('#thesisQuality').onchange = event => { state.thesisQuality = event.target.value; renderThesisIndex(); };
+  $('#thesisRisk').onchange = event => { state.thesisRisk = event.target.value; renderThesisIndex(); };
 }
 const md_inline = s => {
   let out = esc(s);
@@ -1616,13 +1682,20 @@ function setTab(tab, push){
   state.tab = tab;
   $$('.step').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   $$('.tabpane').forEach(p => p.style.display = p.id === 'tab-' + tab ? '' : 'none');
-  if (push !== false) location.hash = '#' + tab + (state.open ? '/' + state.open : '');
+  if (push !== false) location.hash = tab === 'thesis' && state.thesisOpen
+    ? '#thesis/' + encodeURIComponent(state.thesisOpen)
+    : '#' + tab + (tab === 'scout' && state.open ? '/' + state.open : '');
 }
 function route(){
   const h = location.hash.replace(/^#/, '');
   const [tab, sym] = h.split('/');
   if (['scout', 'thesis', 'portfolio_monitor'].includes(tab)) setTab(tab, false);
-  if (sym && S.rows.some(r => r.s === sym)) {
+  if (tab === 'thesis' && sym && readerBySymbol(sym)) {
+    if (state.thesisOpen !== sym) openThesisReader(sym, false);
+    if (state.open) closePanel(false);
+  } else if (tab === 'thesis' && state.thesisOpen) {
+    closeThesisReader(false);
+  } else if (sym && S.rows.some(r => r.s === sym)) {
     if (state.open !== sym) openPanel(sym);   // re-entrancy guard: hash writes loop back here
   } else if (state.open) {
     closePanel(false);                        // browser Back with the panel open closes it
@@ -1700,6 +1773,8 @@ function boot(){
     $('#minPctOut').textContent = e.target.value; applyFilters(); });
   $('#tscroll').addEventListener('scroll', () => renderRows(false));
   $('#tbody').addEventListener('click', e => {
+    const thesis = e.target.closest('[data-thesis-symbol]');
+    if (thesis){ e.stopPropagation(); closePanel(false); openThesisReader(thesis.dataset.thesisSymbol); return; }
     const tr = e.target.closest('tr[data-s]');
     if (tr) openPanel(tr.dataset.s);
   });
@@ -1834,31 +1909,19 @@ TEMPLATE = """<!DOCTYPE html>
 
 <!-- ============ 2 · THESIS ============ -->
 <section class="tabpane" id="tab-thesis" style="display:none">
-  <p class="intro"><b>2 · The Thesis Desk turns the best 1% into written, testable
-  theses.</b> Every candidate gets a work order; an agent (Claude Code / OpenClaw)
-  researches it and writes a draft — business model, moat evidence, owner earnings, bear
-  case, and at least three <i>pre-committed invalidation triggers</i>. Python re-checks
-  every rule mechanically and refuses what it cannot verify. The draft then waits for the
-  owner at the Gate: conviction and the buy decision are never generated (FR9).</p>
-  <div id="thesisDesk"></div>
-  <div class="card">
-    <div class="hd"><h2>The three-beat seam</h2><span class="muted">no LLM API client anywhere — the agent harness IS the runtime</span></div>
-    <div class="beats">
-      <div class="beat"><span class="bn">1</span><h4>brief</h4><p><code>python thesis.py batch</code> writes a work order per candidate: the research packet (both judgements, unmerged), the framework, the trigger rules, the schema.</p></div>
-      <div class="beat"><span class="bn">2</span><h4>the agent researches</h4><p>Web research with its own tools, then writes <code>report.md</code>, <code>summary.md</code>, <code>thesis.json</code>. Trusted for research and prose — never for the contract.</p></div>
-      <div class="beat"><span class="bn">3</span><h4>record</h4><p><code>python thesis.py record</code> re-checks every rule mechanically — including <b>which model did the work</b> (best-available only, read from the harness, not asked of the agent) — and exits non-zero if it refuses.</p></div>
+  <div id="thesisIndex">
+    <p class="intro"><b>2 · 48 companies worth deeper research.</b> Each company has
+    a separate business-quality assessment, downside-risk verdict, valuation anchor and
+    evidence-led thesis. Open any card for the plain-English walkthrough.</p>
+    <div class="thesis-tools">
+      <input id="thesisSearch" type="search" placeholder="Search company or ticker" aria-label="Search the Top 48">
+      <select id="thesisQuality" aria-label="Filter by business quality"><option value="">All quality grades</option><option>Exceptional</option><option>Strong</option><option>Mixed</option><option>Weak</option><option>Pass</option></select>
+      <select id="thesisRisk" aria-label="Filter by downside risk"><option value="">All risk verdicts</option><option>Robust</option><option>Ordinary</option><option>Fragile</option><option>Ruinous</option><option>Unknown</option></select>
+      <span class="muted" id="thesisResultCount"></span>
     </div>
+    <div class="thesis-grid" id="thesisGrid"></div>
   </div>
-  <div class="card">
-    <div class="hd"><h2>The top 1%</h2><span class="muted">scorecard rank · the Scout's cut, refreshed each run</span></div>
-    <div class="tscroll" style="max-height:none">
-      <table class="data" id="thesisTop">
-        <thead><tr><th class="r">Rank</th><th>Ticker</th><th>Name</th><th>Scorecard</th><th>Thesis status</th></tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
-  </div>
-  <div id="draftHost"></div>
+  <div id="thesisReader" aria-live="polite" style="display:none"></div>
 </section>
 
 <!-- ============ 3 · MODEL PORTFOLIO + MONITOR ============ -->

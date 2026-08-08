@@ -257,6 +257,39 @@ class TestSite:
         assert '"logo":"data/logos/AAA.png"' in page
         assert "financialmodelingprep.com" not in page
 
+    def test_public_thesis_section_is_an_explicit_card_index(self, tmp_path):
+        page = webapp.write_site(self._model(), tmp_path).read_text(encoding="utf-8")
+
+        assert "48 companies worth deeper research" in page
+        assert 'id="thesisSearch"' in page
+        assert 'id="thesisGrid"' in page
+        assert "View assessment &amp; thesis" in page
+        assert 'data-thesis-symbol="${esc(reader.symbol)}"' in page
+        assert "thesisTop" not in page
+
+    def test_public_reader_contract_and_direct_route_are_present(self, tmp_path):
+        page = webapp.write_site(self._model(), tmp_path).read_text(encoding="utf-8")
+
+        for text in (
+            "Back to Top 48", "At a glance", "The case in one minute",
+            "Why might this be a strong business?",
+            "What do the cash economics say?", "What does the valuation imply?",
+            "What could go wrong?", "What would change the thesis?",
+            "Sources and full research",
+        ):
+            assert text in page
+        assert "function openThesisReader" in page
+        assert "function closeThesisReader" in page
+        assert "#thesis/" in page
+        assert 'aria-live="polite"' in page
+
+    def test_scout_top_rows_expose_thesis_action_only_for_candidates(self, tmp_path):
+        page = webapp.write_site(self._model(), tmp_path).read_text(encoding="utf-8")
+
+        assert "View assessment & thesis" in page
+        assert "r.top ?" in page
+        assert "openThesisReader(thesis.dataset.thesisSymbol)" in page
+
 
 class TestMoreReviewRegressions:
     def test_refused_draft_with_malformed_op_renders_not_crashes(self):
