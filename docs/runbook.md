@@ -31,11 +31,10 @@ Publication blocks when any Top 48 reader lacks a positive dated price, positive
 valid comparison, signal, or caveat.
 
 ## 1. The dead-man rule (the only daily check)
-**No message by 08:00 Amsterdam = the box is down.** The daily letter's absence IS the
+**No message by 08:00 Amsterdam = the desk is down.** The daily letter's absence IS the
 alarm — the letter is produced 7 days a week (full letter on US market days, a two-line
 pulse Sun/Mon), so silence is loud. If nothing arrived:
 
-    ssh the box
     systemctl status 'agentcy-*'
     journalctl -u agentcy-daily -u agentcy-bot --since -1d
 

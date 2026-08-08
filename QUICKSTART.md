@@ -6,7 +6,7 @@
 This gets you from clone to a running local desk in a few minutes, on a bundled
 sample dataset (13 well-known US filers, real as-filed SEC data). Every command
 below is tested against exactly this repo. The same pipeline scales to the full
-~1,900-name universe when you bring the full data; the always-on box deployment
+~1,900-name universe when you bring the full data; running it always-on, locally,
 is the last section.
 
 ## 0. What you need
@@ -178,6 +178,6 @@ GitHub stays the publishing seam only: the built site is pushed to `bot/site`
 | **Your desk** | your real data | live, token-gated | `webapp.py --serve` on loopback |
 
 Both come out of the same generator, so a UI change lands in both at once —
-`python webapp.py --demo …` builds the first, `--serve` runs the second. On the
-box the desk runs as `scout-desk.service` and you reach it with
-`ssh -N -L 8899:127.0.0.1:8899 root@<box>`.
+`python webapp.py --demo …` builds the first, `--serve` runs the second. The
+desk binds to loopback on the machine you run it on; open it there, or forward
+the port over SSH if you want it from another device.

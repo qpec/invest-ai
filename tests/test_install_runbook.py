@@ -66,7 +66,7 @@ RB = (ROOT / "docs" / "runbook.md").read_text(encoding="utf-8")
 
 
 def test_runbook_has_the_deadman_rule_verbatim():
-    assert "No message by 08:00" in RB and "the box is down" in RB
+    assert "No message by 08:00" in RB and "the desk is down" in RB
     assert "systemctl status 'agentcy-*'" in RB
 
 

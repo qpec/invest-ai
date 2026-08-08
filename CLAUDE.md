@@ -323,8 +323,10 @@ ETFs outside-framework by default; the daily letter carries no portfolio value.
 ## Testing
 
 Two suites, both green and both required: **888** in `stock-scout/tests/` (decision
-layer, desk loop, site) and **1110** in `tests/` (agentcy). Three tests skip on Windows
-(AF_UNIX/git). The tests that pin the invariants above — privacy/FR9, append-only,
+layer, desk loop, site) and **1110** in `tests/` (agentcy). Three scout tests skip
+unless optional research data is present locally — two need a FinanceDatabase
+`equities.bz2`, one needs `financetoolkit` (it lives in `requirements-research.txt`,
+not the runtime budget). The tests that pin the invariants above — privacy/FR9, append-only,
 no-merge of the two judgements, licence policy, never-trades — are load-bearing: treat a
 failure there as a design error, not a broken assertion.
 

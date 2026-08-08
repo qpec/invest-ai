@@ -121,8 +121,7 @@ SCOUT_PRODUCTION_ENV=/home/openclaw/config/invest-ai-production.env \
 ```
 
 Install `deploy/systemd/scout-production@.service` with its daily and weekly
-timers only after the first validated publication and after retiring the legacy
-publisher. Rollback is a normal revert on `bot/site`; the local append-only run
+timers after the first validated publication. Rollback is a normal revert on `bot/site`; the local append-only run
 history remains intact. Paid data providers are documented as inactive options
 in [the completeness research](docs/research/2026-08-07-paid-data-completeness-options.md).
 

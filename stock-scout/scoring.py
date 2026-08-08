@@ -3,7 +3,7 @@
 grade.py (live yfinance cache) and backtest*.py (EDGAR point-in-time) both feed
 score_universe() the same Bundle (§4.1) and must get bit-identical scores (§1 msg 44).
 No I/O, no clock, no network. Percentile machinery, veto layer, composite weights and
-tiering are semantically identical to vendor/scout_grade.py; the v2.1-v2.3 amendments
+tiering are semantically identical to agentcy/scout_grade.py; the v2.1-v2.3 amendments
 (own EV, TTM assembly, cash-flow-quality/dilution vetoes, flags, shadow layers) and the
 frozen v3 owner-mode constants follow §4.2-§4.8.
 """
@@ -15,7 +15,7 @@ from datetime import date
 
 from scipy.stats import percentileofscore
 
-# --- Composite / grading constants (§4.6 — identical to vendor/scout_grade.py) ----------
+# --- Composite / grading constants (§4.6 — identical to agentcy/scout_grade.py) ---------
 W_V, W_Q, W_G, W_D, W_M = 0.25, 0.25, 0.20, 0.15, 0.15
 _GRADE_BANDS = ((80.0, "A"), (65.0, "B"), (50.0, "C"), (35.0, "D"))
 QV_ROIC_MIN = 0.15          # the >15% ROIC reference line, as a ratio (vendored RF4)
@@ -113,7 +113,7 @@ def _deferred_revenue(bal: dict) -> float | None:
 
 def _owner_fcf(cell: dict) -> float | None:
     """§4.2 per-period normalized owner-FCF: OCF - min(|CapEx|, D&A) - SBC; D&A absent ->
-    maintenance proxy = |CapEx| (vendored scout_grade lines 34-76). None when OCF/CapEx missing."""
+    maintenance proxy = |CapEx| (scout_grade lines 34-76). None when OCF/CapEx missing."""
     ocf = _row(cell, "ocf")
     capex = _row(cell, "capex")
     if ocf is None or capex is None:
@@ -469,7 +469,7 @@ def quality_score(*, q: float, g: float, d: float, m: float) -> float:
                  + W_QUALITY["d"] * d + W_QUALITY["m"] * m, 4)
 
 
-# --- Circle-of-competence tiering (vendored scout_grade tier_of, RF10 sets) --------------
+# --- Circle-of-competence tiering (scout_grade tier_of, RF10 sets) ----------------------
 _CORE_INDUSTRIES = frozenset({"software", "health care technology"})
 _ADJACENT_INDUSTRIES = frozenset({
     "it services", "semiconductors & semiconductor equipment",

@@ -3,11 +3,11 @@
 Chat msg 2: "751 regels pure, geteste wiskunde (scout_grade.py) + de geharde yfinance-laag —
 vandaag gevendored naar stock-scout/vendor/."
 
-- `scout_grade.py` — **verbatim reference copy** of `agentcy/scout_grade.py` (the
-  owner-ratified Scout v2 Stage-1 grader). It still imports the agentcy archive layer and is
-  NOT imported by the pipeline; `../scoring.py` is the decoupled reimplementation that
-  supersedes it (live + backtest share it). Kept so every scoring rule can be diffed against
-  its ratified origin.
+- `scout_grade.py` — **removed 2026-08-08.** It was a byte-identical copy of
+  `agentcy/scout_grade.py` with no importers and no tests: a third copy of rules already
+  implemented in `../scoring.py` and ratified in `agentcy/scout_grade.py`, and therefore a
+  silent drift hazard rather than a safeguard. Diff scoring rules against
+  `agentcy/scout_grade.py`, which is the live ratified original.
 - `yf_fetch.py` — the hardened yfinance layer, adapted from `agentcy/fetch/yf.py`: same
   fail-loud config, box-wide flock pacing, rate-limit backoff ladder and empty-is-failure
   validation; adapted only to (a) drop nothing, (b) make the pacing interval configurable
