@@ -510,9 +510,21 @@ English page.
 ## 6. Prioritized improvement plan
 
 > **Implementation status (2026-08-08, same day — the "fix proposals" pass):** P0 items
-> 1–7 are implemented, plus two P1 corrections: the DCF now discounts at the cost of
-> equity with a leverage regression test (item 10), and `owner_fcf_yield_pct` is refused
-> as a trigger metric (item 13b). Changes journaled in THESIS-DESIGN.md §9. Notes: item 1
+> 1–7 are implemented, plus two P1 corrections: the DCF now discounts at a *levered* cost
+> of equity with strict-inequality leverage tests (item 10), and `owner_fcf_yield_pct` is
+> refused as a trigger metric (item 13b). Changes journaled in THESIS-DESIGN.md §9.
+>
+> **A review of that implementation caught four defects in it, all now fixed** — recorded
+> here because the process point matters more than the patches: the Pillar-1 moat gate was
+> bypassable by *omitting* the moat field (and crashed on a non-dict moat, since the schema
+> is prose in the work order, not a validator); the eligibility floor read price from a key
+> the CLI path never populates, so `batch` and the site computed different top-1% sets; and
+> the DCF fix itself was misjustified — discounting at a *flat* cost of equity raised
+> leveraged names ~1.8–2.3× and made the margin of safety blind to the balance sheet,
+> with a regression test too weak to catch it. V-3's diagnosis stands; its first fix
+> did not. See THESIS-DESIGN.md §9 for the corrected mechanism.
+>
+> Notes: item 1
 > shipped as the *label-and-partition* variant (the verifier's recommendation — filtering
 > `top_symbols` would shift fingerprinted ranks); item 6's severe-probe promotion
 > (related-party / material-weakness) is deferred — those facts live in filings text, not

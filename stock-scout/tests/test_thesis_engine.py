@@ -147,6 +147,40 @@ class TestValidate:
         doc["moat"] = {"kind": "none", "evidence": []}
         assert thesis.validate(doc, symbol="AAA") == []
 
+    @pytest.mark.parametrize("moat", [
+        None,                                        # the key omitted entirely
+        {},                                          # present but empty
+        {"kind": "", "evidence": []},                # blank kind
+        {"kind": "moat-ish", "evidence": ["x"]},     # off-enum kind
+        "switching costs",                           # a string, not an object
+        ["switching costs"],                         # a list
+        {"kind": "brand_trust", "evidence": "text"}, # evidence not a list
+    ])
+    def test_a_malformed_moat_is_refused_not_waved_through_or_crashed(self, moat):
+        """The schema is prose in the work order, not a validator, so validate() holds
+        the shape. Before this check an omitted moat passed with zero problems (skipping
+        the Pillar-1 door entirely) and a string moat raised AttributeError instead of
+        producing a refusal."""
+        doc = draft()
+        if moat is None:
+            doc.pop("moat")
+        else:
+            doc["moat"] = moat
+        problems = thesis.validate(doc, symbol="AAA")      # must not raise
+        assert problems and any("moat" in p for p in problems)
+
+    def test_a_moatless_draft_cannot_reach_the_gate_by_omission(self, tmp_path):
+        """The omission path all the way through: no moat key -> record refuses."""
+        out = tmp_path / "drafts" / "AAA"
+        out.mkdir(parents=True)
+        doc = draft()
+        doc.pop("moat")
+        (out / "thesis.json").write_text(json.dumps(doc))
+        for name in ("report.md", "summary.md"):
+            (out / name).write_text(f"{thesis.SUMMARY_HEADING}\nbody")
+        with pytest.raises(deskwork.OrderError, match="moat"):
+            thesis.record("AAA", theses_dir=tmp_path, model=APPROVED)
+
 
 # --- thesis.ratify (the Gate) -------------------------------------------------------------
 
@@ -398,6 +432,19 @@ class TestBriefAndRecord:
         assert "TINY" not in symbols and "PENNY" not in symbols
         assert "BUNDLED" not in symbols
         assert "BIG" in symbols and "NODATA" in symbols
+
+    def test_the_floor_reads_the_bundle_shape_the_cli_actually_builds(self):
+        """_load_rows carries price only INSIDE the bundle, so a bundle-only fallback
+        for market cap but not price made `thesis.py batch` and the site compute
+        different top-1% sets: a $3 stock got a work order the site then hid."""
+        card = {"pct": 90, "band": "Exceptional", "evidence": "full",
+                "score": 90, "available_max": 100}
+        cli_row = {"symbol": "PENNY", "card": card,
+                   "bundle": {"market_cap": 5e9, "price": 3.00}}
+        assert thesis._clears_desk_floor(cli_row) is False
+        ok_row = {"symbol": "BIG", "card": card,
+                  "bundle": {"market_cap": 5e9, "price": 50.0}}
+        assert thesis._clears_desk_floor(ok_row) is True
 
 
 # --- monitor ------------------------------------------------------------------------------

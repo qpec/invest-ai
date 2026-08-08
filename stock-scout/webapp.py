@@ -279,6 +279,36 @@ def valuation_signal(percentile: int, *, yield_pct: float | None = None) -> str:
     return "Appears demanding on current owner cash flow"
 
 
+# Abbreviations that end in a period mid-sentence. A naive split on ". " cuts
+# "Apple Inc. depends on …" down to "Apple Inc." and puts that on the card as if it
+# were the finding — the caveat lead is the most decision-relevant line the page has,
+# so it must not be mangled by punctuation.
+# Only tokens that are almost never sentence-final. A quarter label ("… fell in Q3.")
+# ends sentences all the time, so Q1-Q4 deliberately are NOT here.
+_ABBREVIATIONS = ("Inc", "Corp", "Co", "Ltd", "plc", "LLC", "L.P", "S.A", "N.V",
+                  "U.S", "U.K", "E.U", "vs", "approx", "est", "cf", "e.g", "i.e",
+                  "Mr", "Ms", "Dr", "St", "Jr", "Sr")
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[\"'(\[]?[A-Z0-9])")
+
+
+def first_sentence(text: str, *, limit: int = 300) -> str:
+    """The leading sentence of free prose, abbreviation-aware, clamped to `limit`."""
+    text = (text or "").strip()
+    if not text:
+        return ""
+    start = 0
+    while True:
+        match = _SENTENCE_END.search(text, start)
+        if match is None:
+            return text[:limit].strip()
+        head = text[:match.start()].rstrip()
+        tail = head[:-1].rsplit(" ", 1)[-1].rstrip(".") if head.endswith(".") else ""
+        if tail in _ABBREVIATIONS or (len(tail) == 1 and tail.isupper()):
+            start = match.end()          # a mid-sentence abbreviation, keep reading
+            continue
+        return head[:limit].strip()
+
+
 def public_valuation_lens(row: dict, detail: dict, rows: list[dict],
                           *, caveat: str) -> dict:
     """Build public valuation context from one point-in-time Scout measurement."""
@@ -305,12 +335,7 @@ def public_valuation_lens(row: dict, detail: dict, rows: list[dict],
         scope, label = "universe", "measured Scout universe"
     percentile = relative_percentile(yield_pct, values)
     caveat = caveat.strip()
-    # The caveat's first sentence is the most decision-relevant text the page has
-    # (2026-08-08 review, U-7); it reaches the card instead of sitting only in a blob
-    # four sections deep.
-    lead = caveat.split(". ")[0].strip() if caveat else ""
-    if lead and not lead.endswith((".", "!", "?")):
-        lead += "."
+    lead = first_sentence(caveat)
     return {
         "price": round(price, 2), "price_as_of": str(price_as_of),
         "owner_cash_yield_pct": round(yield_pct, 2),
@@ -428,9 +453,10 @@ def load_thesis_dir(theses_dir: Path, registry_by_symbol: dict) -> dict:
                 "accepted": not doc.get("validation_problems"),
                 # Pillar 1's consequence, carried onto the page: a no-moat draft is
                 # research, not a candidate (thesis.record sets this).
-                "pass_recommended": bool(doc.get("pass_recommended")
-                                         or (body.get("moat") or {}).get("kind")
-                                         == "none"),
+                "pass_recommended": bool(
+                    doc.get("pass_recommended")
+                    or (isinstance(body.get("moat"), dict)
+                        and body["moat"].get("kind") == "none")),
                 "thesis": body,
                 "summary_html": md_html(summary.read_text(encoding="utf-8"))
                 if summary.exists() else "",
@@ -1725,9 +1751,12 @@ const isFlagged = reader =>
 
 function qualityScoreLabel(q){
   if (q.score == null) return '—';
+  // Points are ramp sums and come out fractional; a card that reads "74.82 of 87"
+  // claims a precision the ±5-point noise floor denies. Round, never truncate.
   if (q.available_max != null && q.available_max < 100)
-    return `${q.score_points ?? '—'} of ${q.available_max} measurable (${q.score}%)`;
-  return `${q.score}/100`;
+    return `${q.score_points == null ? '—' : Math.round(q.score_points)} of `
+      + `${Math.round(q.available_max)} measurable (${Math.round(q.score)}%)`;
+  return `${Math.round(q.score)}/100`;
 }
 
 function thesisCard(reader){

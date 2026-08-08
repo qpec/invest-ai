@@ -281,5 +281,21 @@ three constitutional rules living only in prose. Four changes, ratified together
   trigger metric — a price move alone can no longer fire a "business" trigger.
 
 Same review, scoring side: the margin-of-safety DCF now discounts owner-FCF (a
-post-interest, equity-level flow) at the cost of equity instead of WACC, with a
-regression test pinning that leverage can no longer inflate the margin of safety.
+post-interest, equity-level flow) at a cost of EQUITY instead of WACC.
+
+**Correction, same day.** The first version of that change discounted every name at the
+flat unlevered 10.5%, and its stated justification was wrong. `wacc_estimate`'s inherited
+cost of debt is `rf + 10/coverage` — 23.7% at coverage 52, 504% at coverage 2 — so for any
+name whose interest expense is measurable the old WACC sat *above* the cost of equity
+(usually pinned at its 20% clamp) and UNDERstated intrinsic value; only where coverage was
+unknown did WACC understate the discount rate. Discounting everything at a flat 10.5%
+therefore raised leveraged names' intrinsic value by ~1.8-2.3x and made the margin of
+safety completely blind to the balance sheet — handing distressed names Price-block points,
+the opposite of the review's intent. The regression test written alongside it compared two
+numbers a shared constant made identical, so it could not fail.
+
+The discount rate is now `scoring.levered_cost_of_equity` (Hamada: beta_L = 1.0 x
+(1 + 0.75 x net_debt/market_cap), CAPM, clamped to [10.5%, 20%]). A net-cash name sits at
+the unlevered floor; leverage raises the discount and lowers the margin of safety, which is
+what the review asked for and what the replacement tests assert with strict inequalities.
+WACC is still reported for reference and discounts nothing.

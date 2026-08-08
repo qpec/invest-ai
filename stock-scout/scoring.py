@@ -788,12 +788,34 @@ def score_universe(bundles: list[dict]) -> list[dict]:
 
 # --- v2.3 shadow layers (§4.8 — never enter the composite) -------------------------------
 
-# CAPM inputs shared by wacc_estimate and the DCF discount rate (rf 4.5%, beta 1.0,
-# MRP 6%). Beta at a uniform 1.0 is a declared simplification, not an estimate — the
-# 2026-08-08 valuation review (V-3) records it as a known limitation.
+# CAPM inputs shared by wacc_estimate and the DCF discount rate (rf 4.5%, unlevered
+# beta 1.0, MRP 6%). The uniform UNLEVERED beta is a declared simplification, not an
+# estimate — the 2026-08-08 valuation review (V-3) records it as a known limitation.
 RISK_FREE = 0.045
 MARKET_RISK_PREMIUM = 0.06
-COST_OF_EQUITY = RISK_FREE + 1.0 * MARKET_RISK_PREMIUM
+UNLEVERED_BETA = 1.0
+COST_OF_EQUITY = RISK_FREE + UNLEVERED_BETA * MARKET_RISK_PREMIUM
+EQUITY_RATE_CEILING = 0.20      # same clamp the WACC estimate uses
+
+
+def levered_cost_of_equity(*, market_cap, net_debt) -> float:
+    """Hamada: beta_L = beta_U x (1 + (1 - tax) x D/E), then CAPM, clamped to
+    [COST_OF_EQUITY, EQUITY_RATE_CEILING].
+
+    Why this exists (2026-08-08 review follow-up). The margin-of-safety DCF discounts
+    owner-FCF, which is post-interest and therefore an EQUITY flow, so its rate is a
+    cost of equity rather than WACC. Discounting every name at the flat unlevered
+    COST_OF_EQUITY would make intrinsic value completely insensitive to the balance
+    sheet — a company carrying 3x its market cap in net debt would be valued exactly
+    like a net-cash one, and the Price block would hand it the same points. Leverage
+    raises the risk borne by equity; the discount rate has to say so. `net_debt` is
+    floored at 0 by the caller, so a net-cash name sits at the unlevered floor."""
+    equity = market_cap if market_cap and market_cap > 0 else None
+    if equity is None:
+        return COST_OF_EQUITY
+    beta = UNLEVERED_BETA * (1.0 + 0.75 * (max(net_debt or 0.0, 0.0) / equity))
+    return min(max(RISK_FREE + beta * MARKET_RISK_PREMIUM, COST_OF_EQUITY),
+               EQUITY_RATE_CEILING)
 
 
 def wacc_estimate(*, market_cap, total_debt, cash, interest_coverage=None) -> float:
@@ -856,11 +878,20 @@ def margin_of_safety(bundle: dict) -> dict | None:
     volatility quality factor max(0.7, 1 - 0.5*CV). None when market cap is unusable or
     base FCF <= 0. mos_pct = (intrinsic - market_cap) / market_cap.
 
-    Discount rate: COST_OF_EQUITY, not WACC (2026-08-08 valuation review, V-3).
-    Owner-FCF is computed from US-GAAP OCF, which is after cash interest — an
-    equity-level flow — so discounting it at WACC (below the cost of equity for any
-    leveraged name) systematically inflated intrinsic value with leverage. WACC is still
-    computed and reported for reference; it no longer discounts anything."""
+    Discount rate: `levered_cost_of_equity`, not WACC (2026-08-08 valuation review V-3,
+    corrected by its own follow-up review). Owner-FCF comes from US-GAAP OCF, which is
+    after cash interest — an equity-level flow — so discounting it at WACC mismatched the
+    level. The direction of that error was NOT uniform, and the first version of this fix
+    described it wrongly: `wacc_estimate`'s inherited cost of debt is `rf + 10/coverage`,
+    which returns 23.7% at coverage 52 and 504% at coverage 2, so for any name whose
+    interest expense is measurable the old WACC sat ABOVE the cost of equity (usually at
+    the 20% clamp) and UNDERstated intrinsic value; only where coverage was unknown
+    (cod 9.5% x 0.75 < coe) did it overstate. Discounting everything at a flat unlevered
+    10.5% therefore raised leveraged names ~1.8-2.3x and made the margin of safety
+    completely blind to the balance sheet. The levered rate restores the one property
+    that matters here: more net debt, higher equity discount, lower margin of safety.
+
+    WACC is still computed and reported for reference; it discounts nothing."""
     mcap = _num(bundle.get("market_cap"))
     if mcap is None or mcap <= 0:
         return None
@@ -882,11 +913,13 @@ def margin_of_safety(bundle: dict) -> dict | None:
     coverage = ebit / abs(interest) if ebit is not None and interest else None
     wacc = wacc_estimate(market_cap=mcap, total_debt=_row(bal, "total_debt"),
                          cash=_row(bal, "cash"), interest_coverage=coverage)
+    net_debt = max((_row(bal, "total_debt") or 0.0) - (_row(bal, "cash") or 0.0), 0.0)
+    discount = levered_cost_of_equity(market_cap=mcap, net_debt=net_debt)
     quality = max(0.7, 1.0 - 0.5 * _fcf_volatility(hist))
-    intrinsic = dcf_intrinsic(base, growth, COST_OF_EQUITY) * quality
+    intrinsic = dcf_intrinsic(base, growth, discount) * quality
     return {"intrinsic_value": intrinsic, "market_cap": mcap,
             "mos_pct": (intrinsic - mcap) / mcap, "wacc": wacc,
-            "discount_rate": COST_OF_EQUITY,
+            "discount_rate": discount, "net_debt": net_debt,
             "growth": growth, "base_fcf": base}
 
 

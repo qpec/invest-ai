@@ -672,23 +672,59 @@ def test_margin_of_safety_none_for_burner():
     assert scoring.margin_of_safety(_burner(base_bundle(), ttm_positive=False)) is None
 
 
-def test_margin_of_safety_does_not_rise_with_leverage():
-    """2026-08-08 valuation review V-3: owner-FCF is post-interest (equity-level), so the
-    DCF discounts at COST_OF_EQUITY. Under the old WACC discounting, adding debt LOWERED
-    the discount rate (cod x 0.75 < coe) and inflated intrinsic value with cash flows
-    held fixed — the exact pro-leverage bias this pins down."""
-    unlevered = base_bundle()
+def test_margin_of_safety_falls_as_leverage_rises():
+    """2026-08-08 valuation review V-3 and its follow-up. Owner-FCF is post-interest
+    (equity-level), so the DCF discounts at a cost of EQUITY — but a flat unlevered rate
+    would make the margin of safety blind to the balance sheet, handing a distressed
+    name the same Price-block points as a net-cash one. STRICT inequalities, because the
+    first version of this test compared two values that a shared constant made identical
+    and therefore could not fail."""
+    unlevered = base_bundle()                              # net cash: debt 100M, cash 300M
     levered = base_bundle()
     set_all_balances(levered, **{"Total Debt": 4e9, "Cash And Cash Equivalents": 0.0})
-    mos_u = scoring.margin_of_safety(unlevered)
-    mos_l = scoring.margin_of_safety(levered)
-    assert mos_l["mos_pct"] <= mos_u["mos_pct"] + 1e-12
-    # Both discount at the cost of equity, reported alongside the reference WACC.
+    heavy = base_bundle()
+    set_all_balances(heavy, **{"Total Debt": 12e9, "Cash And Cash Equivalents": 0.0})
+    mos_u, mos_l, mos_h = (scoring.margin_of_safety(b)
+                           for b in (unlevered, levered, heavy))
+
+    # Cash flows are identical across the three; only the balance sheet differs.
+    assert mos_u["base_fcf"] == mos_l["base_fcf"] == mos_h["base_fcf"]
+    assert mos_h["mos_pct"] < mos_l["mos_pct"] < mos_u["mos_pct"]
+    assert mos_h["discount_rate"] > mos_l["discount_rate"] > mos_u["discount_rate"]
+    # A net-cash name sits at the unlevered floor; nothing discounts below it.
     assert mos_u["discount_rate"] == pytest.approx(scoring.COST_OF_EQUITY)
-    assert mos_l["discount_rate"] == pytest.approx(scoring.COST_OF_EQUITY)
-    # The reference WACC still moves with the capital structure; the discount rate the
-    # DCF actually uses does not — that decoupling IS the fix.
-    assert mos_l["wacc"] != mos_u["wacc"]
+    assert mos_h["discount_rate"] <= scoring.EQUITY_RATE_CEILING
+
+
+def test_levered_cost_of_equity_anchors():
+    """The Hamada ramp, stated as numbers so a future edit has to argue with them."""
+    coe = scoring.COST_OF_EQUITY
+    assert scoring.levered_cost_of_equity(market_cap=1e9, net_debt=0) == pytest.approx(coe)
+    # net cash is floored at zero debt, never a discount below the unlevered rate
+    assert scoring.levered_cost_of_equity(market_cap=1e9, net_debt=-5e8) == pytest.approx(coe)
+    # D/E = 1 -> beta 1.75 -> 4.5% + 10.5% = 15%
+    assert scoring.levered_cost_of_equity(market_cap=1e9, net_debt=1e9) == pytest.approx(0.15)
+    # D/E = 4 -> beta 4.0 -> 28.5%, clamped
+    assert scoring.levered_cost_of_equity(
+        market_cap=1e9, net_debt=4e9) == pytest.approx(scoring.EQUITY_RATE_CEILING)
+    # an unusable market cap degrades to the unlevered rate rather than dividing by zero
+    assert scoring.levered_cost_of_equity(market_cap=0, net_debt=1e9) == pytest.approx(coe)
+
+
+def test_the_discount_rate_is_decoupled_from_the_reference_wacc():
+    """The inherited `rf + 10/coverage` cost of debt makes WACC hit its 20% clamp for
+    any name with measurable interest — which is why WACC must not discount an equity
+    flow. WACC stays reported; it drives nothing."""
+    assert scoring.wacc_estimate(market_cap=2e9, total_debt=6e9, cash=0,
+                                 interest_coverage=2) == pytest.approx(0.20)
+    levered = base_bundle()
+    set_all_balances(levered, **{"Total Debt": 4e9, "Cash And Cash Equivalents": 0.0})
+    mos = scoring.margin_of_safety(levered)
+    assert mos["discount_rate"] != mos["wacc"]
+    assert mos["intrinsic_value"] == pytest.approx(
+        scoring.dcf_intrinsic(mos["base_fcf"], mos["growth"], mos["discount_rate"])
+        * max(0.7, 1.0 - 0.5 * scoring._fcf_volatility(
+            [v for _, v in reversed(scoring._annual_owner_fcf_points(levered))])))
 
 
 def test_margin_of_safety_mega_cap_growth_cap():

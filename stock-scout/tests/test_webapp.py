@@ -62,6 +62,23 @@ class TestPayload:
             "caveat_lead": "Cash flow may normalize lower.",
         }
 
+    @pytest.mark.parametrize("text,expected", [
+        ("Apple Inc. depends on iPhone cycles. Regulatory risk is rising.",
+         "Apple Inc. depends on iPhone cycles."),
+        ("Revenue in the U.S. fell 12%. Margins compressed.",
+         "Revenue in the U.S. fell 12%."),
+        ("Q4 margins fell vs. Q3. Guidance was cut.", "Q4 margins fell vs. Q3."),
+        ("No trailing period", "No trailing period"),
+        ("", ""),
+    ])
+    def test_the_caveat_lead_survives_abbreviations(self, text, expected):
+        """The lead is the loudest line on a card; a naive split on '. ' rendered
+        'Apple Inc.' as if that were the finding."""
+        assert webapp.first_sentence(text) == expected
+
+    def test_the_caveat_lead_is_clamped(self):
+        assert len(webapp.first_sentence("x" * 500)) == 300
+
     def test_valuation_signal_is_two_sided_at_distress_yields(self):
         """2026-08-08 review U-2: past the distress line, 'cheap' is the wrong read —
         the signal must fall in confidence as the yield rises, not rise with it."""

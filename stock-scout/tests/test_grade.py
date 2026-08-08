@@ -183,7 +183,7 @@ def test_graded_name_carries_legs_mos_buffett(first_run):
     assert aaa["grade"] in "ABCDF"
     assert set(aaa["legs"]) == set(LEG_IDS)
     assert set(aaa["mos"]) == {"intrinsic_value", "market_cap", "mos_pct", "wacc",
-                               "discount_rate", "growth", "base_fcf"}
+                               "discount_rate", "net_debt", "growth", "base_fcf"}
     assert aaa["mos"]["market_cap"] == 10e9
     assert aaa["buffett"]["max"] == 13
     assert aaa["ev"]["own"] == pytest.approx(9.8e9)

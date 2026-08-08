@@ -84,6 +84,9 @@ METRICS = {
     "acquisition_spend_pct_of_ocf": ("acquisitions_pct_ocf", "% of TTM OCF", None),
 }
 
+MOAT_KINDS = ("network_effects", "switching_costs", "cost_advantage", "brand_trust",
+              "regulatory", "none")     # mirrors THESIS_SCHEMA's enum; validate() holds it
+
 TRIGGER_KINDS = ("metric", "event", "narrative")
 TRIGGER_OPS = ("<", "<=", ">", ">=")
 TRIGGER_ACTIONS = ("break", "review")
@@ -137,9 +140,7 @@ THESIS_SCHEMA = {
         "moat": {
             "type": "object",
             "properties": {
-                "kind": {"type": "string",
-                         "enum": ["network_effects", "switching_costs", "cost_advantage",
-                                  "brand_trust", "regulatory", "none"]},
+                "kind": {"type": "string", "enum": list(MOAT_KINDS)},
                 "evidence": {"type": "array", "items": {"type": "string"}},
             },
             "required": ["kind", "evidence"],
@@ -248,16 +249,24 @@ def validate(doc: dict, *, symbol: str | None = None) -> list[str]:
         if field in doc:
             problems.append(f"{field} is owner-only (FR9) and may not come from the builder")
 
-    # Pillar 1: "at least one durable competitive advantage, WITH EVIDENCE." A named moat
-    # with no evidence is a story; the schema allows kind "none" (an honest finding — it
-    # makes the draft PASS-RECOMMENDED at record, and ratify refuses it without an
-    # explicit override) but never a named moat on an empty evidence list.
-    moat = doc.get("moat") or {}
-    if moat.get("kind") and moat.get("kind") != "none":
-        evidence = [e for e in (moat.get("evidence") or [])
-                    if isinstance(e, str) and e.strip()]
-        if not evidence:
-            problems.append(f"moat kind {moat.get('kind')!r} claimed with no evidence — "
+    # Pillar 1: "at least one durable competitive advantage, WITH EVIDENCE." The schema
+    # is prose in the work order, not a validator, so the SHAPE is checked here first —
+    # an omitted moat, a string moat, or a blank kind would otherwise sail past a rule
+    # that only reads `kind`, and the no-moat door below would never open.
+    moat = doc.get("moat")
+    if not isinstance(moat, dict):
+        problems.append("moat must be an object with `kind` and `evidence`"
+                        + ("" if moat is None else f", got {type(moat).__name__}"))
+    elif moat.get("kind") not in MOAT_KINDS:
+        problems.append(f"moat kind {moat.get('kind')!r} is not one of "
+                        f"{', '.join(MOAT_KINDS)} — 'none' is the honest answer when "
+                        f"there is no durable advantage, and it is never omission")
+    elif moat["kind"] != "none":
+        evidence = moat.get("evidence")
+        if not isinstance(evidence, list):
+            problems.append("moat evidence must be a list of statements")
+        elif not [e for e in evidence if isinstance(e, str) and e.strip()]:
+            problems.append(f"moat kind {moat['kind']!r} claimed with no evidence — "
                             f"a moat without evidence is a story, not a thesis field")
 
     triggers = doc.get("triggers") or []
@@ -510,10 +519,14 @@ def _clears_desk_floor(row: dict) -> bool:
     mcap = row.get("market_cap")
     if mcap is None:
         mcap = (row.get("bundle") or {}).get("market_cap")
-    if isinstance(mcap, (int, float)) and mcap < DESK_MIN_MARKET_CAP:
+    if isinstance(mcap, (int, float)) and not isinstance(mcap, bool) \
+            and mcap < DESK_MIN_MARKET_CAP:
         return False
     price = row.get("price")
-    if isinstance(price, (int, float)) and price < DESK_MIN_PRICE:
+    if price is None:
+        price = (row.get("bundle") or {}).get("price")
+    if isinstance(price, (int, float)) and not isinstance(price, bool) \
+            and price < DESK_MIN_PRICE:
         return False
     return True
 
@@ -614,7 +627,8 @@ def ratify(symbol: str, *, theses_dir: Path = THESES_DIR, ask=input) -> dict:
     # Pillar 1's consequence, enforced at the last door: a draft that names NO moat is a
     # PASS under the constitution. The owner can still overrule — deliberately, in type —
     # the same shape as the goalpost guard's 're-arm'.
-    if ((doc.get("thesis") or {}).get("moat") or {}).get("kind") == "none":
+    ratify_moat = (doc.get("thesis") or {}).get("moat")
+    if isinstance(ratify_moat, dict) and ratify_moat.get("kind") == "none":
         answer = ask(
             f"{symbol}'s draft names NO durable moat — under Pillar 1 that is an "
             f"automatic PASS. Type 'override' to ratify anyway: ")
