@@ -40,6 +40,7 @@ import html
 import json
 import os
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -1945,11 +1946,30 @@ def render(model: dict, embed_details: dict) -> str:
     return page
 
 
-def write_site(model: dict, out_dir: Path, *, shard: bool = True) -> Path:
+def write_site(model: dict, out_dir: Path, *, shard: bool = True,
+               logo_assets: dict[str, str | None] | None = None,
+               logo_cache_root: Path | None = None) -> Path:
     """docs/index.html + docs/data/d-<letter>.json. Details for picks and thesis
     candidates are embedded inline (the common drill-downs work from a single file);
     everything else lazy-loads from the shards."""
     out_dir.mkdir(parents=True, exist_ok=True)
+    logo_assets = logo_assets or {}
+    if logo_assets:
+        if logo_cache_root is None:
+            raise ValueError("logo_cache_root required with logo assets")
+        target_dir = out_dir / "data" / "logos"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for reader in model.get("thesis", {}).get("readers", []):
+            relative = logo_assets.get(reader.get("symbol"))
+            reader["logo"] = None
+            if not relative or Path(relative).is_absolute() or ".." in Path(relative).parts:
+                continue
+            source = logo_cache_root / relative
+            if not source.is_file():
+                continue
+            target = target_dir / source.name
+            shutil.copy2(source, target)
+            reader["logo"] = f"data/logos/{target.name}"
     details = model["details"]
     inline = {c["s"]: details[c["s"]] for c in model["rows"]
               if (c["pick"] or c["top"]) and c["s"] in details}

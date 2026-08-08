@@ -185,7 +185,16 @@ class TestSite:
                         "ZZZ": {"card": {}, "inv": {}, "scored": {}, "reg": {},
                         "mc": None}},
             "charts": {"bands": [], "verdicts": [], "coverage": []},
-            "units": {}, "thesis": {"top": [], "drafts": []},
+            "units": {}, "thesis": {"top": [], "drafts": [], "readers": [{
+                "symbol": "AAA", "name": "Alpha", "rank": 1, "logo": None,
+                "quality": {"score": 90, "grade": "Exceptional", "explanation": "Strong."},
+                "risk": {"verdict": "Ordinary", "leading_fragility": "Competition."},
+                "thesis": {"business_model": "Makes widgets.",
+                           "valuation_anchor": {"statement": "Yield anchor."},
+                           "bear_case": "Demand can fall.", "triggers": []},
+                "summary_html": "<p>Summary.</p>", "report_html": "<p>Report.</p>",
+                "triggers": [],
+            }]},
             "portfolio_monitor": {"committed": [], "next_run": "2026-08-08",
                                   "preview": None},
             "snapshot_id": "snap-1",
@@ -231,6 +240,22 @@ class TestSite:
         disclaimer = "Illustratieve modelportefeuille, geen financieel advies."
         assert page.count(disclaimer) == 1
         assert "Research tool — not investment advice." not in page
+
+    def test_write_site_copies_only_local_logo_assets(self, tmp_path):
+        cache = tmp_path / "cache"
+        source = cache / "logos" / "AAA.png"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 80)
+        out = tmp_path / "site"
+
+        page = webapp.write_site(
+            self._model(), out, logo_assets={"AAA": "logos/AAA.png"},
+            logo_cache_root=cache,
+        ).read_text(encoding="utf-8")
+
+        assert (out / "data" / "logos" / "AAA.png").exists()
+        assert '"logo":"data/logos/AAA.png"' in page
+        assert "financialmodelingprep.com" not in page
 
 
 class TestMoreReviewRegressions:

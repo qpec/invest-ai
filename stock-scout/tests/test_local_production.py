@@ -98,12 +98,21 @@ def test_prepare_thesis_orders_batches_only_requested_symbols(tmp_path, monkeypa
 def test_public_model_is_reassembled_after_new_thesis_artifacts(tmp_path, monkeypatch):
     refreshed = {
         "counts": {"screened": 1}, "rows": [],
-        "thesis": {"top": [], "drafts": ["AAA"]},
+        "thesis": {"top": [], "drafts": ["AAA"],
+                   "readers": [{"symbol": "AAA"}]},
     }
     monkeypatch.setattr(local_production.webapp, "assemble", lambda **kwargs: refreshed)
     written = []
-    monkeypatch.setattr(local_production.webapp, "write_site",
-                        lambda model, docs: written.append(model))
+    logo_calls = []
+    monkeypatch.setattr(
+        local_production.company_logos, "sync",
+        lambda symbols, root: logo_calls.append((symbols, root)) or
+        {"AAA": "logos/AAA.png"},
+    )
+    monkeypatch.setattr(
+        local_production.webapp, "write_site",
+        lambda model, docs, **kwargs: written.append((model, kwargs)),
+    )
     config = local_production.LocalProductionConfig(
         artifact_root=tmp_path / "artifacts", sec_data=tmp_path / "sec",
         price_grid=tmp_path / "prices", universe=tmp_path / "universe.csv",
@@ -121,8 +130,10 @@ def test_public_model_is_reassembled_after_new_thesis_artifacts(tmp_path, monkey
 
     result = stages.build_site(context)
 
-    assert written[0]["thesis"]["drafts"] == ["AAA"]
+    assert written[0][0]["thesis"]["drafts"] == ["AAA"]
     assert result["public_model"]["snapshot_id"] == "snap-1"
+    assert logo_calls[0][0] == ["AAA"]
+    assert written[0][1]["logo_assets"] == {"AAA": "logos/AAA.png"}
 
 
 def test_evaluate_theses_runs_missing_draft_then_reuses_unchanged_acceptance(

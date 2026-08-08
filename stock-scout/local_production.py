@@ -14,6 +14,7 @@ import monitor
 import thesis
 import webapp
 import deskwork
+import company_logos
 from agentcy import market_prices
 from agentcy import production as release
 
@@ -31,6 +32,7 @@ class LocalProductionConfig:
     network_refresh: bool = False
     thesis_runner: Path | None = None
     thesis_model: str = "gpt-5.6-sol"
+    logo_cache: Path | None = None
 
 
 def export_price_grid(conn: sqlite3.Connection, directory: Path) -> int:
@@ -276,7 +278,12 @@ def make_local_stages(conn: sqlite3.Connection, config: LocalProductionConfig,
         docs = artifact / "docs"
         model = assemble_model(context)
         context.runtime["model"] = model
-        webapp.write_site(model, docs)
+        logo_cache = config.logo_cache or (config.artifact_root / "company-logo-cache")
+        symbols = [reader["symbol"] for reader in
+                   model.get("thesis", {}).get("readers", [])]
+        logo_assets = company_logos.sync(symbols, logo_cache)
+        webapp.write_site(
+            model, docs, logo_assets=logo_assets, logo_cache_root=logo_cache)
         manifest = {
             "schema_version": 1, "run_id": context.run_id,
             "snapshot_id": context.snapshot_id, "as_of": config.as_of,
