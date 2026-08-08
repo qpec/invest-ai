@@ -32,6 +32,6 @@ def test_scout_grade_imports_no_llm():
 
 def test_populator_is_an_explicit_followon():
     # The archive batch populator is NOT built by Stage-1 or Stage-2 Part A (Explicit follow-on).
-    # Stage-2's *interface + desk path* IS built (agentcy.scout_review); the API adapter and the
-    # claudeclaw droplet install are Part B / follow-ons, not in this import graph.
+    # Stage-2's *interface + desk path* IS built (agentcy.scout_review); the API adapter
+    # is a Part B / follow-on, not in this import graph.
     assert not any("populate_batch" in m.lower() for m in sys.modules)

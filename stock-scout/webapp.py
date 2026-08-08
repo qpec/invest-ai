@@ -2321,8 +2321,8 @@ def write_site(model: dict, out_dir: Path, *, shard: bool = True,
                 raise
     # Atomic: the desk server serves this very directory while a `rebuild` rewrites it,
     # and a truncate-then-write would hand a reader a blank page. The temp name is
-    # dot-prefixed and removed on failure so a crashed build can never be rsynced into
-    # the published site by deploy/scout/publish.sh.
+    # dot-prefixed and removed on failure so a crashed build can never be rsynced
+    # into the published site by the local publisher (deploy/local/scout-production.sh).
     out = out_dir / "index.html"
     tmp = out_dir / ".index.html.tmp"
     try:
