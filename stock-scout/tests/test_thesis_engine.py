@@ -125,6 +125,28 @@ class TestValidate:
         for name in thesis.METRICS:
             assert "price" not in name and "drawdown" not in name
 
+    def test_a_quote_derived_metric_cannot_fire_a_trigger(self):
+        """2026-08-08 review V-8: owner-FCF yield embeds the market cap, so a price move
+        alone could trip it — it stays in packets/display but is refused as a trigger."""
+        bad = draft(triggers=[metric_trigger(metric="owner_fcf_yield_pct"),
+                              metric_trigger("T1b"), question_trigger()])
+        assert any("quote-derived" in p for p in thesis.validate(bad))
+
+    def test_a_named_moat_without_evidence_is_refused(self):
+        """Pillar 1: 'at least one durable competitive advantage, WITH EVIDENCE.'"""
+        doc = draft()
+        doc["moat"] = {"kind": "switching_costs", "evidence": []}
+        assert any("no evidence" in p for p in thesis.validate(doc))
+        doc["moat"] = {"kind": "brand_trust", "evidence": ["  "]}
+        assert any("no evidence" in p for p in thesis.validate(doc))
+
+    def test_an_honest_no_moat_finding_still_validates(self):
+        """kind 'none' is a finding, not a formatting error — record accepts it as
+        research and marks it PASS-RECOMMENDED; the refusal happens at ratify."""
+        doc = draft()
+        doc["moat"] = {"kind": "none", "evidence": []}
+        assert thesis.validate(doc, symbol="AAA") == []
+
 
 # --- thesis.ratify (the Gate) -------------------------------------------------------------
 
@@ -151,6 +173,26 @@ class TestRatify:
         answers = iter(["high", ""])
         with pytest.raises(ValueError, match="circle of competence"):
             thesis.ratify("AAA", theses_dir=tmp_path, ask=lambda _: next(answers))
+
+    def test_a_no_moat_draft_is_a_pass_without_an_explicit_override(self, tmp_path):
+        """Pillar 1's consequence at the last door: moat kind 'none' refuses the commit
+        unless the owner types the override — the goalpost guard's 're-arm' shape."""
+        doc = draft()
+        doc["moat"] = {"kind": "none", "evidence": []}
+        self._write_draft(tmp_path, {"symbol": "AAA", "status": "draft", "thesis": doc})
+        answers = iter([""])                       # decline the override
+        with pytest.raises(ValueError, match="no durable moat"):
+            thesis.ratify("AAA", theses_dir=tmp_path, ask=lambda _: next(answers))
+        assert not (tmp_path / "committed" / "AAA.json").exists()
+
+    def test_a_no_moat_override_is_deliberate_and_typed(self, tmp_path):
+        doc = draft()
+        doc["moat"] = {"kind": "none", "evidence": []}
+        self._write_draft(tmp_path, {"symbol": "AAA", "status": "draft", "thesis": doc})
+        answers = iter(["override", "low", "my day job"])
+        committed = thesis.ratify("AAA", theses_dir=tmp_path,
+                                  ask=lambda _: next(answers))
+        assert committed["status"] == "committed"
 
     def test_re_ratifying_a_broken_thesis_demands_an_explicit_re_arm(self, tmp_path):
         """A broken thesis is standing sell advice. Silently overwriting it — which the
@@ -335,6 +377,27 @@ class TestBriefAndRecord:
         top = thesis.top_symbols(rows, len(rows))
         assert len(top) == 3                      # ceil(201 * 0.01)
         assert all(r["card"]["pct"] is not None for r in top)
+
+    def test_top_symbols_applies_the_desk_eligibility_floor(self):
+        """V-6: a microcap or penny name stays scored and visible on the site, but does
+        not consume a desk work order. A row carrying no figure is never excluded."""
+        card = {"pct": 90, "band": "Exceptional", "evidence": "full",
+                "score": 90, "available_max": 100}
+        rows = [
+            {"symbol": "BIG", "card": dict(card), "market_cap": 5e9, "price": 100.0},
+            {"symbol": "TINY", "card": dict(card, pct=99),
+             "market_cap": thesis.DESK_MIN_MARKET_CAP - 1, "price": 100.0},
+            {"symbol": "PENNY", "card": dict(card, pct=99), "market_cap": 5e9,
+             "price": thesis.DESK_MIN_PRICE - 0.01},
+            {"symbol": "NODATA", "card": dict(card, pct=80)},
+            {"symbol": "BUNDLED", "card": dict(card, pct=99),
+             "bundle": {"market_cap": thesis.DESK_MIN_MARKET_CAP - 1}},
+        ]
+        top = thesis.top_symbols(rows, 400)       # ceil(400 * 0.01) = 4 slots
+        symbols = [r["symbol"] for r in top]
+        assert "TINY" not in symbols and "PENNY" not in symbols
+        assert "BUNDLED" not in symbols
+        assert "BIG" in symbols and "NODATA" in symbols
 
 
 # --- monitor ------------------------------------------------------------------------------

@@ -57,8 +57,27 @@ class TestPayload:
             "comparison_scope": "sector",
             "comparison_label": "Technology sector", "comparison_count": 20,
             "percentile": 95, "signal": "Appears inexpensive on current owner cash flow",
+            "distress": False,
             "caveat": "Cash flow may normalize lower.",
+            "caveat_lead": "Cash flow may normalize lower.",
         }
+
+    def test_valuation_signal_is_two_sided_at_distress_yields(self):
+        """2026-08-08 review U-2: past the distress line, 'cheap' is the wrong read —
+        the signal must fall in confidence as the yield rises, not rise with it."""
+        assert "inexpensive" in webapp.valuation_signal(95)
+        distress = webapp.valuation_signal(95, yield_pct=webapp.DISTRESS_YIELD_PCT)
+        assert "voting no" in distress and "inexpensive" not in distress
+
+    def test_a_distress_yield_marks_the_lens_and_leads_with_the_caveat(self):
+        rows = [{"s": "AAA", "sec": "", "reg": {"owner_fcf_yield_pct": 29.4}},
+                {"s": "BBB", "sec": "", "reg": {"owner_fcf_yield_pct": 5.0}}]
+        lens = webapp.public_valuation_lens(
+            rows[0], {"px": 21.0, "pxd": "2026-08-06"}, rows,
+            caveat="The cash engine fell 97% from its peak. Loss paths also include churn.")
+        assert lens["distress"] is True
+        assert "voting no" in lens["signal"]
+        assert lens["caveat_lead"] == "The cash engine fell 97% from its peak."
 
     def test_valuation_lens_falls_back_to_measured_scout_universe(self):
         row = {"s": "AAA", "sec": "", "reg": {"owner_fcf_yield_pct": 6.0}}
@@ -138,6 +157,7 @@ class TestPayload:
              "card": {"why": ["Strong returns."]}},
         )
         assert reader["quality"] == {"score": 91.0, "grade": "Exceptional",
+                                      "score_points": None, "available_max": None,
                                       "explanation": "Strong returns."}
         assert reader["risk"]["verdict"] == "Fragile"
         assert reader["risk"]["leading_fragility"] == "Customer concentration."
@@ -355,18 +375,25 @@ class TestSite:
     def test_public_thesis_section_is_an_explicit_card_index(self, tmp_path):
         page = webapp.write_site(self._model(), tmp_path).read_text(encoding="utf-8")
 
-        assert "48 companies worth deeper research" in page
+        assert "companies worth deeper research" in page
         assert 'id="thesisSearch"' in page
         assert 'id="thesisGrid"' in page
         assert "View assessment &amp; thesis" in page
         assert 'data-thesis-symbol="${esc(reader.symbol)}"' in page
         assert "thesisTop" not in page
+        # 2026-08-08 review F-1/U-1: Fragile/Ruinous entries are partitioned and
+        # banner-labeled, never presented typographically as peers of the candidates.
+        assert "fails the picks shortlist" in page
+        assert "View the bear case" in page
+        assert "risk-banner" in page
+        # U-5: the noise floor is stated where the scores are read.
+        assert "differences under ~5 points are noise" in page
 
     def test_public_reader_contract_and_direct_route_are_present(self, tmp_path):
         page = webapp.write_site(self._model(), tmp_path).read_text(encoding="utf-8")
 
         for text in (
-            "Back to Top 48", "At a glance", "The case in one minute",
+            "Back to the Thesis Desk", "At a glance", "The case in one minute",
             "Why might this be a strong business?",
             "What do the cash economics say?", "What does the valuation imply?",
             "What could go wrong?", "What would change the thesis?",

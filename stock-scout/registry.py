@@ -16,7 +16,9 @@ expose. The philosophy constraints it exists to honour:
   capital-allocation outflows (dividends, buybacks, acquisitions), where an untagged
   concept overwhelmingly means "none paid"; each is marked below.
 - **No price triggers.** Nothing here derives from the quote. (The one existing
-  quote-adjacent registry metric, owner-FCF yield on EV, predates v2 and stays.)
+  quote-adjacent registry metric, owner-FCF yield on EV, predates v2 and stays for
+  packets and display — but `thesis.validate` refuses it as a trigger metric since the
+  2026-08-08 valuation review, so this contract now holds at the trigger layer too.)
 - **Composites never fire.** Piotroski F and Altman Z are computed for the packet and the
   site — display-only. They are level scores; letting one fire a sell rule would be the
   two-judgements merge the constitution forbids. They live in `composites()`, which the

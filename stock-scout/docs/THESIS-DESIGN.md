@@ -253,3 +253,33 @@ trigger is checkable, stamps version/status/date, and moves the thesis to
 - **No API client, and no way to add one quietly.** The validation lives in Python and the
   research lives in the harness; a future transport would have to re-implement beat 3 to
   get around it, which is exactly the kind of change a review would notice.
+
+## 9. Addendum — the desk feed gates (2026-08-08, valuation review)
+
+`docs/research/2026-08-08-adversarial-valuation-review.md` (repo root) found the desk
+feed and the picks report stating opposite editorial positions about the same names, and
+three constitutional rules living only in prose. Four changes, ratified together as the
+"fix proposals" pass:
+
+- **The verdict rides on every Top-48 entry, and the page partitions.** `top_symbols`
+  still ranks by the scorecard alone — filtering there would shift ranks baked into
+  `research_fingerprint` and merge the two judgements the constitution keeps separate.
+  Instead the site labels: a Fragile/Ruinous entry renders under an explicit "fails the
+  picks shortlist's fragility tests — research draft, not a candidate" partition, with a
+  banner and a bear-case CTA. Drafting flagged names stays deliberate (the brief forces
+  the bear case to engage every severe finding); presenting them as peers does not.
+- **The desk eligibility floor.** `top_symbols` now refuses names below
+  `DESK_MIN_MARKET_CAP` ($300M) or `DESK_MIN_PRICE` ($5) when the row carries the
+  figure — the Scout still scores and shows them; they no longer consume work orders.
+  Ranks below the floor shift, so existing drafts re-record as INPUTS_CHANGED once.
+- **Pillar 1 has mechanics.** A named moat with an empty evidence list is refused at
+  `validate`; a moat of kind `none` is accepted as honest research but marks the record
+  PASS-RECOMMENDED, and `ratify` refuses it without a typed `override` (the goalpost
+  guard's shape).
+- **The trigger layer honors "no price triggers" fully.** `owner_fcf_yield_pct` (the one
+  quote-derived registry metric) stays in packets and on the site but is refused as a
+  trigger metric — a price move alone can no longer fire a "business" trigger.
+
+Same review, scoring side: the margin-of-safety DCF now discounts owner-FCF (a
+post-interest, equity-level flow) at the cost of equity instead of WACC, with a
+regression test pinning that leverage can no longer inflate the margin of safety.

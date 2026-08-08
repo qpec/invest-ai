@@ -19,9 +19,12 @@ Three rules carried from the design, enforced here rather than hoped for:
   METRICS registry below (the same scoring.evaluate values the live grader uses); an
   `event`/`narrative` trigger must be one yes/no question answerable from public
   information. `validate()` refuses anything else, at build AND at ratify.
-- **No price triggers.** The registry deliberately carries no quote-derived metric: a
-  falling price with an intact thesis is an opportunity (FR4), and the stock does not
-  know what you paid (FR7). Triggers are about the business.
+- **No price triggers.** A falling price with an intact thesis is an opportunity (FR4),
+  and the stock does not know what you paid (FR7). Triggers are about the business. The
+  one quote-derived registry metric (owner-FCF yield on EV — its denominator embeds the
+  market cap) stays in packets and on the site for display, but `validate()` refuses it
+  as a trigger metric (2026-08-08 valuation review, V-8): a price move alone must never
+  mechanically fire a "business" trigger.
 """
 from __future__ import annotations
 
@@ -86,6 +89,19 @@ TRIGGER_OPS = ("<", "<=", ">", ">=")
 TRIGGER_ACTIONS = ("break", "review")
 MIN_TRIGGERS = 3                    # FR2: testable invalidation triggers, plural and real
 CONVICTION_LEVELS = ("low", "medium", "high")
+
+# Registry metrics whose value moves when the quote moves. Display-only: packets and the
+# site may show them, but a trigger on one would let a price move fire a "business" rule
+# (module docstring; registry.py's own "no price triggers" contract).
+QUOTE_DERIVED_METRICS = frozenset({"owner_fcf_yield_pct"})
+
+# Desk-feed eligibility floor (2026-08-08 valuation review, V-6): below this the desk's
+# research budget goes to names a 10-15 position portfolio could never own — microcap
+# liquidity, data pathologies, delisting risk. The Scout still scores and shows them;
+# they just do not consume work orders. Applied in top_symbols when the row carries the
+# figure; a row without one is not silently excluded.
+DESK_MIN_MARKET_CAP = 300e6
+DESK_MIN_PRICE = 5.0
 
 # --- The strict tool schema (the thesis draft, FR2 minus the owner-only fields) ----------
 
@@ -184,7 +200,9 @@ TRIGGER_RULES = """## Trigger discipline (this is the part the machine holds you
   with its evidence standard inside the question. Events are facts (a contract lost, a CEO
   departure). Narratives are judgements, and their `action` MUST be `"review"`.
 - **No price-based triggers.** A falling quote with an intact thesis is an opportunity,
-  not an invalidation.
+  not an invalidation. `owner_fcf_yield_pct` is quote-derived (its denominator embeds the
+  market cap) and is refused as a trigger metric — use the business-side cash metrics
+  instead.
 - `action: "break"` only where the pre-committed answer is sell. `"review"` where the
   owner should re-examine.
 - Metric thresholds should demand persistence (`consecutive_checks` >= 2) unless a single
@@ -230,6 +248,18 @@ def validate(doc: dict, *, symbol: str | None = None) -> list[str]:
         if field in doc:
             problems.append(f"{field} is owner-only (FR9) and may not come from the builder")
 
+    # Pillar 1: "at least one durable competitive advantage, WITH EVIDENCE." A named moat
+    # with no evidence is a story; the schema allows kind "none" (an honest finding — it
+    # makes the draft PASS-RECOMMENDED at record, and ratify refuses it without an
+    # explicit override) but never a named moat on an empty evidence list.
+    moat = doc.get("moat") or {}
+    if moat.get("kind") and moat.get("kind") != "none":
+        evidence = [e for e in (moat.get("evidence") or [])
+                    if isinstance(e, str) and e.strip()]
+        if not evidence:
+            problems.append(f"moat kind {moat.get('kind')!r} claimed with no evidence — "
+                            f"a moat without evidence is a story, not a thesis field")
+
     triggers = doc.get("triggers") or []
     if len(triggers) < MIN_TRIGGERS:
         problems.append(f"only {len(triggers)} trigger(s); FR2 demands testable "
@@ -259,6 +289,10 @@ def validate(doc: dict, *, symbol: str | None = None) -> list[str]:
             if t.get("metric") not in METRICS:
                 problems.append(f"trigger {tid}: metric {t.get('metric')!r} is not in "
                                 f"the registry, so no machine can check it")
+            elif t.get("metric") in QUOTE_DERIVED_METRICS:
+                problems.append(f"trigger {tid}: {t.get('metric')} is quote-derived — a "
+                                f"price move alone could fire it, and triggers are about "
+                                f"the business (no price triggers)")
             if t.get("op") not in TRIGGER_OPS:
                 problems.append(f"trigger {tid}: op {t.get('op')!r} invalid")
             if not isinstance(t.get("threshold"), (int, float)):
@@ -453,9 +487,14 @@ def record(symbol: str, *, theses_dir: Path = THESES_DIR, model: str | None = No
                     f"trigger {trigger.get('id')}: {trigger.get('metric')} is not "
                     f"computable for this name, so the monitor could never check it")
 
+    # An honest "no moat" is a finding, not a formatting error — the draft is accepted as
+    # research, but under Pillar 1 a no-moat business is an automatic PASS, so the record
+    # says so and ratify refuses it without an explicit typed override.
+    pass_recommended = ((draft.get("moat") or {}).get("kind") == "none")
     doc = {"symbol": symbol, "status": "draft", "version": 0,
            "built_at": _dt.date.today().isoformat(),
            "agent": agent,
+           "pass_recommended": pass_recommended,
            "metrics_snapshot": snapshot,
            "thesis": draft, "validation_problems": problems}
     deskwork.write_json(out / "record.json", doc)
@@ -465,13 +504,30 @@ def record(symbol: str, *, theses_dir: Path = THESES_DIR, model: str | None = No
     return doc
 
 
+def _clears_desk_floor(row: dict) -> bool:
+    """The V-6 eligibility floor, applied only to figures the row actually carries —
+    a missing market cap or price never silently excludes a name."""
+    mcap = row.get("market_cap")
+    if mcap is None:
+        mcap = (row.get("bundle") or {}).get("market_cap")
+    if isinstance(mcap, (int, float)) and mcap < DESK_MIN_MARKET_CAP:
+        return False
+    price = row.get("price")
+    if isinstance(price, (int, float)) and price < DESK_MIN_PRICE:
+        return False
+    return True
+
+
 def top_symbols(rows: list[dict], universe_size: int) -> list[dict]:
-    """The best 1% of the screened universe: scoreable names ranked the scorecard's own
-    way (evidence tier first, then percentage)."""
+    """The best 1% of the screened universe: scoreable names above the desk's
+    eligibility floor, ranked the scorecard's own way (evidence tier first, then
+    percentage). Names under the floor stay scored and visible on the site — they just
+    do not consume the desk's work orders (2026-08-08 valuation review, V-6)."""
     import math
     scoreable = [r for r in rows if r["card"].get("pct") is not None
                  and r["card"]["band"] not in (scorecard.VETOED_BAND,
-                                               scorecard.NO_PRICE_BAND)]
+                                               scorecard.NO_PRICE_BAND)
+                 and _clears_desk_floor(r)]
     count = max(1, math.ceil(universe_size * TOP_FRACTION))
     return sorted(scoreable, key=lambda r: scorecard.rank_key(r["card"]))[:count]
 
@@ -554,6 +610,16 @@ def ratify(symbol: str, *, theses_dir: Path = THESES_DIR, ask=input) -> dict:
             f"{', '.join(deskwork.approved_ids())}). Re-run the work order on an "
             f"approved model.")
     print(f"  {deskwork.model_note(agent)}")
+
+    # Pillar 1's consequence, enforced at the last door: a draft that names NO moat is a
+    # PASS under the constitution. The owner can still overrule — deliberately, in type —
+    # the same shape as the goalpost guard's 're-arm'.
+    if ((doc.get("thesis") or {}).get("moat") or {}).get("kind") == "none":
+        answer = ask(
+            f"{symbol}'s draft names NO durable moat — under Pillar 1 that is an "
+            f"automatic PASS. Type 'override' to ratify anyway: ")
+        if answer.strip().lower() != "override":
+            raise ValueError(f"no durable moat -> PASS (the framework wins)")
 
     conviction = ask(f"Conviction for {symbol} ({'/'.join(CONVICTION_LEVELS)}): ").strip().lower()
     if conviction not in CONVICTION_LEVELS:
@@ -721,8 +787,13 @@ def main(argv=None) -> int:
                 doc = record(symbol, theses_dir=Path(args.theses_dir),
                              model=args.model)
                 print(f"  {deskwork.model_note(doc['agent'])}")
-                print(f"{symbol}: draft ACCEPTED — ready for the Gate "
-                      f"(`python thesis.py ratify {symbol}`)")
+                if doc.get("pass_recommended"):
+                    print(f"{symbol}: draft accepted as research, PASS-RECOMMENDED — it "
+                          f"names no durable moat, and under Pillar 1 that is an "
+                          f"automatic PASS (ratify will ask for an explicit override)")
+                else:
+                    print(f"{symbol}: draft ACCEPTED — ready for the Gate "
+                          f"(`python thesis.py ratify {symbol}`)")
             except deskwork.OrderError as error:
                 failures += 1
                 print(str(error), file=sys.stderr)

@@ -509,6 +509,19 @@ English page.
 
 ## 6. Prioritized improvement plan
 
+> **Implementation status (2026-08-08, same day — the "fix proposals" pass):** P0 items
+> 1–7 are implemented, plus two P1 corrections: the DCF now discounts at the cost of
+> equity with a leverage regression test (item 10), and `owner_fcf_yield_pct` is refused
+> as a trigger metric (item 13b). Changes journaled in THESIS-DESIGN.md §9. Notes: item 1
+> shipped as the *label-and-partition* variant (the verifier's recommendation — filtering
+> `top_symbols` would shift fingerprinted ranks); item 6's severe-probe promotion
+> (related-party / material-weakness) is deferred — those facts live in filings text, not
+> in bundles, so a mechanical probe needs a data path first; the U-6 "record a pass"
+> affordance is deferred with it (it needs the journal verb from item 14). The remaining
+> P1/P2 items are modeling-policy decisions that stay proposals until the owner ratifies
+> thresholds (congruence gate, mid-cycle normalization, circle quota, sector-map fix,
+> walk-forward).
+
 **P0 — this week, small diffs, no modeling decisions.**
 1. Add the inversion verdict to `thesis.top` entries; partition or tag Fragile/Ruinous
    cards on the Thesis tab (F-1, U-1). Journal the policy either way.

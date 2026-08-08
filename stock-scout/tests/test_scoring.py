@@ -672,6 +672,25 @@ def test_margin_of_safety_none_for_burner():
     assert scoring.margin_of_safety(_burner(base_bundle(), ttm_positive=False)) is None
 
 
+def test_margin_of_safety_does_not_rise_with_leverage():
+    """2026-08-08 valuation review V-3: owner-FCF is post-interest (equity-level), so the
+    DCF discounts at COST_OF_EQUITY. Under the old WACC discounting, adding debt LOWERED
+    the discount rate (cod x 0.75 < coe) and inflated intrinsic value with cash flows
+    held fixed — the exact pro-leverage bias this pins down."""
+    unlevered = base_bundle()
+    levered = base_bundle()
+    set_all_balances(levered, **{"Total Debt": 4e9, "Cash And Cash Equivalents": 0.0})
+    mos_u = scoring.margin_of_safety(unlevered)
+    mos_l = scoring.margin_of_safety(levered)
+    assert mos_l["mos_pct"] <= mos_u["mos_pct"] + 1e-12
+    # Both discount at the cost of equity, reported alongside the reference WACC.
+    assert mos_u["discount_rate"] == pytest.approx(scoring.COST_OF_EQUITY)
+    assert mos_l["discount_rate"] == pytest.approx(scoring.COST_OF_EQUITY)
+    # The reference WACC still moves with the capital structure; the discount rate the
+    # DCF actually uses does not — that decoupling IS the fix.
+    assert mos_l["wacc"] != mos_u["wacc"]
+
+
 def test_margin_of_safety_mega_cap_growth_cap():
     b = base_bundle()
     b["market_cap"] = 250e9

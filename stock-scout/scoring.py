@@ -788,12 +788,21 @@ def score_universe(bundles: list[dict]) -> list[dict]:
 
 # --- v2.3 shadow layers (§4.8 — never enter the composite) -------------------------------
 
+# CAPM inputs shared by wacc_estimate and the DCF discount rate (rf 4.5%, beta 1.0,
+# MRP 6%). Beta at a uniform 1.0 is a declared simplification, not an estimate — the
+# 2026-08-08 valuation review (V-3) records it as a known limitation.
+RISK_FREE = 0.045
+MARKET_RISK_PREMIUM = 0.06
+COST_OF_EQUITY = RISK_FREE + 1.0 * MARKET_RISK_PREMIUM
+
+
 def wacc_estimate(*, market_cap, total_debt, cash, interest_coverage=None) -> float:
     """§4.8 WACC per ai-hedge-fund calculate_wacc: CAPM cost of equity (rf 4.5%, beta 1.0,
     MRP 6%), cost of debt from interest coverage (default spread when unknown), 25% tax
-    shield, clamped to [6%, 20%]."""
-    rf, mrp = 0.045, 0.06
-    coe = rf + 1.0 * mrp
+    shield, clamped to [6%, 20%]. Reported for reference; the margin-of-safety DCF
+    discounts at COST_OF_EQUITY, not here (see margin_of_safety)."""
+    rf, mrp = RISK_FREE, MARKET_RISK_PREMIUM
+    coe = COST_OF_EQUITY
     if interest_coverage is not None and interest_coverage > 0:
         cod = max(rf + 0.01, rf + 10.0 / interest_coverage)
     else:
@@ -819,31 +828,39 @@ def _fcf_volatility(history: list[float]) -> float:
     return min(statistics.stdev(pos) / mean, 1.0)
 
 
-def dcf_intrinsic(base_fcf: float, growth: float, wacc: float) -> float:
+def dcf_intrinsic(base_fcf: float, growth: float, discount: float) -> float:
     """§4.8 3-stage DCF present value (ai-hedge-fund calculate_enhanced_dcf_value, without
     the volatility quality factor): years 1-3 at `growth`, years 4-7 declining transition
-    ((growth+3%)/2 fading to 0), terminal min(3%, 0.6*growth) (adjusted to 0.8*wacc when
-    wacc <= terminal)."""
+    ((growth+3%)/2 fading to 0), terminal min(3%, 0.6*growth) (adjusted to 0.8*discount
+    when discount <= terminal). `discount` must match the cash flow's level — owner-FCF
+    is post-interest, so its rate is the cost of equity (margin_of_safety)."""
     transition = (growth + 0.03) / 2.0
     terminal = min(0.03, growth * 0.6)
     pv = 0.0
     for year in range(1, 4):
-        pv += base_fcf * (1 + growth) ** year / (1 + wacc) ** year
+        pv += base_fcf * (1 + growth) ** year / (1 + discount) ** year
     for year in range(4, 8):
         rate = transition * (8 - year) / 4.0
-        pv += base_fcf * (1 + growth) ** 3 * (1 + rate) ** (year - 3) / (1 + wacc) ** year
+        pv += base_fcf * (1 + growth) ** 3 * (1 + rate) ** (year - 3) / (1 + discount) ** year
     final = base_fcf * (1 + growth) ** 3 * (1 + transition) ** 4
-    if wacc <= terminal:
-        terminal = wacc * 0.8
-    return pv + final * (1 + terminal) / (wacc - terminal) / (1 + wacc) ** 7
+    if discount <= terminal:
+        terminal = discount * 0.8
+    return pv + final * (1 + terminal) / (discount - terminal) / (1 + discount) ** 7
 
 
 def margin_of_safety(bundle: dict) -> dict | None:
-    """§4.8 shadow margin of safety — never scored. base FCF = max(TTM owner-FCF,
+    """§4.8 margin of safety — scored by the scorecard's Price block (10 of 25 points),
+    so its assumptions are load-bearing, not shadow. base FCF = max(TTM owner-FCF,
     0.85 x 3-yr average annual owner-FCF); growth = annual revenue CAGR capped at 25%
     (10% above $200B market cap; None/0 -> 5% default); intrinsic = 3-stage DCF x
     volatility quality factor max(0.7, 1 - 0.5*CV). None when market cap is unusable or
-    base FCF <= 0. mos_pct = (intrinsic - market_cap) / market_cap."""
+    base FCF <= 0. mos_pct = (intrinsic - market_cap) / market_cap.
+
+    Discount rate: COST_OF_EQUITY, not WACC (2026-08-08 valuation review, V-3).
+    Owner-FCF is computed from US-GAAP OCF, which is after cash interest — an
+    equity-level flow — so discounting it at WACC (below the cost of equity for any
+    leveraged name) systematically inflated intrinsic value with leverage. WACC is still
+    computed and reported for reference; it no longer discounts anything."""
     mcap = _num(bundle.get("market_cap"))
     if mcap is None or mcap <= 0:
         return None
@@ -866,9 +883,10 @@ def margin_of_safety(bundle: dict) -> dict | None:
     wacc = wacc_estimate(market_cap=mcap, total_debt=_row(bal, "total_debt"),
                          cash=_row(bal, "cash"), interest_coverage=coverage)
     quality = max(0.7, 1.0 - 0.5 * _fcf_volatility(hist))
-    intrinsic = dcf_intrinsic(base, growth, wacc) * quality
+    intrinsic = dcf_intrinsic(base, growth, COST_OF_EQUITY) * quality
     return {"intrinsic_value": intrinsic, "market_cap": mcap,
             "mos_pct": (intrinsic - mcap) / mcap, "wacc": wacc,
+            "discount_rate": COST_OF_EQUITY,
             "growth": growth, "base_fcf": base}
 
 
