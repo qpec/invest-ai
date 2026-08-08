@@ -122,8 +122,8 @@ a "great opportunity" conflict, the framework wins.
 
 Buy wonderful businesses at fair prices, and let compounding do the heavy lifting.
 
-- **Circle of competence.** Only businesses the owner genuinely understands: [redacted]. If the business
-  model and its moat cannot be explained in two sentences, PASS.
+- **Understand it or pass.** If the business model and its moat cannot be explained in
+  two sentences, PASS.
 - **Moat checklist.** Require at least one durable competitive advantage, with evidence:
   network effects, switching costs, cost advantages, brand/trust, regulatory barriers.
 - **Owner earnings over reported earnings.** Judge by free cash flow — how much cash the
@@ -155,21 +155,14 @@ separately from outcome) · complexity addiction.
 
 ## Pillar 3 — How to Keep Upgrading (Naval)
 
-- **Specific knowledge.** The owner's edge is the intersection of cloud architecture,
-  healthcare systems and AI implementation. Weight analysis toward that edge.
+- **Specific knowledge.** Weight analysis toward the owner's own hard-won edge — the
+  domains they know better than the market does.
 - **Leverage stack.** Capital, labour, code (this system), media. Shift income from
   labour-based to leverage-based.
 - **Continuous learning compounds.** The most important investment is the owner's own
   judgment.
 - **Wealth vs. status.** Status games are zero-sum. Buy the boring compounder, not the
   dinner-party stock. The system flags status buys.
-
-## Owner context
-
-- [redacted] (tax treatment of funds vs. individual stocks;
-  base currency EUR, most holdings USD)
-- [redacted]
-- Circle of competence: [redacted]
 
 ---
 
@@ -317,8 +310,11 @@ physically quarantined, and a rendered-markdown archive in its own git repo.
 
 It is **kept and still runs locally**, and it is not optional plumbing:
 `stock-scout/production.py` imports `agentcy.db` and `agentcy.production` for all
-production state. Locked decisions: FR13 benchmark = S&P 500 TR in EUR (PFIC-aware);
-ETFs outside-framework by default; the daily letter carries no portfolio value.
+production state. Locked decisions: FR13 benchmark = S&P 500 Total Return, measured in
+the portfolio's base currency; ETFs outside-framework by default (fund structures can
+carry adverse pass-through tax treatment depending on the owner's jurisdiction — the
+reasoning is journaled in `docs/plans/`, not here); the daily letter carries no
+portfolio value.
 
 ## Testing
 
