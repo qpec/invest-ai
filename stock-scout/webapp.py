@@ -892,7 +892,7 @@ details.fold>.fbody{padding:2px 16px 14px;border-top:1px solid var(--hair)}
   font-weight:700;color:var(--accent)}
 .company-title{min-width:0}.company-title b{display:block;font-size:16px}.company-title span{color:var(--text2)}
 .card-judgements{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-.judgement{background:var(--raised);border-radius:8px;padding:9px}.judgement label{display:block;
+.judgement{background:var(--raised);border-radius:8px;padding:9px;overflow-wrap:anywhere}.judgement label{display:block;
   color:var(--faint);font-size:10px;text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px}
 .thesis-cta{width:100%;justify-content:center;min-height:42px;background:var(--accent);color:#fff;
   border:0;border-radius:8px;font-weight:650;cursor:pointer}

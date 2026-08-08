@@ -306,6 +306,7 @@ class TestSite:
         page = (tmp_path / "index.html").read_text(encoding="utf-8")
         assert "transition:transform .15s ease;display:none" in page
         assert ".panel.open{transform:none;display:flex}" in page
+        assert "overflow-wrap:anywhere" in page
         assert 'aria-live="polite"' in page
 
     def test_scout_top_rows_expose_thesis_action_only_for_candidates(self, tmp_path):
