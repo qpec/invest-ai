@@ -75,7 +75,7 @@ alert — it never tight-loops. To recover: fix or delete the file, then
     systemctl reset-failed agentcy-event
 
 ## 5. Restore drill (standalone, also step 1 above)
-Latest backup is under `/var/lib/stock-agentcy/backups` and mirrored to
+Latest backup is under `$AGENTCY_HOME/backups` and mirrored to
 `/mnt/agentcy-backup`. Open it read-only, run `PRAGMA integrity_check` (expect `ok`),
 sanity-check row counts, and confirm the toolchain artifacts (uv binary, wheelhouse,
 python-build-standalone tarball) exist and hash-match — a year-8 rebuild on a fresh

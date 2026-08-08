@@ -168,7 +168,7 @@ in [the completeness research](docs/research/2026-08-07-paid-data-completeness-o
 | [`stock-scout/docs/REGISTRY-DESIGN.md`](stock-scout/docs/REGISTRY-DESIGN.md) | the 26-metric registry: audit, sources, formulas |
 | [`stock-scout/docs/INVERSION-DESIGN.md`](stock-scout/docs/INVERSION-DESIGN.md) | the Munger layer's seven fragility probes |
 | [`docs/plans/`](docs/plans/) | binding design history: functional baseline → technology → distributed desk |
-| [`docs/runbook.md`](docs/runbook.md) | operating the box |
+| [`docs/runbook.md`](docs/runbook.md) | operating the local desk |
 
 *(Repository renamed from `stock-agentcy` 2026-08-05; internal module names keep
 the working name so the design-doc history stays true.)*

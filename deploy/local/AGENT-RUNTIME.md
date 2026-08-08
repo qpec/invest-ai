@@ -1,94 +1,87 @@
-# OpenClaw on the box — configuration contract
+# The agent runtime — configuration contract (local)
 
-This file is the judgement lane's configuration checklist. The exact config
-syntax depends on the installed OpenClaw version (`openclaw --help`,
-`openclaw config`); what must be TRUE is fixed by the architecture doc
-(`docs/plans/2026-08-04-distributed-desk-architecture.md` §4) and is listed
-here. `deploy/openclaw/install.sh` already created the user, the CLIs and the
-filesystem seam — and asserted the seam holds.
+The desk needs one **subscription** coding-agent CLI to do its research and
+judgement work. This file is the checklist for setting that up on the machine
+you run the desk on. Exact config syntax depends on which CLI and version you
+installed (`claude --help`, `openclaw config`, `codex --help`); what must be
+TRUE is fixed by the architecture (see `CLAUDE.md`) and is listed here.
 
-## 1. Auth — Claude-CLI reuse, nothing else
+There is no server. Everything below happens on your own machine, under your
+own user account.
 
-**The automated path (default):** `openclaw-bootstrap.timer` runs a 25-minute
-Telegram exchange slice every ~4h until auth succeeds (bounded slices because
-the exchange must pause the agentcy bot — getUpdates is exclusive — and the
-letters channel must never be down for long). The bot messages the owner: run
-`claude setup-token` on the desk, reply with the `sk-ant-…` token *within the
-slice*; the box deletes the message (and says so honestly if it could not),
-installs the token at `/etc/stock-agentcy/openclaw.env` (root:openclaw 0640 —
-read by `scout-verdicts.service`), verifies it with a real claude round-trip
-against a per-run nonce, and confirms the Telegram queue so the restarted bot
-can never re-read the credential. Tokens are revocable at the Anthropic
-console; rotate by removing `/var/lib/stock-agentcy/.openclaw-authed` and
-`systemctl start openclaw-bootstrap`, then replying with a fresh one.
+## 1. Auth — a subscription, never an API key
 
-**The manual path** (equivalent, and what the bootstrap's 'done' reply checks):
+Log in once, interactively, with whichever CLI you use:
 
-```
-sudo -u openclaw claude login
+```bash
+claude login          # Claude Pro/Max, via Claude Code
+openclaw login        # OpenClaw, driving the claude binary as a subprocess
+codex login           # ChatGPT, via the Codex CLI
 ```
 
-(For any `openclaw …` daemon command, target the user bus — the account is a
-system user, so its manager only exists because install.sh enabled lingering:
-`sudo -u openclaw XDG_RUNTIME_DIR=/run/user/$(id -u openclaw) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u openclaw)/bus openclaw …`)
+**No `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` anywhere.** API-key mode is the
+path the owner locked out ("run by claude code or openclaw. Not api") — it is a
+cost decision and a hard rule, not a preference. If a config field asks for a
+key, leave it empty.
 
-The owner's subscription, through the `claude` binary OpenClaw drives as a
-subprocess. **No `ANTHROPIC_API_KEY` anywhere on this box** — if a config asks
-for one, leave it empty; API-key mode is the path the owner locked out
-("run by claude code or openclaw. Not api"). The static `setup-token` route is
-the fragile fallback (it broke once, April 2026) — use it only if CLI reuse is
-unavailable in your OpenClaw version.
-
-If the login ever expires on the headless box, the failure is the benign one —
-the Saturday monitor reports judgement triggers UNCHECKED, loudly, and the
-letter says so. Recovery is one line: SSH in, `sudo -u openclaw claude login`,
+When the login expires the failure is the benign one: the monitor reports
+judgement triggers UNCHECKED, loudly. Recovery is one line — log in again and
 re-run the job.
 
 ## 2. Model — pinned to the best available
 
-Pin the model to `claude-opus-5` (the id in `deskwork.APPROVED_MODELS`).
-`monitor.py run` refuses verdicts declared from any other id, so a drifted
-config doesn't corrupt a thesis — it just wastes a Saturday.
+Pin the model to an id in `deskwork.APPROVED_MODELS` (keyed per provider).
+`thesis.py record` and `monitor.py run` refuse work declared from any other id,
+so a drifted config cannot corrupt a thesis — it only wastes a run. Widening
+the approved list is an owner-side code change; there is no override flag.
 
-## 3. Gateway — loopback only, owner only
+`deploy/local/scout-thesis-runner.sh` is what the production run invokes per
+candidate. It pins the model and runs each symbol in its own session key.
 
-- Bind the daemon/gateway to `127.0.0.1`; no public port (droplet firewall
-  stays: 22 in, 443 out).
-- Telegram channel allowlisted to the owner's chat-id only.
-- Web UI disabled.
+## 3. Exposure — loopback only
 
-## 4. The Saturday 07:30 verdicts job
+- The production desk (`webapp.py --serve`) binds to `127.0.0.1`. Reach it over
+  an SSH tunnel if you want it from another device; never open a port.
+- If your agent CLI runs a daemon or gateway, bind it to `127.0.0.1` too, and
+  disable its web UI.
+- A served build carries a capability token and must never be written into the
+  published `docs/` tree. The generator guards this.
 
-**Already live as `scout-verdicts.timer`** (Sat 07:30 Europe/Amsterdam,
-`User=openclaw`, driving `claude -p` directly via `deploy/openclaw/verdicts.sh`)
-— deliberately independent of OpenClaw, per the plan's §6 symmetry: a work
-order is a file, either harness can execute one. If you later prefer OpenClaw's
-own cron to run it, disable the timer and schedule the same prompt there —
-same beat, after the 07:00 brief and well before the 12:00 mechanical run:
+## 4. The two agent beats
 
-> Look for `/var/lib/stock-agentcy/scout/theses/monitor-<today's date>/WORK-ORDER.md`.
-> If it does not exist, reply "no work order this week" and stop.
-> If it exists, execute it exactly: research each pre-committed question with
-> your own tools (budget per the order), and write `verdicts.json` next to the
-> order, matching its schema. Do NOT run the order's final `monitor.py run`
-> command — on this box the mechanical lane ingests and validates your
-> verdicts at 12:00, and your user has no permission to write where that
-> command writes. Writing `verdicts.json` is the whole deliverable.
+Both beats are the same shape: a work order is a file, any harness can execute
+one.
 
-Thesis *drafting* is deliberately not scheduled (FR14): the owner triggers it
-by Telegram ("draft the new top-1%") or a desk session, and ratification is a
-human ritual over SSH (`thesis.py ratify`, as the agentcy user — the only
-identity that can write `theses/committed/`).
+**Thesis drafting** — `thesis.py brief SYM` writes the work order, the agent
+researches and writes `report.md` / `summary.md` / `thesis.json`, then
+`thesis.py record SYM` re-checks every rule mechanically and exits non-zero if
+it refuses the work. In a production run this is the `evaluate_theses` stage,
+driven by `scout-thesis-runner.sh`.
 
-## 5. What this lane can never do (enforced, not requested)
+**Weekly verdicts** — `monitor.py brief` writes the week's questions, the agent
+answers them into `verdicts.json`, and `monitor.py run` ingests them. The
+arithmetic and the sticky-broken logic always run in Python; a verdict only
+ever *answers a question*.
 
-- Commit a thesis — no write on `theses/committed/` (install.sh asserts it).
-- Touch portfolio state — no read on the SQLite files.
-- Push anywhere — no git credentials exist in this user's reach.
-- Fire a trigger — verdicts only *answer questions*; the arithmetic and the
-  sticky-broken logic run in the mechanical lane.
+> Note: the unattended production run (`local_production.run_monitor`) does not
+> currently supply verdicts, so event/narrative triggers read UNCHECKED unless
+> you run the verdict beat yourself. That is the honest state, and UNCHECKED is
+> reported loudly by design — a missing judgement never reads as "fine".
 
-Prompt injection from the open web is an assumed input here, not a surprise:
-the blast radius is a bad draft or a bad verdict, both of which the mechanical
-lane validates, labels, and can only ever turn into "review" or "UNCHECKED" —
-never a silent action.
+Ratification is never automated. `thesis.py ratify` is a human ritual: it asks
+for conviction and circle-of-competence (FR9), and only then does a thesis reach
+`theses/committed/` where the monitor acts on it.
+
+## 5. What the agent can never do (enforced, not requested)
+
+- **Commit a thesis.** Ratification is CLI + human; the browser has no door to it.
+- **Fire a trigger.** Verdicts answer questions; the metric arithmetic, the
+  persistence streaks and the sticky-broken state are mechanical.
+- **Execute a trade.** The system advises and monitors. It never trades (FR11).
+- **Write the contract.** The agent is trusted for research and prose; `record`
+  re-checks every rule against the file on disk.
+
+Prompt injection from the open web is an assumed input, not a surprise: the
+blast radius is a bad draft or a bad verdict, both of which the mechanical layer
+validates, labels, and can only ever turn into "review" or "UNCHECKED" — never a
+silent action.
