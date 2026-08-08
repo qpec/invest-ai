@@ -255,6 +255,49 @@ def public_portfolio_thesis(doc: dict, registry: dict,
     }
 
 
+def public_thesis_reader(draft: dict, row: dict, detail: dict) -> dict:
+    """Join one accepted draft to its two independent Scout judgements.
+
+    This is a public allowlist projection: the reader never receives arbitrary
+    top-level or thesis keys from an agent-authored record.
+    """
+    if not draft.get("accepted"):
+        raise ValueError("accepted thesis required for public reader")
+    symbol = str(row.get("s") or "")
+    if draft.get("symbol") != symbol:
+        raise ValueError("thesis symbol mismatch")
+    if not row.get("top"):
+        raise ValueError("Top 48 rank required for public reader")
+    body = draft.get("thesis") or {}
+    if not body.get("business_model"):
+        raise ValueError(f"{symbol}: business model required for public reader")
+    valuation = body.get("valuation_anchor") or {}
+    if not valuation.get("statement"):
+        raise ValueError(f"{symbol}: valuation statement required for public reader")
+    public_body = {key: body.get(key) for key in PUBLIC_THESIS_FIELDS if key in body}
+    why = (detail.get("card") or {}).get("why") or []
+    if isinstance(why, str):
+        why = [why]
+    failure_modes = (detail.get("inv") or {}).get("failure_modes") or []
+    leading = next((mode.get("detail") for mode in failure_modes
+                    if isinstance(mode, dict) and mode.get("severity") == "severe"
+                    and mode.get("detail")), None)
+    if leading is None:
+        leading = next((mode.get("detail") for mode in failure_modes
+                        if isinstance(mode, dict) and mode.get("detail")), "")
+    return {
+        "symbol": symbol, "name": row.get("n") or symbol,
+        "rank": int(row["top"]),
+        "quality": {"score": row.get("pct"), "grade": row.get("band"),
+                    "explanation": why[0] if why else ""},
+        "risk": {"verdict": row.get("verdict"), "leading_fragility": leading},
+        "thesis": public_body,
+        "summary_html": draft.get("summary_html") or "",
+        "report_html": draft.get("report_html") or "",
+        "triggers": draft.get("triggers") or [],
+    }
+
+
 def load_thesis_dir(theses_dir: Path, registry_by_symbol: dict) -> dict:
     """Everything the Thesis and Monitor tabs need from theses/: drafts in full (owner-
     field-stripped), committed statuses, evaluated triggers."""
@@ -446,6 +489,7 @@ def assemble(*, sec_data: str, prices_dir: str | None, universe: str, as_of: str
     theses = load_thesis_dir(Path(theses_dir), registry_by_symbol) \
         if theses_dir and Path(theses_dir).exists() else {"drafts": [], "committed": []}
     drafts_by_symbol = {d["symbol"]: d for d in theses["drafts"]}
+    compact_by_symbol = {row["s"]: row for row in compact}
     top_list = [{"rank": top_rank[r["symbol"]], "sym": r["symbol"],
                  "name": by_symbol[r["symbol"]].get("name") or "",
                  "band": r["card"].get("band"), "pct": r["card"].get("pct"),
@@ -454,6 +498,11 @@ def assemble(*, sec_data: str, prices_dir: str | None, universe: str, as_of: str
                      else "draft refused" if r["symbol"] in drafts_by_symbol
                      else "no work order yet")}
                 for r in top_rows]
+    readers = [public_thesis_reader(
+        drafts_by_symbol[r["symbol"]], compact_by_symbol[r["symbol"]],
+        details[r["symbol"]])
+        for r in top_rows if r["symbol"] in drafts_by_symbol
+        and drafts_by_symbol[r["symbol"]].get("accepted")]
 
     # Coverage is stated, not implied: a universe bigger than what has been fetched is
     # the normal state while the nightly sweep converges, and a page that showed only
@@ -480,7 +529,7 @@ def assemble(*, sec_data: str, prices_dir: str | None, universe: str, as_of: str
         "rows": compact, "details": details,
         "charts": {"bands": bands, "verdicts": verdicts, "coverage": cov},
         "units": {k: v[1] for k, v in thesis_mod.METRICS.items()},
-        "thesis": {"top": top_list, "drafts": theses["drafts"]},
+        "thesis": {"top": top_list, "drafts": theses["drafts"], "readers": readers},
         "portfolio_monitor": {
             "committed": [dict(item, next_run=next_saturday(as_of))
                           for item in theses["committed"]],

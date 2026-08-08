@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from pathlib import Path
 
 import webapp
@@ -65,6 +67,47 @@ class TestPayload:
         assert public["symbol"] == "AAA"
         assert public["thesis"]["business_model"] == "Makes widgets."
         assert public["next_run"] == "2026-08-08"
+
+    def test_public_reader_joins_thesis_and_separate_scout_judgements(self):
+        draft = {
+            "symbol": "AAA", "accepted": True,
+            "thesis": {
+                "business_model": "Makes mission-critical widgets.",
+                "moat": {"kind": "switching_costs", "evidence": ["Retention is high."]},
+                "owner_earnings_picture": "Cash conversion is strong.",
+                "valuation_anchor": {"metric": "owner_fcf_yield_pct", "value": 8.2,
+                                     "statement": "The current cash yield is 8.2%."},
+                "bear_case": "Demand can contract.",
+                "ten_year_statement": "Durability depends on retention.",
+                "triggers": [], "sources": ["https://example.com/source"],
+            },
+            "summary_html": "<p>Balanced summary.</p>",
+            "report_html": "<p>Full report.</p>", "triggers": [],
+        }
+        reader = webapp.public_thesis_reader(
+            draft,
+            {"s": "AAA", "n": "Alpha Inc", "top": 1, "pct": 91.0,
+             "band": "Exceptional", "verdict": "Fragile", "reg": {}},
+            {"inv": {"failure_modes": [{"severity": "severe",
+                                          "detail": "Customer concentration."}]},
+             "card": {"why": ["Strong returns."]}},
+        )
+        assert reader["quality"] == {"score": 91.0, "grade": "Exceptional",
+                                      "explanation": "Strong returns."}
+        assert reader["risk"]["verdict"] == "Fragile"
+        assert reader["risk"]["leading_fragility"] == "Customer concentration."
+        assert reader["thesis"]["business_model"] == "Makes mission-critical widgets."
+
+    def test_public_reader_refuses_unaccepted_or_mismatched_draft(self):
+        with pytest.raises(ValueError, match="accepted thesis"):
+            webapp.public_thesis_reader({"symbol": "AAA", "accepted": False},
+                                        {"s": "AAA", "top": 1}, {})
+        with pytest.raises(ValueError, match="symbol mismatch"):
+            webapp.public_thesis_reader(
+                {"symbol": "BBB", "accepted": True,
+                 "thesis": {"business_model": "x",
+                            "valuation_anchor": {"statement": "v"}}},
+                {"s": "AAA", "top": 1}, {})
 
 
 class TestTriggerEval:
