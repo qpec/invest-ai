@@ -277,8 +277,13 @@ def public_thesis_reader(draft: dict, row: dict, detail: dict) -> dict:
         raise ValueError(f"{symbol}: valuation statement required for public reader")
     public_body = {key: body.get(key) for key in PUBLIC_THESIS_FIELDS if key in body}
     why = (detail.get("card") or {}).get("why") or []
-    if isinstance(why, str):
-        why = [why]
+    if isinstance(why, dict):
+        strongest = why.get("strongest") or {}
+        quality_explanation = strongest.get("sentence") or ""
+    elif isinstance(why, list):
+        quality_explanation = str(why[0]) if why else ""
+    else:
+        quality_explanation = str(why) if why else ""
     failure_modes = (detail.get("inv") or {}).get("failure_modes") or []
     leading = next((mode.get("detail") for mode in failure_modes
                     if isinstance(mode, dict) and mode.get("severity") == "severe"
@@ -290,7 +295,7 @@ def public_thesis_reader(draft: dict, row: dict, detail: dict) -> dict:
         "symbol": symbol, "name": row.get("n") or symbol,
         "rank": int(row["top"]),
         "quality": {"score": row.get("pct"), "grade": row.get("band"),
-                    "explanation": why[0] if why else ""},
+                    "explanation": quality_explanation},
         "risk": {"verdict": row.get("verdict"), "leading_fragility": leading},
         "thesis": public_body,
         "summary_html": draft.get("summary_html") or "",

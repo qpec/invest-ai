@@ -98,6 +98,25 @@ class TestPayload:
         assert reader["risk"]["leading_fragility"] == "Customer concentration."
         assert reader["thesis"]["business_model"] == "Makes mission-critical widgets."
 
+    def test_public_reader_uses_the_scorecard_strongest_sentence(self):
+        draft = {
+            "symbol": "AAA", "accepted": True,
+            "thesis": {
+                "business_model": "Makes mission-critical widgets.",
+                "valuation_anchor": {"statement": "Cash yield is 8%."},
+            },
+        }
+        reader = webapp.public_thesis_reader(
+            draft,
+            {"s": "AAA", "n": "Alpha Inc", "top": 1, "pct": 91.0,
+             "band": "Exceptional", "verdict": "Ordinary", "reg": {}},
+            {"card": {"why": {
+                "strongest": {"sentence": "Carried by durable cash returns."},
+                "weakest": {"sentence": "Held back by dilution."},
+            }}, "inv": {}},
+        )
+        assert reader["quality"]["explanation"] == "Carried by durable cash returns."
+
     def test_public_reader_refuses_unaccepted_or_mismatched_draft(self):
         with pytest.raises(ValueError, match="accepted thesis"):
             webapp.public_thesis_reader({"symbol": "AAA", "accepted": False},
