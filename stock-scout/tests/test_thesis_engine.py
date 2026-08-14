@@ -1013,3 +1013,89 @@ class TestMungerGatesTheDeskFeed:
         chosen = [r["symbol"] for r in thesis.top_symbols(rows, 100)]   # 1 slot
         assert chosen == ["A"] or chosen == ["B"]
         assert "RUIN" not in chosen
+
+
+class TestSmallCapTranche:
+    """Owner-directed 2026-08-14: "low caps must specifically get a chance."
+
+    Evidence-tier-first ranking is right for presentation and quietly wrong for budget:
+    small caps carry shorter filing histories, so an all-cap contest for ~70 slots hands
+    every work order to large caps. The tranche reserves a share of the slots for the
+    best qualifying small caps without touching any gate or the ranking itself.
+    """
+
+    def _row(self, symbol, pct, mcap=None, evidence="full", **extra):
+        row = {"symbol": symbol,
+               "card": {"pct": pct, "band": "Strong", "evidence": evidence,
+                        "score": pct, "available_max": 100}}
+        if mcap is not None:
+            row["market_cap"] = mcap
+        row.update(extra)
+        return row
+
+    def _large_field(self, n, top_pct=95):
+        return [self._row(f"L{top_pct - i}", top_pct - i, mcap=50e9)
+                for i in range(n)]
+
+    def test_a_small_cap_buried_by_evidence_tier_is_promoted(self):
+        """The motivating case: a partial-evidence small cap ranks below every full-tier
+        large cap and would never see a work order. It takes the reserved seat, the
+        worst-ranked large cap makes room, and the feed stays the same size."""
+        rows = self._large_field(6) + [
+            self._row("SMALL", 60, mcap=1e9, evidence="partial")]
+        top = thesis.top_symbols(rows, 500)               # 5 slots, reserve = 1
+        symbols = [r["symbol"] for r in top]
+        assert len(top) == 5
+        assert "SMALL" in symbols
+        assert "L90" not in symbols                       # the worst large cap made room
+        assert symbols[-1] == "SMALL"                     # ranking untouched: tier first
+
+    def test_the_tranche_is_a_noop_when_small_caps_already_qualify(self):
+        rows = self._large_field(4) + [self._row("SMALL", 99, mcap=1e9)]
+        top = thesis.top_symbols(rows, 500)               # 5 slots, reserve = 1
+        assert [r["symbol"] for r in top] == ["SMALL", "L95", "L94", "L93", "L92"]
+
+    def test_a_reserve_never_pads(self):
+        """No qualifying small cap in the whole pool: the spare slot falls back to the
+        general ranking rather than going unfilled or to an unqualified name."""
+        rows = self._large_field(7)
+        top = thesis.top_symbols(rows, 500)
+        assert [r["symbol"] for r in top] == ["L95", "L94", "L93", "L92", "L91"]
+
+    def test_every_existing_gate_still_gates_the_tranche(self):
+        """A sub-floor, vetoed-band or fragility-failing small cap is not promotable —
+        the tranche changes who competes for the last slots, never how a name qualifies."""
+        rows = self._large_field(6) + [
+            self._row("SUBFLOOR", 60, mcap=thesis.DESK_MIN_MARKET_CAP - 1),
+            self._row("FRAG", 60, mcap=1e9,
+                      inversion={"verdict": "Fragile",
+                                 "coverage": {"severe": 2, "caution": 0}}),
+        ]
+        symbols = [r["symbol"] for r in thesis.top_symbols(rows, 500)]
+        assert "SUBFLOOR" not in symbols and "FRAG" not in symbols
+        assert len(symbols) == 5
+
+    def test_a_missing_market_cap_cannot_claim_a_reserved_seat(self):
+        """The floor's rule mirrored: a figure-less row still competes generally, but a
+        reserved seat is a positive claim and needs the qualifying figure."""
+        rows = self._large_field(6) + [self._row("NOCAP", 60, evidence="partial")]
+        symbols = [r["symbol"] for r in thesis.top_symbols(rows, 500)]
+        assert "NOCAP" not in symbols
+
+    def test_a_bundle_shaped_market_cap_qualifies(self):
+        """The CLI carries the figure inside the bundle; the tranche must read both
+        shapes, exactly as the floor does."""
+        rows = self._large_field(6) + [
+            self._row("SMALL", 60, evidence="partial", bundle={"market_cap": 1e9})]
+        symbols = [r["symbol"] for r in thesis.top_symbols(rows, 500)]
+        assert "SMALL" in symbols
+
+    def test_fewer_qualifying_small_caps_than_reserved_slots(self):
+        rows = self._large_field(12) + [
+            self._row("SMALL", 60, mcap=1e9, evidence="partial")]
+        top = thesis.top_symbols(rows, 1000)              # 10 slots, reserve = 2
+        symbols = [r["symbol"] for r in top]
+        assert len(top) == 10
+        assert "SMALL" in symbols
+        assert "L86" not in symbols                       # one slot for the one small cap
+        assert "L87" in symbols                           # the spare reserve fell back

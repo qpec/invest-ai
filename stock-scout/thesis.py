@@ -107,6 +107,19 @@ QUOTE_DERIVED_METRICS = frozenset({"owner_fcf_yield_pct"})
 DESK_MIN_MARKET_CAP = 300e6
 DESK_MIN_PRICE = 5.0
 
+# The small-cap tranche (owner-directed 2026-08-14: "low caps must specifically get a
+# chance"). Ranking sorts evidence tier before percentage — correctly, for presentation —
+# but small caps carry shorter filing histories, so an all-cap contest for ~70 desk slots
+# quietly hands every work order to large caps. The tranche reserves a share of the desk
+# slots for the best names at or under the ceiling that clear EVERY existing gate
+# (scoreable, Munger, the V-6 floor — which itself stays exactly where it is). It never
+# pads: fewer qualifying small caps than reserved slots means the spare slots fall back
+# to the general ranking, and a row without a market cap cannot claim a reserved seat —
+# a guarantee needs the qualifying figure ("refuse, never guess" cuts both ways).
+# docs/plans/2026-08-14-small-cap-tranche-design.md holds the reasoning.
+DESK_SMALL_CAP_CEILING = 2e9
+DESK_SMALL_CAP_RESERVED_FRACTION = 0.20
+
 # --- The strict tool schema (the thesis draft, FR2 minus the owner-only fields) ----------
 
 _TRIGGER_SCHEMA = {
@@ -514,22 +527,35 @@ def record(symbol: str, *, theses_dir: Path = THESES_DIR, model: str | None = No
     return doc
 
 
+def _row_figure(row: dict, key: str) -> float | None:
+    """A numeric figure from the row, falling back to its bundle (the two shapes the CLI
+    and the site actually build). Booleans are not numbers; anything else is None."""
+    value = row.get(key)
+    if value is None:
+        value = (row.get("bundle") or {}).get(key)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return None
+
+
 def _clears_desk_floor(row: dict) -> bool:
     """The V-6 eligibility floor, applied only to figures the row actually carries —
     a missing market cap or price never silently excludes a name."""
-    mcap = row.get("market_cap")
-    if mcap is None:
-        mcap = (row.get("bundle") or {}).get("market_cap")
-    if isinstance(mcap, (int, float)) and not isinstance(mcap, bool) \
-            and mcap < DESK_MIN_MARKET_CAP:
+    mcap = _row_figure(row, "market_cap")
+    if mcap is not None and mcap < DESK_MIN_MARKET_CAP:
         return False
-    price = row.get("price")
-    if price is None:
-        price = (row.get("bundle") or {}).get("price")
-    if isinstance(price, (int, float)) and not isinstance(price, bool) \
-            and price < DESK_MIN_PRICE:
+    price = _row_figure(row, "price")
+    if price is not None and price < DESK_MIN_PRICE:
         return False
     return True
+
+
+def _is_small_cap(row: dict) -> bool:
+    """Whether the row certifiably belongs to the small-cap tranche. A missing market cap
+    is not small: the name still competes in the general ranking (the floor's rule), but a
+    reserved seat is a positive claim and needs the qualifying figure."""
+    mcap = _row_figure(row, "market_cap")
+    return mcap is not None and mcap <= DESK_SMALL_CAP_CEILING
 
 
 def _survives_inversion(row: dict) -> bool:
@@ -559,13 +585,25 @@ def _survives_inversion(row: dict) -> bool:
 def top_symbols(rows: list[dict], universe_size: int) -> list[dict]:
     """The best 1% of the screened universe: scoreable names that survive Munger's layer
     and clear the desk's eligibility floor, ranked the scorecard's own way (evidence tier
-    first, then percentage).
+    first, then percentage) — with a reserved tranche for small caps.
 
     The order here IS the constitution's order — the Hell-No filter runs BEFORE the
     Buffett dossier. A vetoed band, a named failure mode or a sub-floor listing never
     becomes a thesis; those names stay scored and visible on the site (and in
     `picks.strong_but_fragile`, which is where a highly-rated fragile name belongs), they
     simply do not consume the desk's research budget.
+
+    The tranche (owner-directed 2026-08-14): at least
+    `int(count * DESK_SMALL_CAP_RESERVED_FRACTION)` of the slots go to the best-ranked
+    names at or under `DESK_SMALL_CAP_CEILING`, drawn from the SAME gated pool and ranked
+    by the SAME key — nothing about how a name qualifies changes, only who it competes
+    against for the last slots. When the all-cap top already carries enough small caps
+    the tranche is a no-op; when the pool holds fewer qualifying small caps than the
+    reserve, the spare slots fall back to the general ranking (a reserve never pads).
+    Promoted names displace the lowest-ranked general members, and the returned list
+    stays sorted by `rank_key`, so a thinly-evidenced small cap still RANKS below every
+    fully-measured name — the tranche allocates research budget, it does not touch the
+    scorecard's ordering.
 
     Note for anyone changing this: the set of names this returns feeds `rank`, which is
     material to `research_fingerprint`. Narrowing or widening it re-ranks the survivors,
@@ -579,7 +617,23 @@ def top_symbols(rows: list[dict], universe_size: int) -> list[dict]:
                  and _survives_inversion(r)
                  and _clears_desk_floor(r)]
     count = max(1, math.ceil(universe_size * TOP_FRACTION))
-    return sorted(scoreable, key=lambda r: scorecard.rank_key(r["card"]))[:count]
+    ranked = sorted(scoreable, key=lambda r: scorecard.rank_key(r["card"]))
+    chosen = ranked[:count]
+    reserved = int(count * DESK_SMALL_CAP_RESERVED_FRACTION)
+    shortfall = reserved - sum(1 for r in chosen if _is_small_cap(r))
+    if shortfall > 0:
+        promoted = [r for r in ranked[count:] if _is_small_cap(r)][:shortfall]
+        if promoted:
+            to_drop, kept = len(promoted), []
+            for row in reversed(chosen):          # walk up from the worst-ranked slot
+                if to_drop and not _is_small_cap(row):
+                    to_drop -= 1
+                else:
+                    kept.append(row)
+            kept.reverse()
+            chosen = sorted(kept + promoted,
+                            key=lambda r: scorecard.rank_key(r["card"]))
+    return chosen
 
 
 def research_fingerprint(row: dict, formula_version: str) -> str:

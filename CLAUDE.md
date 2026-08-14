@@ -327,7 +327,10 @@ Supplements can never enter the scoring sums; composites are display-only.
 **7 · The desk loop (`thesis.py`, `deskwork.py`, `monitor.py`).**
 `top_symbols` takes the best 1% of the screened universe by scorecard rank (evidence
 tier first, then percentage), above an eligibility floor (`DESK_MIN_MARKET_CAP` $300M,
-`DESK_MIN_PRICE` $5). Then the three beats:
+`DESK_MIN_PRICE` $5). A small-cap tranche (owner-directed 2026-08-14) reserves at least
+20% of those slots for the best qualifying names ≤ $2B (`DESK_SMALL_CAP_CEILING`) — same
+gates, same rank key, never padded — so small caps stop losing every slot to
+longer-filed large caps on evidence tier alone. Then the three beats:
 
 ```
 thesis.py brief SYM   →  work order (packet: both judgements unmerged + registry values)
