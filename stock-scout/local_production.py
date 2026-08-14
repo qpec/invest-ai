@@ -354,8 +354,12 @@ def make_local_stages(conn: sqlite3.Connection, config: LocalProductionConfig,
             thesis_evaluations_passed=all(
                 item["outcome"] != "FAILED"
                 for item in context.results["evaluate_theses"]["evaluations"]),
+            # "Present" means the lane actually ships: the model carries the section
+            # AND the separate page exists in the artifact (owner-directed 2026-08-14).
             lowcap_section_present=isinstance(
-                (build["public_model"].get("lowcap") or {}).get("shortlists"), dict),
+                (build["public_model"].get("lowcap") or {}).get("shortlists"), dict)
+            and (Path(build["artifact_path"]) / "docs" / "lowcap"
+                 / "index.html").exists(),
         ))
         return {"passed": outcome.passed, "failed": list(outcome.failed),
                 "checks": outcome.checks}

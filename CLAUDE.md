@@ -57,7 +57,7 @@ Two ideas explain most of the code:
 
 ```bash
 # tests — this container's working incantation (uv-managed CPython)
-cd stock-scout && uv run -p 3.13.7 --project .. python -m pytest tests/ -q   # 963
+cd stock-scout && uv run -p 3.13.7 --project .. python -m pytest tests/ -q   # 965
 cd .. &&          uv run -p 3.13.7             python -m pytest tests/ -q   # 1113
 
 uv run -p 3.13.7 python tools/license_gate.py    # dependency licence policy (NFR7)
@@ -355,10 +355,13 @@ side, never merged** (Graham net-net/Graham-Number, Lynch/Slater GARP band, Pabr
 downside-first, Cassel/Fisher compounder; each speaks / stays silent / refuses) →
 **scuttlebutt** (the agent beat: `lowcap_thesis.py brief/record`, `scuttlebutt.md` a
 required artifact, same thesis schema and trigger discipline, Gate and monitor reused
-via `--theses-dir theses-lowcap`). No composite low-cap score exists anywhere. The site's
-fourth tab renders the lane; selection lands append-only in `production_lowcap_member`
-(migration 011) via the `select_lowcap` stage; the release gate demands the section's
-presence.
+via `--theses-dir theses-lowcap`). No composite low-cap score exists anywhere. The lane
+has its **own page** — `docs/lowcap/index.html`, written by the same `write_site`,
+sharing the CSS and the `docs/data/` shards, linked from the main page's stepper and
+footer (owner-directed 2026-08-14; a pre-lane model renders it with an honest empty
+state so the link never dangles). Selection lands append-only in
+`production_lowcap_member` (migration 011) via the `select_lowcap` stage; the release
+gate demands that the section AND the page actually ship.
 
 **8 · The monitor.** Weekly, over *committed* theses only. Metric triggers are evaluated
 mechanically off the same `scoring.evaluate` values the grader uses, with persistence
@@ -409,7 +412,7 @@ portfolio value.
 
 ## Testing
 
-Two suites, both green and both required: **963** in `stock-scout/tests/` (decision
+Two suites, both green and both required: **965** in `stock-scout/tests/` (decision
 layer, desk loop, low-cap lane, site) and **1113** in `tests/` (agentcy). Three scout tests skip
 unless optional research data is present locally — two need a FinanceDatabase
 `equities.bz2`, one needs `financetoolkit` (it lives in `requirements-research.txt`,

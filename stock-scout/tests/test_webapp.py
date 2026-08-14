@@ -638,8 +638,9 @@ class TestCardCarriesTheJudgement:
 
 
 class TestLowcapTab:
-    """The Low-Cap Desk's surface (2026-08-14 design): a fourth tab in the ONE
-    generator, four shortlists side by side, and graceful absence on pre-lane models."""
+    """The Low-Cap Desk's surface (2026-08-14 design; owner-directed same day: its OWN
+    page): docs/lowcap/index.html from the one generator, four shortlists side by side,
+    the main page linking there, and graceful honesty on pre-lane models."""
 
     def _model(self):
         model = TestSite()._model()
@@ -663,22 +664,45 @@ class TestLowcapTab:
         }
         return model
 
-    def test_the_tab_ships_with_the_lane_model(self, tmp_path):
-        out = webapp.write_site(self._model(), tmp_path)
-        page = out.read_text(encoding="utf-8")
-        assert 'id="tab-lowcap"' in page and 'data-tab="lowcap"' in page
-        payload = page.split("window.__SITE__ = ", 1)[1].split("</script>", 1)[0]
+    def test_the_lane_gets_its_own_page(self, tmp_path):
+        webapp.write_site(self._model(), tmp_path)
+        lane_page = (tmp_path / "lowcap" / "index.html").read_text(encoding="utf-8")
+        assert "The Low-Cap Desk" in lane_page
+        payload = lane_page.split("window.__LANE__ = ", 1)[1].split("</script>", 1)[0]
         assert '"shortlists"' in payload and '"forge_verdict":"Survivor"' in payload
         # The four lenses are named, side by side; no combined score exists anywhere.
         for label in ("Graham", "GARP", "Downside", "Compounder"):
-            assert label in page
+            assert label in lane_page
         assert "lowcap_score" not in payload and '"blend"' not in payload
+        # The page routes back, and reads its drill-downs from the SHARED shards.
+        assert '../index.html' in lane_page and '../data/d-' in lane_page
 
-    def test_a_pre_lane_model_still_renders(self, tmp_path):
-        """A model without the lowcap section (older snapshot re-rendered) must build a
-        working page — the tab renders empty, the boot must not crash."""
+    def test_the_main_page_links_the_lane_and_carries_no_lane_tab(self, tmp_path):
+        out = webapp.write_site(self._model(), tmp_path)
+        page = out.read_text(encoding="utf-8")
+        assert 'href="lowcap/index.html"' in page
+        assert 'id="tab-lowcap"' not in page and 'data-tab="lowcap"' not in page
+        # The main payload still carries the lane counts for the stepper chip.
+        payload = page.split("window.__SITE__ = ", 1)[1].split("</script>", 1)[0]
+        assert '"lowcap":1' in payload
+
+    def test_owner_fields_cannot_reach_the_lane_page(self, tmp_path, monkeypatch):
+        """FR9 holds on every surface: the lane page's payload never carries
+        owner-only fields, whatever a model might be carrying."""
+        model = self._model()
+        model["lowcap"]["shortlists"]["downside"][0]["detail"] = "clean"
+        webapp.write_site(model, tmp_path)
+        lane_page = (tmp_path / "lowcap" / "index.html").read_text(encoding="utf-8")
+        payload = lane_page.split("window.__LANE__ = ", 1)[1].split("</script>", 1)[0]
+        assert "conviction" not in payload
+        assert "circle_of_competence" not in payload
+
+    def test_a_pre_lane_model_still_renders_both_pages(self, tmp_path):
+        """A model without the lowcap section (older snapshot re-rendered) must build
+        BOTH pages — the lane page says the snapshot predates the desk, so the main
+        page's link never dangles."""
         model = TestSite()._model()
         out = webapp.write_site(model, tmp_path)
-        page = out.read_text(encoding="utf-8")
-        assert 'id="tab-lowcap"' in page
-        assert "renderLowcapTab" in page
+        assert 'href="lowcap/index.html"' in out.read_text(encoding="utf-8")
+        lane_page = (tmp_path / "lowcap" / "index.html").read_text(encoding="utf-8")
+        assert "predates the" in lane_page

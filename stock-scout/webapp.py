@@ -2189,7 +2189,7 @@ function setTab(tab, push){
 function route(){
   const h = location.hash.replace(/^#/, '');
   const [tab, sym] = h.split('/');
-  if (['scout', 'thesis', 'portfolio_monitor', 'lowcap'].includes(tab)) setTab(tab, false);
+  if (['scout', 'thesis', 'portfolio_monitor'].includes(tab)) setTab(tab, false);
   if (tab === 'thesis' && sym && readerBySymbol(sym)) {
     if (state.thesisOpen !== sym) openThesisReader(sym, false);
     if (state.open) closePanel(false);
@@ -2243,7 +2243,7 @@ function initKeys(){
     else if (e.key === '1') setTab('scout');
     else if (e.key === '2') setTab('thesis');
     else if (e.key === '3') setTab('portfolio_monitor');
-    else if (e.key === '4') setTab('lowcap');
+    else if (e.key === '4') location.href = 'lowcap/index.html';
     else if (e.key === 't') $('#themeBtn').click();
     else if ((e.key === 'j' || e.key === 'k') && state.open){
       const i = state.view.findIndex(r => r.s === state.open);
@@ -2256,7 +2256,7 @@ function initKeys(){
   });
 }
 
-/* ---------- the Low-Cap Desk tab ---------- */
+/* ---------- the Low-Cap Desk (its own page: lowcap/index.html) ---------- */
 const LENS_META = {
   graham: ['Graham — deep value', 'net-nets and the Graham Number: an asset floor under the price'],
   garp: ['GARP — Lynch/Slater', 'growth in a band at a PEG under 1, cash-backed and lightly geared'],
@@ -2265,49 +2265,6 @@ const LENS_META = {
 };
 const FORGE_CLS = {'Survivor': 'p-good', 'Watch': 'p-warn', 'Unknown': 'p-quiet',
                    'Forged-out': 'p-crit'};
-const LENS_MARK = {speaks: ['●', 'speaks'], silent: ['○', 'silent'],
-                   refuses: ['—', 'refuses: inputs unmeasured']};
-function renderLowcapTab(){
-  const L = S.lowcap;
-  if (!L){ return; }
-  $('#cLowcap').textContent = `${L.counts.eligible} in the band`;
-  $('#kLowEligible').textContent = L.counts.eligible.toLocaleString();
-  $('#kLowSurvivor').textContent = L.counts.survivor.toLocaleString();
-  $('#kLowWatch').textContent =
-    `${L.counts.watch.toLocaleString()} / ${L.counts.unknown.toLocaleString()}`;
-  $('#kLowForged').textContent = L.counts.forged_out.toLocaleString();
-  $('#lowcapLists').innerHTML = Object.keys(LENS_META).map(lens => {
-    const entries = (L.shortlists || {})[lens] || [];
-    const items = entries.map(e => `
-      <div class="probe" data-lowcap-sym="${esc(e.sym)}" style="cursor:pointer">
-        <div class="ph"><b style="font-size:12px">${esc(e.sym)}</b>
-          <span class="muted" style="font-size:11px">${esc(e.name)}</span>
-          ${e.mc != null ? pill(fmtMc(e.mc), 'p-ghost') : ''}
-          ${pill(e.forge_verdict, FORGE_CLS[e.forge_verdict] || 'p-quiet')}</div>
-        <div class="pd">${esc(e.detail || '')}</div>
-      </div>`).join('');
-    return `<div class="card chart"><div class="hd"><h2>${esc(LENS_META[lens][0])}</h2>
-      <span class="muted">${esc(LENS_META[lens][1])}</span></div>
-      <div style="padding:0 12px 12px">${items ||
-        '<div class="empty" style="padding:14px 4px">No name qualifies today — the lens stays silent rather than stretching. That is the expected outcome most days.</div>'}</div></div>`;
-  }).join('');
-  const mark = v => { const m = LENS_MARK[v] || ['·', v || '—'];
-    return `<span data-tip="${esc(m[1])}">${m[0]}</span>`; };
-  $('#lowcapBody').innerHTML = (L.rows || []).map(r => `
-    <tr data-lowcap-sym="${esc(r.s)}" tabindex="0" style="cursor:pointer">
-      <td><b>${esc(r.s)}</b></td><td class="hide-m">${esc(r.n)}</td>
-      <td class="r num">${r.mc != null ? fmtMc(r.mc) : '—'}</td>
-      <td>${pill(r.fv, FORGE_CLS[r.fv] || 'p-quiet')}</td>
-      <td class="r num">${r.sev}·${r.cau}</td>
-      <td>${mark(r.lv.graham)}</td><td>${mark(r.lv.garp)}</td>
-      <td>${mark(r.lv.downside)}</td><td>${mark(r.lv.compounder)}</td>
-    </tr>`).join('');
-  $('#lowcapCount').textContent = `${(L.rows || []).length} names in the band`;
-  $('#tab-lowcap').addEventListener('click', e => {
-    const t = e.target.closest('[data-lowcap-sym]');
-    if (t) openPanel(t.dataset.lowcapSym);
-  });
-}
 
 /* ---------- boot ---------- */
 function boot(){
@@ -2357,7 +2314,9 @@ function boot(){
   $('#ovbg').onclick = closePanel;
   initTheme(); initTip(); initKeys();
   let rsz; addEventListener('resize', () => { clearTimeout(rsz); rsz = setTimeout(drawCharts, 200); });
-  renderThesisTab(); renderPortfolioMonitorTab(); renderLowcapTab();
+  if (S.counts.lowcap != null && $('#cLowcap'))
+    $('#cLowcap').textContent = `${S.counts.lowcap.toLocaleString()} in the band`;
+  renderThesisTab(); renderPortfolioMonitorTab();
   applyFilters(); drawCharts();
   addEventListener('hashchange', route);
   route();
@@ -2396,8 +2355,9 @@ TEMPLATE = """<!DOCTYPE html>
     <button class="step" data-tab="portfolio_monitor"><span class="circ">3</span>
       <span><span class="lbl">Model portfolio &amp; monitor</span><span class="cnt" id="cMonitor"></span></span></button>
     <span class="chev" style="opacity:.35">·</span>
-    <button class="step" data-tab="lowcap"><span class="circ">4</span>
-      <span><span class="lbl">The Low-Cap Desk</span><span class="cnt" id="cLowcap"></span></span></button>
+    <a class="step" href="lowcap/index.html" style="text-decoration:none;color:inherit"
+       title="a separate desk with its own constitution (4)"><span class="circ">4</span>
+      <span><span class="lbl">The Low-Cap Desk ↗</span><span class="cnt" id="cLowcap"></span></span></a>
   </nav>
   <div class="notice"><b>Illustratieve modelportefeuille, geen financieel advies.</b></div>
 </header>
@@ -2521,51 +2481,15 @@ python monitor.py run --sec-data &lt;dir&gt; --prices &lt;dir&gt; \\
   </div>
 </section>
 
-<!-- ============ 4 · LOW-CAP DESK ============ -->
-<section class="tabpane" id="tab-lowcap" style="display:none">
-  <p class="intro"><b>4 · The Low-Cap Desk — a different game with its own constitution.</b>
-  There is no size premium; small caps are a <em>hunting ground</em>, where mispricing is
-  largest because nobody is looking — and where junk is the default state. So this lane
-  asks its own questions, in its own order: <b>Survive first</b> — the Forge probes
-  dilution, cash runway, distress and delisting jeopardy, and any severe finding removes
-  the name before any upside analysis (shown here, with the finding named). Then
-  <b>four lenses, side by side and never merged</b>: Graham deep value, GARP
-  (Lynch/Slater), downside-first value (Pabrai/Burry) and the quality compounder
-  (Cassel/Fisher). Each lens speaks, stays silent, or refuses when its inputs are
-  unmeasured. There is no combined low-cap score anywhere on this page — a name on two
-  lists is simply, visibly, on two lists.</p>
-  <div class="kpis">
-    <div class="kpi"><label>In the band</label><b id="kLowEligible">—</b><div class="d">$50M–$2B · price ≥ $1 · listed exchanges</div></div>
-    <div class="kpi"><label>Survivors</label><b id="kLowSurvivor">—</b><div class="d">no severe probe, at most one caution</div></div>
-    <div class="kpi"><label>Watch / Unknown</label><b id="kLowWatch">—</b><div class="d">thin margins named · thin evidence said out loud</div></div>
-    <div class="kpi"><label>Forged out</label><b id="kLowForged">—</b><div class="d">a named way this takes your capital — no work order</div></div>
-  </div>
-  <div class="chartrow" id="lowcapLists"></div>
-  <div class="card">
-    <div class="hd"><h2>The lane</h2><span class="muted" id="lowcapCount"></span></div>
-    <div class="tscroll">
-      <table class="data">
-        <thead><tr>
-          <th>Ticker</th><th class="hide-m">Name</th><th class="r">Mkt cap</th>
-          <th>Forge</th><th class="r" title="severe · caution findings">Sev·Cau</th>
-          <th>Graham</th><th>GARP</th><th>Downside</th><th>Compounder</th>
-        </tr></thead>
-        <tbody id="lowcapBody"></tbody>
-      </table>
-    </div>
-    <div class="ft"><span></span><span>· sorted Survivor → Watch → Unknown → Forged-out ·
-      a lens that “refuses” is missing the inputs to judge — said out loud rather than
-      guessed · click a row for the full drill-down</span></div>
-  </div>
-</section>
-
 <footer>
   <b>The system never executes trades.</b> (FR11) · Conviction and
   circle-of-competence never appear on this page — they are the owner's, asked at the Gate
   (FR9) · Data: bulk SEC export + live EDGAR companyfacts (tier 2, as-filed) · generated
   __GENERATED__ by <code>python webapp.py</code> ·
-  <a href="site/index.html">system explainer</a> · keyboard: <code>/</code> search ·
-  <code>1 2 3 4</code> tabs · <code>j k</code> walk rows · <code>t</code> theme
+  <a href="site/index.html">system explainer</a> ·
+  <a href="lowcap/index.html">the Low-Cap Desk</a> · keyboard: <code>/</code> search ·
+  <code>1 2 3</code> tabs · <code>4</code> low-cap desk · <code>j k</code> walk rows ·
+  <code>t</code> theme
 </footer>
 </div>
 
@@ -2605,6 +2529,317 @@ def render(model: dict, embed_details: dict) -> str:
                 | {"sharded": model.get("sharded", False)}, embed_details))
             .replace("__JS__", JS))
     return page
+
+
+# --- The Low-Cap Desk's OWN page (owner-directed 2026-08-14: "a separate page") ---------
+# docs/lowcap/index.html — same generator, same CSS, same data shards (../data/), its own
+# template and script. The lane is a different game with its own constitution, and the
+# page's separateness says so; the main page links here from the stepper and footer.
+
+LOWCAP_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%8E%3C/text%3E%3C/svg%3E">
+<title>Invest AI — The Low-Cap Desk</title>
+<style>__CSS__</style>
+</head>
+<body>
+<header class="top">
+  __DEMOBAR__
+  <div class="masthead">
+    <h1>The Low-Cap Desk</h1>
+    <span class="sub">a separate desk, its own constitution · as of <b id="asOf" class="num"></b> · snapshot <b class="num">__SNAPSHOT_ID__</b></span>
+    <div class="right">
+      <a class="btn" href="../index.html" style="text-decoration:none">← the main desk</a>
+      <button class="btn" id="themeBtn" title="toggle theme (t)">◐ theme</button>
+    </div>
+  </div>
+  <div class="notice"><b>Illustratieve modelportefeuille, geen financieel advies.</b></div>
+</header>
+
+<div class="wrap">
+
+<p class="intro"><b>A different game with its own rules.</b> There is no size premium;
+small caps are a <em>hunting ground</em>, where mispricing is largest because nobody is
+looking — and where junk is the default state. So this desk asks its own questions, in
+its own order: <b>Survive first</b> — the Forge probes dilution, cash runway, distress
+and delisting jeopardy, and any severe finding removes the name before any upside
+analysis (shown below, with the finding named). Then <b>four lenses, side by side and
+never merged</b>: Graham deep value, GARP (Lynch/Slater), downside-first value
+(Pabrai/Burry) and the quality compounder (Cassel/Fisher). Each lens speaks, stays
+silent, or refuses when its inputs are unmeasured. There is no combined low-cap score
+anywhere on this page — a name on two lists is simply, visibly, on two lists.</p>
+
+<div id="laneEmpty" class="empty" style="display:none"><b>This snapshot predates the
+Low-Cap Desk.</b> The lane appears here on the next production run.</div>
+
+<div id="laneBody">
+<div class="kpis">
+  <div class="kpi"><label>In the band</label><b id="kLowEligible">—</b><div class="d">$50M–$2B · price ≥ $1 · listed exchanges</div></div>
+  <div class="kpi"><label>Survivors</label><b id="kLowSurvivor">—</b><div class="d">no severe probe, at most one caution</div></div>
+  <div class="kpi"><label>Watch / Unknown</label><b id="kLowWatch">—</b><div class="d">thin margins named · thin evidence said out loud</div></div>
+  <div class="kpi"><label>Forged out</label><b id="kLowForged">—</b><div class="d">a named way this takes your capital — no work order</div></div>
+</div>
+<div class="chartrow" id="lowcapLists"></div>
+<div class="card">
+  <div class="hd"><h2>The lane</h2><span class="muted" id="lowcapCount"></span></div>
+  <div class="tscroll">
+    <table class="data">
+      <thead><tr>
+        <th>Ticker</th><th class="hide-m">Name</th><th class="r">Mkt cap</th>
+        <th>Forge</th><th class="r" title="severe · caution findings">Sev·Cau</th>
+        <th>Graham</th><th>GARP</th><th>Downside</th><th>Compounder</th>
+      </tr></thead>
+      <tbody id="lowcapBody"></tbody>
+    </table>
+  </div>
+  <div class="ft"><span></span><span>· sorted Survivor → Watch → Unknown → Forged-out ·
+    a lens that “refuses” is missing the inputs to judge — said out loud rather than
+    guessed · click a row for the lane drill-down</span></div>
+</div>
+</div>
+
+<footer>
+  <b>The system never executes trades.</b> (FR11) · No combined score exists on this
+  desk: the Forge, the four lenses and the main desk's two judgements all stay in their
+  own columns · Constitution:
+  <code>docs/plans/2026-08-14-low-cap-desk-design.md</code> · generated __GENERATED__ ·
+  <a href="../index.html">the main desk</a> · keyboard: <code>Esc</code> close ·
+  <code>t</code> theme
+</footer>
+</div>
+
+<div class="overlay-bg" id="ovbg"></div>
+<aside class="panel" id="panel" aria-label="detail">
+  <div class="phd"><span class="tick" id="pTick"></span>
+    <span class="pn" id="pName"></span>
+    <button class="btn" id="pClose" style="margin-left:auto" title="close (Esc)">✕</button></div>
+  <div class="pbody" id="pBody"></div>
+</aside>
+<div id="tip"></div>
+
+<script>window.__LANE__ = __PAYLOAD__;</script>
+<script>__JS__</script>
+</body>
+</html>
+"""
+
+LOWCAP_JS = r"""
+'use strict';
+const $ = (q, el) => (el || document).querySelector(q);
+const esc = s => String(s ?? '').replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const pill = (txt, cls) => `<span class="pill ${cls || 'p-quiet'}">${esc(txt)}</span>`;
+const fmtMc = v => {
+  if (v == null) return '—';
+  const sign = v < 0 ? '-' : '';
+  const a = Math.abs(v);
+  return sign + (a >= 1e12 ? '$' + (a / 1e12).toFixed(2) + 'T'
+    : a >= 1e9 ? '$' + (a / 1e9).toFixed(1) + 'B'
+    : a >= 1e6 ? '$' + (a / 1e6).toFixed(0) + 'M' : '$' + Math.round(a));
+};
+const P = window.__LANE__;
+const LENS_META = {
+  graham: ['Graham — deep value', 'net-nets and the Graham Number: an asset floor under the price'],
+  garp: ['GARP — Lynch/Slater', 'growth in a band at a PEG under 1, cash-backed and lightly geared'],
+  downside: ['Downside — Pabrai/Burry', 'the floor first, then cheapness on normalized owner-FCF or EV/EBIT'],
+  compounder: ['Compounder — Cassel/Fisher', 'profitable before scale, self-funding, real returns on capital'],
+};
+const FORGE_CLS = {'Survivor': 'p-good', 'Watch': 'p-warn', 'Unknown': 'p-quiet',
+                   'Forged-out': 'p-crit'};
+const VERDICT_CLS = {Robust:'p-good', Ordinary:'p-quiet', Fragile:'p-serious',
+  Ruinous:'p-crit', Unknown:'p-ghost'};
+const BAND_CLS = {Exceptional:'p-good', Strong:'p-acc', Mixed:'p-quiet',
+  Weak:'p-warn', Pass:'p-quiet', 'VETOED':'p-crit', 'NO PRICE':'p-ghost'};
+const LENS_MARK = {speaks: ['●', 'speaks'], silent: ['○', 'silent'],
+                   refuses: ['—', 'refuses: inputs unmeasured']};
+
+/* ---------- lane drill-down (details from the shared ../data shards) ---------- */
+const shardCache = {};
+function getDetail(sym){
+  const key = /^[a-z]/i.test(sym) ? sym[0].toLowerCase() : '0';
+  if (!P.sharded) return Promise.resolve(null);
+  shardCache[key] = shardCache[key]
+    || fetch('../data/d-' + key + '.json').then(r => r.ok ? r.json() : null)
+       .catch(() => null);
+  return shardCache[key].then(m => (m || {})[sym] || null);
+}
+function openPanel(sym){
+  state.open = sym;
+  location.hash = '#' + sym;
+  $('#panel').classList.add('open'); $('#ovbg').classList.add('on');
+  const row = (P.lowcap.rows || []).find(r => r.s === sym);
+  $('#pTick').textContent = sym;
+  $('#pName').textContent = row ? row.n || '' : '';
+  $('#pBody').innerHTML = '<div class="skel">loading detail…</div>';
+  getDetail(sym).then(d => { if (state.open === sym) renderPanel(sym, row, d); });
+}
+function closePanel(push){
+  state.open = null;
+  $('#panel').classList.remove('open'); $('#ovbg').classList.remove('on');
+  if (push !== false) location.hash = '';
+}
+function renderPanel(sym, row, d){
+  const lc = d && d.lowcap;
+  if (!lc){
+    $('#pBody').innerHTML = `<div class="empty"><b>Lane detail not loaded</b>
+      Drill-downs load from the shared data shards (../data/). Opening the page from the
+      hosted site (or a local server) enables them; the table itself is unaffected.
+      <div style="margin-top:8px"><a href="../index.html#scout/${esc(sym)}">full
+      drill-down on the main desk →</a></div></div>`;
+    return;
+  }
+  const card = (d.card || {}), inv = (d.inv || {});
+  const findings = (lc.forge.findings || [])
+    .map(f => `<blockquote>${esc(f)}</blockquote>`).join('');
+  const lensRows = Object.entries(lc.lenses || {}).map(([name, l]) => `
+    <div class="probe"><div class="ph">
+      ${l.verdict === 'speaks' ? pill('speaks', 'p-good')
+        : l.verdict === 'refuses' ? pill('refuses', 'p-quiet') : pill('silent', 'p-ghost')}
+      <b style="font-size:12px">${esc((LENS_META[name] || [name])[0])}</b></div>
+      <div class="pd">${esc(l.detail || '')}</div></div>`).join('');
+  const met = lc.metrics || {};
+  const metLine = [
+    met.ncav != null ? `NCAV ${fmtMc(met.ncav)}` : null,
+    met.graham_number != null ? `Graham № ${met.graham_number}` : null,
+    met.peg != null ? `PEG ${met.peg}` : null,
+    met.norm_fcf_yield_pct != null ? `norm. FCF yield ${met.norm_fcf_yield_pct}%` : null,
+    met.ev_ebit != null ? `EV/EBIT ${met.ev_ebit}` : null,
+    met.share_trend_pct != null ? `share trend ${met.share_trend_pct}%/yr` : null,
+  ].filter(Boolean).join(' · ');
+  $('#pBody').innerHTML = `
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:12px">
+      ${pill(lc.forge.verdict, FORGE_CLS[lc.forge.verdict])}
+      ${card.band ? pill(card.band + ' — scorecard', BAND_CLS[card.band]) : ''}
+      ${inv.verdict ? pill(inv.verdict + ' — inversion', VERDICT_CLS[inv.verdict]) : ''}
+      ${d.mc != null ? pill(fmtMc(d.mc), 'p-quiet') : ''}
+    </div>
+    <div style="font-size:12px;color:var(--text2);margin-top:6px">${esc(lc.forge.meaning || '')}
+      · ${lc.forge.coverage.measured_count}/${lc.forge.coverage.total} probes measured
+      ${lc.forge.coverage.thin ? ' · evidence is thin, said out loud' : ''}
+      · ${esc(lc.eligibility || '')}</div>
+    <h3>The Forge — how this would take your capital</h3>
+    <div class="prose">${findings || '<blockquote>No findings — the measured probes are clean.</blockquote>'}</div>
+    <h3>The four lenses — side by side, never merged</h3>
+    ${lensRows}
+    ${metLine ? `<div class="mdet" style="margin-top:8px">${esc(metLine)}</div>` : ''}
+    <h3>Deeper</h3>
+    <div style="font-size:12.5px">
+      <a href="../index.html#scout/${esc(sym)}">full drill-down on the main desk →</a>
+      — the scorecard's blocks, all inversion probes, the registry with provenance, and
+      the DCF behind the margin of safety.</div>`;
+}
+
+/* ---------- page ---------- */
+const state = {open: null};
+function render(){
+  const L = P.lowcap;
+  if (!L){
+    $('#laneEmpty').style.display = '';
+    $('#laneBody').style.display = 'none';
+    return;
+  }
+  $('#kLowEligible').textContent = L.counts.eligible.toLocaleString();
+  $('#kLowSurvivor').textContent = L.counts.survivor.toLocaleString();
+  $('#kLowWatch').textContent =
+    `${L.counts.watch.toLocaleString()} / ${L.counts.unknown.toLocaleString()}`;
+  $('#kLowForged').textContent = L.counts.forged_out.toLocaleString();
+  $('#lowcapLists').innerHTML = Object.keys(LENS_META).map(lens => {
+    const entries = (L.shortlists || {})[lens] || [];
+    const items = entries.map(e => `
+      <div class="probe" data-sym="${esc(e.sym)}" style="cursor:pointer">
+        <div class="ph"><b style="font-size:12px">${esc(e.sym)}</b>
+          <span class="muted" style="font-size:11px">${esc(e.name)}</span>
+          ${e.mc != null ? pill(fmtMc(e.mc), 'p-ghost') : ''}
+          ${pill(e.forge_verdict, FORGE_CLS[e.forge_verdict] || 'p-quiet')}</div>
+        <div class="pd">${esc(e.detail || '')}</div>
+      </div>`).join('');
+    return `<div class="card chart"><div class="hd"><h2>${esc(LENS_META[lens][0])}</h2>
+      <span class="muted">${esc(LENS_META[lens][1])}</span></div>
+      <div style="padding:0 12px 12px">${items ||
+        '<div class="empty" style="padding:14px 4px">No name qualifies today — the lens stays silent rather than stretching. That is the expected outcome most days.</div>'}</div></div>`;
+  }).join('');
+  const mark = v => { const m = LENS_MARK[v] || ['·', v || '—'];
+    return `<span data-tip="${esc(m[1])}">${m[0]}</span>`; };
+  $('#lowcapBody').innerHTML = (L.rows || []).map(r => `
+    <tr data-sym="${esc(r.s)}" tabindex="0" style="cursor:pointer">
+      <td><b>${esc(r.s)}</b></td><td class="hide-m">${esc(r.n)}</td>
+      <td class="r num">${r.mc != null ? fmtMc(r.mc) : '—'}</td>
+      <td>${pill(r.fv, FORGE_CLS[r.fv] || 'p-quiet')}</td>
+      <td class="r num">${r.sev}·${r.cau}</td>
+      <td>${mark(r.lv.graham)}</td><td>${mark(r.lv.garp)}</td>
+      <td>${mark(r.lv.downside)}</td><td>${mark(r.lv.compounder)}</td>
+    </tr>`).join('');
+  $('#lowcapCount').textContent = `${(L.rows || []).length} names in the band`;
+}
+function initTheme(){
+  const saved = localStorage.getItem('agentcy-theme');
+  if (saved) document.documentElement.dataset.theme = saved;
+  $('#themeBtn').onclick = () => {
+    const cur = document.documentElement.dataset.theme
+      || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    const next = cur === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = next;
+    localStorage.setItem('agentcy-theme', next);
+  };
+}
+function initTip(){
+  const tip = $('#tip');
+  document.addEventListener('scroll', () => { tip.style.opacity = 0; }, true);
+  document.addEventListener('mousemove', e => {
+    const t = e.target.closest('[data-tip]');
+    if (!t){ tip.style.opacity = 0; return; }
+    tip.textContent = t.dataset.tip;
+    tip.style.opacity = 1;
+    const x = Math.min(e.clientX + 14, innerWidth - tip.offsetWidth - 10);
+    const y = Math.min(e.clientY + 14, innerHeight - tip.offsetHeight - 10);
+    tip.style.left = x + 'px'; tip.style.top = y + 'px';
+  });
+}
+function boot(){
+  $('#asOf').textContent = P.as_of || '—';
+  render();
+  document.addEventListener('click', e => {
+    const t = e.target.closest('[data-sym]');
+    if (t) openPanel(t.dataset.sym);
+  });
+  document.addEventListener('keydown', e => {
+    if (e.target.matches('input, textarea')) return;
+    if (e.key === 'Escape') closePanel();
+    else if (e.key === 't') $('#themeBtn').click();
+  });
+  $('#pClose').onclick = closePanel;
+  $('#ovbg').onclick = closePanel;
+  initTheme(); initTip();
+  const sym = location.hash.replace(/^#/, '');
+  if (sym && P.lowcap && (P.lowcap.rows || []).some(r => r.s === sym)) openPanel(sym);
+}
+boot();
+"""
+
+
+def render_lowcap(model: dict) -> str:
+    """The lane's own page. A model without a `lowcap` section (a pre-lane snapshot
+    re-rendered through the current renderer) still builds — the page states honestly
+    that the snapshot predates the desk."""
+    demo = (model.get("desk") or {}).get("demo")
+    demobar = ("" if not demo else
+               '<div class="demobar"><b>Public read-only snapshot; actions are disabled.</b></div>')
+    payload = {
+        "as_of": model.get("as_of"), "generated": model.get("generated"),
+        "snapshot_id": model.get("snapshot_id"),
+        "lowcap": model.get("lowcap"), "sharded": model.get("sharded", False),
+    }
+    return (LOWCAP_TEMPLATE
+            .replace("__DEMOBAR__", demobar)
+            .replace("__CSS__", CSS)
+            .replace("__SNAPSHOT_ID__", str(model.get("snapshot_id") or "unknown"))
+            .replace("__GENERATED__", str(model.get("generated") or ""))
+            .replace("__PAYLOAD__", _payload_json(payload, {}))
+            .replace("__JS__", LOWCAP_JS))
 
 
 def write_site(model: dict, out_dir: Path, *, shard: bool = True,
@@ -2663,6 +2898,19 @@ def write_site(model: dict, out_dir: Path, *, shard: bool = True,
         os.replace(tmp, out)
     except BaseException:
         tmp.unlink(missing_ok=True)
+        raise
+    # The Low-Cap Desk's own page (owner-directed 2026-08-14), always written — a
+    # pre-lane model renders it with an honest empty state, so the main page's link
+    # never dangles. Same atomicity discipline as the main page.
+    lowcap_dir = out_dir / "lowcap"
+    lowcap_dir.mkdir(exist_ok=True)
+    lowcap_out = lowcap_dir / "index.html"
+    lowcap_tmp = lowcap_dir / ".index.html.tmp"
+    try:
+        lowcap_tmp.write_text(render_lowcap(model), encoding="utf-8")
+        os.replace(lowcap_tmp, lowcap_out)
+    except BaseException:
+        lowcap_tmp.unlink(missing_ok=True)
         raise
     return out
 

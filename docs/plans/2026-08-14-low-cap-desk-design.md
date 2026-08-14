@@ -186,6 +186,10 @@ choices:
    generator, two surfaces — a `tab-lowcap` pane with the lane's constitution as
    intro prose, the Forge verdict per name, and the four shortlists side by side.
    Public projections reuse `strip_owner_fields` + allowlists (invariant 3).
+   *(Amended same day, owner-directed: the lane gets its **own page** instead —
+   `docs/lowcap/index.html`, written by the same `write_site`, same CSS, same
+   `docs/data/` shards for drill-downs, linked from the main page's stepper and
+   footer. The separateness is the point: a different game, visibly its own desk.)*
 3. **Production: same run, same snapshot, own table.** A `select_lowcap` stage after
    `select_top`; a new append-only `production_lowcap_member` table via a new
    numbered migration with the same no-update/no-delete trigger pattern —
