@@ -48,6 +48,7 @@ Two ideas explain most of the code:
 | how a company is scored | `stock-scout/scoring.py`, then `stock-scout/scorecard.py` |
 | how it can break you | `stock-scout/inversion.py` |
 | the agent seam | `stock-scout/thesis.py` + `.claude/skills/thesis-desk/SKILL.md` |
+| the Low-Cap Desk | `stock-scout/lowcap.py` + `lowcap_thesis.py`, constitution in `docs/plans/2026-08-14-low-cap-desk-design.md` |
 | a production run | `stock-scout/production.py` + `stock-scout/local_production.py` |
 | the UI | `stock-scout/webapp.py` |
 | why a thing is the way it is | `docs/plans/`, `docs/superpowers/plans/` (decision journal) |
@@ -56,8 +57,8 @@ Two ideas explain most of the code:
 
 ```bash
 # tests — this container's working incantation (uv-managed CPython)
-cd stock-scout && uv run -p 3.13.7 --project .. python -m pytest tests/ -q   # 888
-cd .. &&          uv run -p 3.13.7             python -m pytest tests/ -q   # 1110
+cd stock-scout && uv run -p 3.13.7 --project .. python -m pytest tests/ -q   # 963
+cd .. &&          uv run -p 3.13.7             python -m pytest tests/ -q   # 1113
 
 uv run -p 3.13.7 python tools/license_gate.py    # dependency licence policy (NFR7)
 ```
@@ -343,6 +344,22 @@ least one mechanical, no owner-only fields, no untestable or quote-derived trigg
 the approved-model rule (`deskwork.APPROVED_MODELS`, keyed per provider, observed from
 the harness transcript where one exists).
 
+**7b · The Low-Cap Desk (`lowcap.py`, `lowcap_thesis.py`)** — a separate lane with its
+own owner-ratified constitution (2026-08-14; design + eight-report research bundle in
+`docs/plans/` and `docs/research/2026-08-14-low-cap-research/`): small caps are a
+hunting ground, not a factor. Band $50M–$2B / price ≥ $1 as a POSITIVE claim (a missing
+figure cannot certify a name small). Order: the **Forge** (survival probes — serial
+diluter, cash runway, distress triad, delisting jeopardy, overhang, accrual mirage —
+counted never averaged; any severe ⇒ Forged-out, no work order) → **four lenses side by
+side, never merged** (Graham net-net/Graham-Number, Lynch/Slater GARP band, Pabrai/Burry
+downside-first, Cassel/Fisher compounder; each speaks / stays silent / refuses) →
+**scuttlebutt** (the agent beat: `lowcap_thesis.py brief/record`, `scuttlebutt.md` a
+required artifact, same thesis schema and trigger discipline, Gate and monitor reused
+via `--theses-dir theses-lowcap`). No composite low-cap score exists anywhere. The site's
+fourth tab renders the lane; selection lands append-only in `production_lowcap_member`
+(migration 011) via the `select_lowcap` stage; the release gate demands the section's
+presence.
+
 **8 · The monitor.** Weekly, over *committed* theses only. Metric triggers are evaluated
 mechanically off the same `scoring.evaluate` values the grader uses, with persistence
 streaks (a threshold usually must hold N consecutive checks). Event/narrative triggers
@@ -392,8 +409,8 @@ portfolio value.
 
 ## Testing
 
-Two suites, both green and both required: **888** in `stock-scout/tests/` (decision
-layer, desk loop, site) and **1110** in `tests/` (agentcy). Three scout tests skip
+Two suites, both green and both required: **963** in `stock-scout/tests/` (decision
+layer, desk loop, low-cap lane, site) and **1113** in `tests/` (agentcy). Three scout tests skip
 unless optional research data is present locally — two need a FinanceDatabase
 `equities.bz2`, one needs `financetoolkit` (it lives in `requirements-research.txt`,
 not the runtime budget). The tests that pin the invariants above — privacy/FR9, append-only,

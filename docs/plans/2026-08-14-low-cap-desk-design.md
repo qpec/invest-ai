@@ -1,8 +1,9 @@
 # The Low-Cap Desk — a separate interface with its own constitution
 
 **Date:** 2026-08-14
-**Status:** DESIGN — awaiting owner ratification (the philosophy choices below are
-owner-level policy)
+**Status:** RATIFIED (owner, 2026-08-14: "Prima") — phases 1–3 implemented same day
+(`lowcap.py`, the fourth tab + `select_lowcap` stage + migration 011,
+`lowcap_thesis.py`); phase 4 (volume/ADV$, filing-cadence score, Form 4 feed) open
 **Owner directive:** "I don't want a tranche. I want a separate low-cap interface.
 This needs a different philosophy. Use ai-hedge-fund (check github) to deploy the right
 philosophies. Do extensive research into how others do this before you start planning."
