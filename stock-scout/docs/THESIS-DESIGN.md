@@ -283,20 +283,6 @@ three constitutional rules living only in prose. Four changes, ratified together
 Same review, scoring side: the margin-of-safety DCF now discounts owner-FCF (a
 post-interest, equity-level flow) at a cost of EQUITY instead of WACC.
 
-## 9b. Addendum — the small-cap tranche (2026-08-14, owner-directed)
-
-Evidence-tier-first ranking is right for presentation and quietly wrong for budget:
-small caps carry shorter filing histories, so an all-cap contest for ~70 desk slots
-handed every work order to large caps even though nothing in the scoring is size-aware.
-`top_symbols` now reserves at least `int(count * DESK_SMALL_CAP_RESERVED_FRACTION)`
-(20%) of the slots for the best-ranked names at or under `DESK_SMALL_CAP_CEILING` ($2B),
-drawn from the same gated pool (scoreable, Munger's gate, the V-6 floor — which is
-unchanged) and ranked by the same key. The reserve never pads, a missing market cap
-cannot claim a reserved seat, and the returned list stays sorted by `rank_key`, so the
-tranche allocates research budget without touching the scorecard's ordering. Reasoning
-and rejected alternatives: `docs/plans/2026-08-14-small-cap-tranche-design.md`
-(repo root).
-
 **Correction, same day.** The first version of that change discounted every name at the
 flat unlevered 10.5%, and its stated justification was wrong. `wacc_estimate`'s inherited
 cost of debt is `rf + 10/coverage` — 23.7% at coverage 52, 504% at coverage 2 — so for any
