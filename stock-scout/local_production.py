@@ -214,6 +214,22 @@ def make_local_stages(conn: sqlite3.Connection, config: LocalProductionConfig,
             })
         return {"members": members}
 
+    def select_lowcap(context):
+        """The Low-Cap Desk's four shortlists out of the assembled model — one member
+        row per (lens, name), rank scoped per lens, never merged across lenses. An
+        empty lane is a valid, recorded outcome (few names speak on most days)."""
+        model = context.runtime["model"]
+        shortlists = (model.get("lowcap") or {}).get("shortlists") or {}
+        members = []
+        for lens, entries in shortlists.items():
+            for position, entry in enumerate(entries, start=1):
+                members.append({
+                    "lens": lens, "security_key": entry["sym"],
+                    "symbol": entry["sym"], "rank": position,
+                    "forge_verdict": entry["forge_verdict"],
+                })
+        return {"members": members}
+
     def evaluate_theses(context):
         model = context.runtime["model"]
         by_symbol = {row["s"]: row for row in model["rows"]}
@@ -338,12 +354,15 @@ def make_local_stages(conn: sqlite3.Connection, config: LocalProductionConfig,
             thesis_evaluations_passed=all(
                 item["outcome"] != "FAILED"
                 for item in context.results["evaluate_theses"]["evaluations"]),
+            lowcap_section_present=isinstance(
+                (build["public_model"].get("lowcap") or {}).get("shortlists"), dict),
         ))
         return {"passed": outcome.passed, "failed": list(outcome.failed),
                 "checks": outcome.checks}
 
     return ProductionStages(
         refresh=refresh, score=score, select_top=select_top,
+        select_lowcap=select_lowcap,
         evaluate_theses=evaluate_theses, monitor=run_monitor, build_site=build_site,
         validate=validate, publish=publish,
     )

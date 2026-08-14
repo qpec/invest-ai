@@ -296,3 +296,30 @@ def test_price_grid_export_survives_a_corrupt_grid_file(tmp_path):
     assert local_production.export_price_grid(conn, grid) == 1
     payload = json.loads((grid / "AAA.json").read_text(encoding="utf-8"))
     assert sorted(payload["bars"]) == ["2026-08-10"]
+
+
+def test_select_lowcap_flattens_the_shortlists_per_lens(tmp_path):
+    """The lane stage reads the assembled model's four shortlists into member rows —
+    rank scoped per lens, forge verdict riding along, and an absent/empty lane is an
+    explicitly empty (valid) selection."""
+    config = local_production.LocalProductionConfig(
+        artifact_root=tmp_path / "artifacts", sec_data=tmp_path / "sec",
+        price_grid=tmp_path / "prices", universe=tmp_path / "universe.csv",
+        enrich_cache=tmp_path / "cache", theses_dir=tmp_path / "theses",
+        reports_dir=tmp_path / "reports", as_of="2026-08-14",
+    )
+    stages = local_production.make_local_stages(None, config)
+    context = type("Context", (), {"runtime": {"model": {"lowcap": {"shortlists": {
+        "garp": [{"sym": "AAA", "forge_verdict": "Survivor"},
+                 {"sym": "BBB", "forge_verdict": "Watch"}],
+        "downside": [{"sym": "AAA", "forge_verdict": "Survivor"}],
+        "graham": [], "compounder": [],
+    }}}}})()
+    members = stages.select_lowcap(context)["members"]
+    assert {(m["lens"], m["symbol"], m["rank"], m["forge_verdict"])
+            for m in members} == {
+        ("garp", "AAA", 1, "Survivor"), ("garp", "BBB", 2, "Watch"),
+        ("downside", "AAA", 1, "Survivor")}
+
+    bare = type("Context", (), {"runtime": {"model": {}}})()
+    assert stages.select_lowcap(bare) == {"members": []}

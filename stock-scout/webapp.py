@@ -47,6 +47,7 @@ from pathlib import Path
 
 import deskwork
 import inversion  # noqa: F401 — build_rows runs it via picks
+import lowcap as lowcap_mod
 import picks
 import pit
 import scorecard
@@ -583,6 +584,21 @@ def assemble(*, sec_data: str, prices_dir: str | None, universe: str, as_of: str
          for r in rows], len(rows))
     top_rank = {r["symbol"]: i + 1 for i, r in enumerate(top_rows)}
 
+    # The Low-Cap Desk (docs/plans/2026-08-14-low-cap-desk-design.md): a separate lane
+    # with its own constitution — Survive (the Forge) → four lenses side by side, never
+    # merged. Computed over the same bundles; nothing here touches the main desk's rows.
+    log("lowcap: the Forge + four lenses over the lane's band …")
+    lane_rows, lane_by_symbol = [], {}
+    for bundle in bundles:
+        if not lowcap_mod.eligible(bundle)[0]:
+            continue
+        lane = lowcap_mod.analyze(bundle, prices=prices)
+        symbol = bundle["symbol"]
+        lane_rows.append({"symbol": symbol, "lowcap": lane,
+                          "inversion": (by_symbol.get(symbol) or {}).get("inversion")})
+        lane_by_symbol[symbol] = lane
+    lane_lists = lowcap_mod.shortlists(lane_rows)
+
     import registry as registry_mod
     registry_by_symbol, prov_by_symbol, composites_by_symbol = {}, {}, {}
     for bundle in bundles:
@@ -662,6 +678,24 @@ def assemble(*, sec_data: str, prices_dir: str | None, universe: str, as_of: str
             "pxd": bundle.get("price_as_of"), "pxa": bundle.get("price_age_days"),
             "pxn": bundle.get("price_note"),
         }
+        lane = lane_by_symbol.get(symbol)
+        if lane is not None:
+            details[symbol]["lowcap"] = {
+                "eligibility": lane["eligibility"],
+                "forge": {"verdict": lane["forge"]["verdict"],
+                          "meaning": lane["forge"]["verdict_meaning"],
+                          "findings": lane["forge"]["findings"],
+                          "coverage": {k: lane["forge"]["coverage"][k]
+                                       for k in ("severe", "caution", "thin",
+                                                 "measured_count", "total")}},
+                "lenses": {name: {"verdict": lens_r["verdict"],
+                                  "detail": lens_r["detail"]}
+                           for name, lens_r in lane["lenses"].items()},
+                "metrics": {k: _round(lane["metrics"].get(k))
+                            for k in ("ncav", "graham_number", "peg",
+                                      "norm_fcf_yield_pct", "ev_ebit",
+                                      "share_trend_pct")},
+            }
 
     # Charts. Coverage before/after is measured across the ENRICHED names only, and the
     # chart says so — a delta across names tier 2 never touched would flatter the chain.
@@ -711,6 +745,45 @@ def assemble(*, sec_data: str, prices_dir: str | None, universe: str, as_of: str
         for r in top_rows if r["symbol"] in drafts_by_symbol
         and drafts_by_symbol[r["symbol"]].get("accepted")]
 
+    # The lane's page model: counts, the four shortlists (never merged), and a compact
+    # per-name table. Forged-out names stay VISIBLE with their named findings — the
+    # Scout still scores and shows them; they simply take no work order.
+    forge_counts = {"Survivor": 0, "Watch": 0, "Unknown": 0, "Forged-out": 0}
+    for row in lane_rows:
+        forge_counts[row["lowcap"]["forge"]["verdict"]] += 1
+    _forge_sort = {"Survivor": 0, "Watch": 1, "Unknown": 2, "Forged-out": 3}
+    lowcap_model = {
+        "band": {"min_mcap": lowcap_mod.LOWCAP_MIN_MARKET_CAP,
+                 "max_mcap": lowcap_mod.LOWCAP_MAX_MARKET_CAP,
+                 "min_price": lowcap_mod.LOWCAP_MIN_PRICE},
+        "per_lens": lowcap_mod.SHORTLIST_PER_LENS,
+        "counts": {"eligible": len(lane_rows),
+                   "survivor": forge_counts["Survivor"],
+                   "watch": forge_counts["Watch"],
+                   "unknown": forge_counts["Unknown"],
+                   "forged_out": forge_counts["Forged-out"]},
+        "shortlists": {
+            lens: [{"sym": e["symbol"],
+                    "name": (by_symbol.get(e["symbol"]) or {}).get("name") or "",
+                    "mc": _round((bundle_by_symbol.get(e["symbol"]) or {})
+                                 .get("market_cap"), 0),
+                    "detail": e["detail"], "forge_verdict": e["forge_verdict"]}
+                   for e in entries]
+            for lens, entries in lane_lists.items()},
+        "rows": sorted(
+            ({"s": row["symbol"],
+              "n": (by_symbol.get(row["symbol"]) or {}).get("name") or "",
+              "mc": _round((bundle_by_symbol.get(row["symbol"]) or {})
+                           .get("market_cap"), 0),
+              "fv": row["lowcap"]["forge"]["verdict"],
+              "sev": row["lowcap"]["forge"]["coverage"]["severe"],
+              "cau": row["lowcap"]["forge"]["coverage"]["caution"],
+              "lv": {name: row["lowcap"]["lenses"][name]["verdict"]
+                     for name in lowcap_mod.LENS_ORDER}}
+             for row in lane_rows),
+            key=lambda r: (_forge_sort.get(r["fv"], 9), r["s"])),
+    }
+
     # Coverage is stated, not implied: a universe bigger than what has been fetched is
     # the normal state while the nightly sweep converges, and a page that showed only
     # the scored names would quietly read as "this is everything".
@@ -731,9 +804,11 @@ def assemble(*, sec_data: str, prices_dir: str | None, universe: str, as_of: str
                    "committed": len(theses["committed"]),
                    "enriched": len(pre_registry),
                    "universe": universe_size,
+                   "lowcap": len(lane_rows),
                    "bootstrapped": len(bootstrap_bundles), "pending": pending,
                    "enriched_filled": sum(1 for s in enriched.values() if s)},
         "rows": compact, "details": details,
+        "lowcap": lowcap_model,
         "charts": {"bands": bands, "verdicts": verdicts, "coverage": cov},
         "units": {k: v[1] for k, v in thesis_mod.METRICS.items()},
         "thesis": {"top": top_list, "drafts": theses["drafts"], "readers": readers},
@@ -1456,6 +1531,7 @@ function renderPanel(sym, row, d){
     ${veto}
     <details class="fold"><summary>All seven probes</summary><div class="fbody">${probes}</div></details>
     ${flags ? `<h3>Flags</h3><div>${flags}</div>` : ''}
+    ${lowcapPanelBlock(d.lowcap)}
     ${compositesBlock(d.composites)}
     <h3>Sources</h3>
     <div style="font-size:12.5px">
@@ -1680,6 +1756,34 @@ async function runAction(btn, action, symbol){
   }
 }
 
+function lowcapPanelBlock(lc){
+  if (!lc) return '';
+  const findings = (lc.forge.findings || []).map(f => `<blockquote>${esc(f)}</blockquote>`).join('');
+  const lensRows = Object.entries(lc.lenses || {}).map(([name, l]) => `
+    <div class="probe"><div class="ph">
+      ${l.verdict === 'speaks' ? pill('speaks', 'p-good')
+        : l.verdict === 'refuses' ? pill('refuses', 'p-quiet') : pill('silent', 'p-ghost')}
+      <b style="font-size:12px">${esc((LENS_META[name] || [name])[0])}</b></div>
+      <div class="pd">${esc(l.detail || '')}</div></div>`).join('');
+  const met = lc.metrics || {};
+  const metLine = [
+    met.ncav != null ? `NCAV ${fmtMc(met.ncav)}` : null,
+    met.graham_number != null ? `Graham № ${met.graham_number}` : null,
+    met.peg != null ? `PEG ${met.peg}` : null,
+    met.norm_fcf_yield_pct != null ? `norm. FCF yield ${met.norm_fcf_yield_pct}%` : null,
+    met.ev_ebit != null ? `EV/EBIT ${met.ev_ebit}` : null,
+    met.share_trend_pct != null ? `share trend ${met.share_trend_pct}%/yr` : null,
+  ].filter(Boolean).join(' · ');
+  return `
+    <h3>The Low-Cap Desk — ${esc(lc.forge.verdict)}</h3>
+    <div style="font-size:12px;color:var(--text2)">${esc(lc.forge.meaning || '')}
+      · ${lc.forge.coverage.measured_count}/${lc.forge.coverage.total} probes measured
+      ${lc.forge.coverage.thin ? ' · evidence is thin, said out loud' : ''}</div>
+    <div class="prose">${findings}</div>
+    <details class="fold"><summary>The four lenses — side by side, never merged</summary>
+      <div class="fbody">${lensRows}
+      ${metLine ? `<div class="mdet" style="margin-top:6px">${esc(metLine)}</div>` : ''}</div></details>`;
+}
 function compositesBlock(c){
   if (!c) return '';
   const p = c.piotroski || {}, a = c.altman || {};
@@ -2085,7 +2189,7 @@ function setTab(tab, push){
 function route(){
   const h = location.hash.replace(/^#/, '');
   const [tab, sym] = h.split('/');
-  if (['scout', 'thesis', 'portfolio_monitor'].includes(tab)) setTab(tab, false);
+  if (['scout', 'thesis', 'portfolio_monitor', 'lowcap'].includes(tab)) setTab(tab, false);
   if (tab === 'thesis' && sym && readerBySymbol(sym)) {
     if (state.thesisOpen !== sym) openThesisReader(sym, false);
     if (state.open) closePanel(false);
@@ -2139,6 +2243,7 @@ function initKeys(){
     else if (e.key === '1') setTab('scout');
     else if (e.key === '2') setTab('thesis');
     else if (e.key === '3') setTab('portfolio_monitor');
+    else if (e.key === '4') setTab('lowcap');
     else if (e.key === 't') $('#themeBtn').click();
     else if ((e.key === 'j' || e.key === 'k') && state.open){
       const i = state.view.findIndex(r => r.s === state.open);
@@ -2148,6 +2253,59 @@ function initKeys(){
   });
   document.addEventListener('click', e => {
     $$('details.dd[open]').forEach(d => { if (!d.contains(e.target)) d.open = false; });
+  });
+}
+
+/* ---------- the Low-Cap Desk tab ---------- */
+const LENS_META = {
+  graham: ['Graham — deep value', 'net-nets and the Graham Number: an asset floor under the price'],
+  garp: ['GARP — Lynch/Slater', 'growth in a band at a PEG under 1, cash-backed and lightly geared'],
+  downside: ['Downside — Pabrai/Burry', 'the floor first, then cheapness on normalized owner-FCF or EV/EBIT'],
+  compounder: ['Compounder — Cassel/Fisher', 'profitable before scale, self-funding, real returns on capital'],
+};
+const FORGE_CLS = {'Survivor': 'p-good', 'Watch': 'p-warn', 'Unknown': 'p-quiet',
+                   'Forged-out': 'p-crit'};
+const LENS_MARK = {speaks: ['●', 'speaks'], silent: ['○', 'silent'],
+                   refuses: ['—', 'refuses: inputs unmeasured']};
+function renderLowcapTab(){
+  const L = S.lowcap;
+  if (!L){ return; }
+  $('#cLowcap').textContent = `${L.counts.eligible} in the band`;
+  $('#kLowEligible').textContent = L.counts.eligible.toLocaleString();
+  $('#kLowSurvivor').textContent = L.counts.survivor.toLocaleString();
+  $('#kLowWatch').textContent =
+    `${L.counts.watch.toLocaleString()} / ${L.counts.unknown.toLocaleString()}`;
+  $('#kLowForged').textContent = L.counts.forged_out.toLocaleString();
+  $('#lowcapLists').innerHTML = Object.keys(LENS_META).map(lens => {
+    const entries = (L.shortlists || {})[lens] || [];
+    const items = entries.map(e => `
+      <div class="probe" data-lowcap-sym="${esc(e.sym)}" style="cursor:pointer">
+        <div class="ph"><b style="font-size:12px">${esc(e.sym)}</b>
+          <span class="muted" style="font-size:11px">${esc(e.name)}</span>
+          ${e.mc != null ? pill(fmtMc(e.mc), 'p-ghost') : ''}
+          ${pill(e.forge_verdict, FORGE_CLS[e.forge_verdict] || 'p-quiet')}</div>
+        <div class="pd">${esc(e.detail || '')}</div>
+      </div>`).join('');
+    return `<div class="card chart"><div class="hd"><h2>${esc(LENS_META[lens][0])}</h2>
+      <span class="muted">${esc(LENS_META[lens][1])}</span></div>
+      <div style="padding:0 12px 12px">${items ||
+        '<div class="empty" style="padding:14px 4px">No name qualifies today — the lens stays silent rather than stretching. That is the expected outcome most days.</div>'}</div></div>`;
+  }).join('');
+  const mark = v => { const m = LENS_MARK[v] || ['·', v || '—'];
+    return `<span data-tip="${esc(m[1])}">${m[0]}</span>`; };
+  $('#lowcapBody').innerHTML = (L.rows || []).map(r => `
+    <tr data-lowcap-sym="${esc(r.s)}" tabindex="0" style="cursor:pointer">
+      <td><b>${esc(r.s)}</b></td><td class="hide-m">${esc(r.n)}</td>
+      <td class="r num">${r.mc != null ? fmtMc(r.mc) : '—'}</td>
+      <td>${pill(r.fv, FORGE_CLS[r.fv] || 'p-quiet')}</td>
+      <td class="r num">${r.sev}·${r.cau}</td>
+      <td>${mark(r.lv.graham)}</td><td>${mark(r.lv.garp)}</td>
+      <td>${mark(r.lv.downside)}</td><td>${mark(r.lv.compounder)}</td>
+    </tr>`).join('');
+  $('#lowcapCount').textContent = `${(L.rows || []).length} names in the band`;
+  $('#tab-lowcap').addEventListener('click', e => {
+    const t = e.target.closest('[data-lowcap-sym]');
+    if (t) openPanel(t.dataset.lowcapSym);
   });
 }
 
@@ -2199,7 +2357,7 @@ function boot(){
   $('#ovbg').onclick = closePanel;
   initTheme(); initTip(); initKeys();
   let rsz; addEventListener('resize', () => { clearTimeout(rsz); rsz = setTimeout(drawCharts, 200); });
-  renderThesisTab(); renderPortfolioMonitorTab();
+  renderThesisTab(); renderPortfolioMonitorTab(); renderLowcapTab();
   applyFilters(); drawCharts();
   addEventListener('hashchange', route);
   route();
@@ -2237,6 +2395,9 @@ TEMPLATE = """<!DOCTYPE html>
     <span class="chev">›</span>
     <button class="step" data-tab="portfolio_monitor"><span class="circ">3</span>
       <span><span class="lbl">Model portfolio &amp; monitor</span><span class="cnt" id="cMonitor"></span></span></button>
+    <span class="chev" style="opacity:.35">·</span>
+    <button class="step" data-tab="lowcap"><span class="circ">4</span>
+      <span><span class="lbl">The Low-Cap Desk</span><span class="cnt" id="cLowcap"></span></span></button>
   </nav>
   <div class="notice"><b>Illustratieve modelportefeuille, geen financieel advies.</b></div>
 </header>
@@ -2360,13 +2521,51 @@ python monitor.py run --sec-data &lt;dir&gt; --prices &lt;dir&gt; \\
   </div>
 </section>
 
+<!-- ============ 4 · LOW-CAP DESK ============ -->
+<section class="tabpane" id="tab-lowcap" style="display:none">
+  <p class="intro"><b>4 · The Low-Cap Desk — a different game with its own constitution.</b>
+  There is no size premium; small caps are a <em>hunting ground</em>, where mispricing is
+  largest because nobody is looking — and where junk is the default state. So this lane
+  asks its own questions, in its own order: <b>Survive first</b> — the Forge probes
+  dilution, cash runway, distress and delisting jeopardy, and any severe finding removes
+  the name before any upside analysis (shown here, with the finding named). Then
+  <b>four lenses, side by side and never merged</b>: Graham deep value, GARP
+  (Lynch/Slater), downside-first value (Pabrai/Burry) and the quality compounder
+  (Cassel/Fisher). Each lens speaks, stays silent, or refuses when its inputs are
+  unmeasured. There is no combined low-cap score anywhere on this page — a name on two
+  lists is simply, visibly, on two lists.</p>
+  <div class="kpis">
+    <div class="kpi"><label>In the band</label><b id="kLowEligible">—</b><div class="d">$50M–$2B · price ≥ $1 · listed exchanges</div></div>
+    <div class="kpi"><label>Survivors</label><b id="kLowSurvivor">—</b><div class="d">no severe probe, at most one caution</div></div>
+    <div class="kpi"><label>Watch / Unknown</label><b id="kLowWatch">—</b><div class="d">thin margins named · thin evidence said out loud</div></div>
+    <div class="kpi"><label>Forged out</label><b id="kLowForged">—</b><div class="d">a named way this takes your capital — no work order</div></div>
+  </div>
+  <div class="chartrow" id="lowcapLists"></div>
+  <div class="card">
+    <div class="hd"><h2>The lane</h2><span class="muted" id="lowcapCount"></span></div>
+    <div class="tscroll">
+      <table class="data">
+        <thead><tr>
+          <th>Ticker</th><th class="hide-m">Name</th><th class="r">Mkt cap</th>
+          <th>Forge</th><th class="r" title="severe · caution findings">Sev·Cau</th>
+          <th>Graham</th><th>GARP</th><th>Downside</th><th>Compounder</th>
+        </tr></thead>
+        <tbody id="lowcapBody"></tbody>
+      </table>
+    </div>
+    <div class="ft"><span></span><span>· sorted Survivor → Watch → Unknown → Forged-out ·
+      a lens that “refuses” is missing the inputs to judge — said out loud rather than
+      guessed · click a row for the full drill-down</span></div>
+  </div>
+</section>
+
 <footer>
   <b>The system never executes trades.</b> (FR11) · Conviction and
   circle-of-competence never appear on this page — they are the owner's, asked at the Gate
   (FR9) · Data: bulk SEC export + live EDGAR companyfacts (tier 2, as-filed) · generated
   __GENERATED__ by <code>python webapp.py</code> ·
   <a href="site/index.html">system explainer</a> · keyboard: <code>/</code> search ·
-  <code>1 2 3</code> tabs · <code>j k</code> walk rows · <code>t</code> theme
+  <code>1 2 3 4</code> tabs · <code>j k</code> walk rows · <code>t</code> theme
 </footer>
 </div>
 

@@ -18,6 +18,13 @@ from agentcy import production as state
 Stage = Callable[["ProductionContext"], dict[str, Any]]
 
 
+def _no_lowcap_selection(context: "ProductionContext") -> dict[str, Any]:
+    """Default select_lowcap: an explicitly empty selection. A default (rather than a
+    required field) keeps every existing ProductionStages construction valid; the local
+    stage set overrides it with the real lane selection."""
+    return {"members": []}
+
+
 @dataclass(frozen=True)
 class ProductionStages:
     refresh: Stage
@@ -28,6 +35,9 @@ class ProductionStages:
     build_site: Stage
     validate: Stage
     publish: Stage
+    # The Low-Cap Desk's selection (2026-08-14 design) — runs right after select_top in
+    # STAGES; declared last only because dataclass defaults must trail.
+    select_lowcap: Stage = _no_lowcap_selection
 
 
 @dataclass
@@ -63,7 +73,8 @@ class StageFailure(RuntimeError):
 
 class ProductionOrchestrator:
     STAGES = (
-        "refresh", "score", "select_top", "evaluate_theses", "monitor", "build_site",
+        "refresh", "score", "select_top", "select_lowcap", "evaluate_theses",
+        "monitor", "build_site",
     )
 
     def __init__(self, conn: sqlite3.Connection, stages: ProductionStages, *,
@@ -80,6 +91,13 @@ class ProductionOrchestrator:
                 "run_id": context.run_id,
                 "security_key": member["security_key"], "symbol": member["symbol"],
                 "rank": member["rank"], "score": member["score"],
+            })
+        for member in context.results.get("select_lowcap", {}).get("members", []):
+            db.append_production_lowcap_member(self.conn, {
+                "run_id": context.run_id,
+                "lens": member["lens"],
+                "security_key": member["security_key"], "symbol": member["symbol"],
+                "rank": member["rank"], "forge_verdict": member["forge_verdict"],
             })
         for evaluation in context.results["evaluate_theses"].get("evaluations", []):
             db.append_production_thesis_evaluation(self.conn, {

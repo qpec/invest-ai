@@ -635,3 +635,50 @@ class TestCardCarriesTheJudgement:
         page = self._page(tmp_path)
         assert "more than ${e.implied}%/yr" in page
         assert "less than ${e.implied}%/yr" in page
+
+
+class TestLowcapTab:
+    """The Low-Cap Desk's surface (2026-08-14 design): a fourth tab in the ONE
+    generator, four shortlists side by side, and graceful absence on pre-lane models."""
+
+    def _model(self):
+        model = TestSite()._model()
+        model["counts"]["lowcap"] = 1
+        model["lowcap"] = {
+            "band": {"min_mcap": 50e6, "max_mcap": 2e9, "min_price": 1.0},
+            "per_lens": 3,
+            "counts": {"eligible": 1, "survivor": 1, "watch": 0, "unknown": 0,
+                       "forged_out": 0},
+            "shortlists": {
+                "graham": [], "garp": [],
+                "downside": [{"sym": "AAA", "name": "Alpha", "mc": 4e8,
+                              "detail": "Downside protected and cheap.",
+                              "forge_verdict": "Survivor"}],
+                "compounder": [],
+            },
+            "rows": [{"s": "AAA", "n": "Alpha", "mc": 4e8, "fv": "Survivor",
+                      "sev": 0, "cau": 0,
+                      "lv": {"graham": "silent", "garp": "refuses",
+                             "downside": "speaks", "compounder": "silent"}}],
+        }
+        return model
+
+    def test_the_tab_ships_with_the_lane_model(self, tmp_path):
+        out = webapp.write_site(self._model(), tmp_path)
+        page = out.read_text(encoding="utf-8")
+        assert 'id="tab-lowcap"' in page and 'data-tab="lowcap"' in page
+        payload = page.split("window.__SITE__ = ", 1)[1].split("</script>", 1)[0]
+        assert '"shortlists"' in payload and '"forge_verdict":"Survivor"' in payload
+        # The four lenses are named, side by side; no combined score exists anywhere.
+        for label in ("Graham", "GARP", "Downside", "Compounder"):
+            assert label in page
+        assert "lowcap_score" not in payload and '"blend"' not in payload
+
+    def test_a_pre_lane_model_still_renders(self, tmp_path):
+        """A model without the lowcap section (older snapshot re-rendered) must build a
+        working page — the tab renders empty, the boot must not crash."""
+        model = TestSite()._model()
+        out = webapp.write_site(model, tmp_path)
+        page = out.read_text(encoding="utf-8")
+        assert 'id="tab-lowcap"' in page
+        assert "renderLowcapTab" in page

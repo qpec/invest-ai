@@ -282,6 +282,9 @@ _PRODUCTION_RUN_COLS = frozenset({
 _PRODUCTION_TOP_MEMBER_COLS = frozenset({
     "run_id", "security_key", "symbol", "rank", "score",
 })
+_PRODUCTION_LOWCAP_MEMBER_COLS = frozenset({
+    "run_id", "lens", "security_key", "symbol", "rank", "forge_verdict",
+})
 _PRODUCTION_THESIS_EVALUATION_COLS = frozenset({
     "run_id", "security_key", "symbol", "input_fingerprint", "outcome",
     "evaluated_at", "reason_code", "thesis_version",
@@ -300,6 +303,11 @@ def append_production_run(conn, row: Mapping) -> int:
 def append_production_top_member(conn, row: Mapping) -> int:
     return _insert(conn, "production_top_member", _checked(
         row, _PRODUCTION_TOP_MEMBER_COLS, "production_top_member"))
+
+
+def append_production_lowcap_member(conn, row: Mapping) -> int:
+    return _insert(conn, "production_lowcap_member", _checked(
+        row, _PRODUCTION_LOWCAP_MEMBER_COLS, "production_lowcap_member"))
 
 
 def append_production_thesis_evaluation(conn, row: Mapping) -> int:

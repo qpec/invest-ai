@@ -30,6 +30,10 @@ class ReleaseInput:
     manifest_exists: bool
     data_quality_passed: bool
     thesis_evaluations_passed: bool = True
+    # The Low-Cap Desk (2026-08-14): the lane must be PRESENT on the page it ships with —
+    # an honestly empty selection passes, a silently missing section does not. Defaulted
+    # True so pre-lane callers and tests stay valid.
+    lowcap_section_present: bool = True
 
 
 @dataclass(frozen=True)
@@ -128,6 +132,7 @@ def validate_release(value: ReleaseInput) -> ReleaseResult:
         "site_complete": value.index_exists and value.manifest_exists,
         "data_quality_passed": value.data_quality_passed,
         "thesis_evaluations_passed": value.thesis_evaluations_passed,
+        "lowcap_section_present": value.lowcap_section_present,
         "top_thesis_readers_complete": len(readers) == value.top_members,
         "top_thesis_reader_routes_unique": _reader_routes_unique(readers),
         "top_thesis_reader_sections_complete": _reader_sections_complete(readers),
